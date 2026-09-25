@@ -17,16 +17,22 @@ Both run on the Mini (`MINI=<host>` overrides `mini`) and copy their results bac
 1. **Scenario** (`HerdrDemo/Scenarios/`): the fake host's sessions, panes, terminal screens
    and timeline. See `Scenarios/README.md` for the format and the `.screen` markup.
 2. **Capture** (`capture/capture.mjs`, run with bun): for each device in `scenes.json`,
-   boots the simulator, overrides the status bar (9:41, full battery), installs the app and
-   launches each scene with `-HerdwickDemo studio` and the scene's arguments. It waits
-   for the app to write `Documents/demo-ready`, then takes the screenshot and checks its
-   size. The preview launches with `-HerdwickHold YES`, starts recording, releases the
-   hold by writing `Documents/demo-go`, and records the scenario's duration plus 1.5 s.
+   boots the simulator, overrides the status bar (9:41, full battery), reinstalls the app
+   and launches each scene with `-HerdwickDemo <scenario>` (the scene's `scenario`, default
+   `studio`) and the scene's arguments. It waits for the app to write `Documents/demo-ready`,
+   then takes the screenshot and checks its size. The preview launches with
+   `-HerdwickHold YES`, starts recording, releases the hold by writing `Documents/demo-go`,
+   and records the scenario's timeline plus 1.5 s.
    Output: `build/captures/<device>/<scene>.png`, `preview.mov` and `preview.json`.
 3. **Compose** (`compose/render.mjs`, run with node; bun's Playwright crashes Chrome on
    macOS): lays captures into HTML at the exact output size, renders them in Chrome, then
    strips alpha with ImageMagick. Videos go through ffmpeg. Layout and copy live in
    `slides.json`. `node render.mjs stills|previews|social|press` renders only those parts.
+   Stills are one panorama per device (`slides.json` › `panorama`): a single canvas with
+   a grid, colour pools and a gold thread, where a fragment of the next slide's screen
+   straddles each seam. It is rendered once to `build/work/panorama-<device>.png` and cut
+   into slides, so the seams line up. Each slide picks a `layout` (`full`, `detail`,
+   `trio`), and `crop`/`callout` regions are fractions of the capture.
 4. **Validate** (`compose/validate.mjs`): checks pixel sizes, no alpha, and the App Preview
    video specs (H.264, 30 fps, 15–30 s, stereo AAC).
 
@@ -35,7 +41,7 @@ Both run on the Mini (`MINI=<host>` overrides `mini`) and copy their results bac
 | Argument | Effect |
 | --- | --- |
 | `-HerdwickDemo <scenario>` | Connect to the bundled demo scenario instead of a real host. |
-| `-HerdwickScene <scene>` | `agents`, `workspaces`, `pane:<id>`, `onboarding`, `tailscale` or `settings`. |
+| `-HerdwickScene <scene>` | `agents`, `workspaces`, `pane:<id>` (chat when the agent has a transcript), `terminal:<id>`, `onboarding`, `tailscale` or `settings`. |
 | `-HerdwickDraft <text>` | Pre-fill the open pane's composer. |
 | `-HerdwickDrop YES` | Drop the link once live, to show reconnecting. |
 | `-HerdwickHold YES` | Hold the timeline until `Documents/demo-go` exists. |

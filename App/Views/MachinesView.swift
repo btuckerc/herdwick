@@ -70,7 +70,8 @@ struct MachinesView: View {
                         if let agent = snapshot.agents.first(where: { $0.paneID == pane.id }) {
                             let address = connection.address(paneID: pane.id)
                             NavigationLink(value: agent.hasTranscript ? Route.conversation(address) : Route.terminal(address)) {
-                                AgentRow(agent: agent, workspace: snapshot.workspaces.first(where: { $0.id == tab.workspaceID })?.label,
+                                AgentRow(agent: agent, status: connection.presentedStatus(agent),
+                                         workspace: snapshot.workspaces.first(where: { $0.id == tab.workspaceID })?.label,
                                          unread: connection.isUnread(agent), host: settings.allHosts ? connection.profile.name : nil)
                             }
                         } else {

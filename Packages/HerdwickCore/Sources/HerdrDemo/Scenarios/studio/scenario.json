@@ -14,30 +14,32 @@
     ],
     "tabs": [
       {"tab_id": "t1", "workspace_id": "w1", "number": 1, "label": "deploy", "focused": true, "agent_status": "blocked"},
-      {"tab_id": "t2", "workspace_id": "w1", "number": 2, "label": "review", "focused": false, "agent_status": "working"},
+      {"tab_id": "t2", "workspace_id": "w1", "number": 2, "label": "review", "focused": false, "agent_status": "done"},
       {"tab_id": "t3", "workspace_id": "w2", "number": 1, "label": "backfill", "focused": true, "agent_status": "done"},
       {"tab_id": "t4", "workspace_id": "w3", "number": 1, "label": "rate-limits", "focused": true, "agent_status": "working"},
       {"tab_id": "t5", "workspace_id": "w3", "number": 2, "label": "shell", "focused": false, "agent_status": "idle"},
       {"tab_id": "t6", "workspace_id": "w4", "number": 1, "label": "reference", "focused": true, "agent_status": "idle"}
     ],
     "panes": [
-      {"pane_id": "p1", "workspace_id": "w1", "tab_id": "t1", "focused": true, "agent_status": "blocked", "agent": "claude", "display_agent": "claude", "cwd": "/Users/alex/src/web-dashboard", "label": null, "terminal_title_stripped": "Deploy to staging", "revision": 14},
-      {"pane_id": "p2", "workspace_id": "w1", "tab_id": "t2", "focused": false, "agent_status": "working", "agent": "codex", "display_agent": "codex", "cwd": "/Users/alex/src/web-dashboard", "label": null, "terminal_title_stripped": "Review PR #412", "revision": 9},
+      {"pane_id": "p1", "workspace_id": "w1", "tab_id": "t1", "focused": true, "agent_status": "blocked", "agent": "omp", "display_agent": "omp", "cwd": "/Users/alex/src/web-dashboard", "label": null, "terminal_title_stripped": "Deploy to staging", "revision": 14},
+      {"pane_id": "p2", "workspace_id": "w1", "tab_id": "t2", "focused": false, "agent_status": "done", "agent": "omp", "display_agent": "omp", "cwd": "/Users/alex/src/web-dashboard", "label": null, "terminal_title_stripped": "Review PR #412", "revision": 9},
       {"pane_id": "p3", "workspace_id": "w2", "tab_id": "t3", "focused": true, "agent_status": "working", "agent": "codex", "display_agent": "codex", "cwd": "/Users/alex/src/data-pipeline", "label": null, "terminal_title_stripped": "Backfill March orders", "revision": 21},
       {"pane_id": "p4", "workspace_id": "w2", "tab_id": "t3", "focused": false, "agent_status": "done", "agent": "claude", "display_agent": "claude", "cwd": "/Users/alex/src/data-pipeline", "label": null, "terminal_title_stripped": "Fix flaky retry test", "revision": 30},
-      {"pane_id": "p5", "workspace_id": "w3", "tab_id": "t4", "focused": true, "agent_status": "working", "agent": "opencode", "display_agent": "opencode", "cwd": "/Users/alex/src/api", "label": null, "terminal_title_stripped": "Token-bucket rate limiter", "revision": 17},
+      {"pane_id": "p5", "workspace_id": "w3", "tab_id": "t4", "focused": true, "agent_status": "working", "agent": "omp", "display_agent": "omp", "cwd": "/Users/alex/src/api", "label": null, "terminal_title_stripped": "Token-bucket rate limiter", "revision": 17},
       {"pane_id": "p6", "workspace_id": "w3", "tab_id": "t5", "focused": false, "agent_status": "idle", "agent": null, "display_agent": null, "cwd": "/Users/alex/src/api", "label": null, "terminal_title_stripped": "zsh", "revision": 3},
       {"pane_id": "p7", "workspace_id": "w4", "tab_id": "t6", "focused": true, "agent_status": "idle", "agent": "claude", "display_agent": "claude", "cwd": "/Users/alex/src/docs", "label": null, "terminal_title_stripped": "API reference pass", "revision": 6}
     ],
     "agents": [
-      {"pane_id": "p1", "workspace_id": "w1", "tab_id": "t1", "agent_status": "blocked", "agent": "claude", "display_agent": "claude", "name": null, "cwd": "/Users/alex/src/web-dashboard", "terminal_title_stripped": "Deploy to staging", "focused": true, "state_change_seq": 14},
-      {"pane_id": "p2", "workspace_id": "w1", "tab_id": "t2", "agent_status": "working", "agent": "codex", "display_agent": "codex", "name": null, "cwd": "/Users/alex/src/web-dashboard", "terminal_title_stripped": "Review PR #412", "focused": false, "state_change_seq": 9},
+      {"pane_id": "p1", "workspace_id": "w1", "tab_id": "t1", "agent_status": "blocked", "agent": "omp", "display_agent": "omp", "name": null, "cwd": "/Users/alex/src/web-dashboard", "terminal_title_stripped": "Deploy to staging", "focused": true, "state_change_seq": 14},
+      {"pane_id": "p2", "workspace_id": "w1", "tab_id": "t2", "agent_status": "done", "agent": "omp", "display_agent": "omp", "name": null, "cwd": "/Users/alex/src/web-dashboard", "terminal_title_stripped": "Review PR #412", "focused": false, "state_change_seq": 9},
       {"pane_id": "p3", "workspace_id": "w2", "tab_id": "t3", "agent_status": "working", "agent": "codex", "display_agent": "codex", "name": null, "cwd": "/Users/alex/src/data-pipeline", "terminal_title_stripped": "Backfill March orders", "focused": true, "state_change_seq": 21},
       {"pane_id": "p4", "workspace_id": "w2", "tab_id": "t3", "agent_status": "done", "agent": "claude", "display_agent": "claude", "name": null, "cwd": "/Users/alex/src/data-pipeline", "terminal_title_stripped": "Fix flaky retry test", "focused": false, "state_change_seq": 30},
-      {"pane_id": "p5", "workspace_id": "w3", "tab_id": "t4", "agent_status": "working", "agent": "opencode", "display_agent": "opencode", "name": null, "cwd": "/Users/alex/src/api", "terminal_title_stripped": "Token-bucket rate limiter", "focused": true, "state_change_seq": 17},
+      {"pane_id": "p5", "workspace_id": "w3", "tab_id": "t4", "agent_status": "working", "agent": "omp", "display_agent": "omp", "name": null, "cwd": "/Users/alex/src/api", "terminal_title_stripped": "Token-bucket rate limiter", "focused": true, "state_change_seq": 17},
       {"pane_id": "p7", "workspace_id": "w4", "tab_id": "t6", "agent_status": "idle", "agent": "claude", "display_agent": "claude", "name": null, "cwd": "/Users/alex/src/docs", "terminal_title_stripped": "API reference pass", "focused": true, "state_change_seq": 6}
     ]
   },
+  "transcripts": {"p1": "transcripts/p1.jsonl", "p2": "transcripts/p2.jsonl", "p5": "transcripts/p5.jsonl"},
+  "childTranscripts": {"p5": {"redis-check": "transcripts/redis-check.jsonl", "boundary-tests": "transcripts/boundary-tests.jsonl"}},
   "screens": {
     "p1": "screens/p1-question.screen",
     "p2": "screens/p2-review.screen",
@@ -59,12 +61,16 @@
   },
   "timeline": [
     {"on": "send_input", "pane": "p1", "then": [
+      {"after": 0.3, "do": "append", "pane": "p1", "records": "transcripts/p1-reply.jsonl"},
+      {"after": 4.5, "do": "append", "pane": "p1", "records": "transcripts/p1-done.jsonl"},
       {"after": 0.3, "do": "screen", "pane": "p1", "screen": "screens/p1-migrating.screen"},
       {"after": 0.4, "do": "status", "pane": "p1", "status": "working"},
       {"after": 4.5, "do": "screen", "pane": "p1", "screen": "screens/p1-deployed.screen"},
       {"after": 4.6, "do": "status", "pane": "p1", "status": "done"}
     ]},
     {"on": "send_keys", "pane": "p1", "then": [
+      {"after": 0.3, "do": "append", "pane": "p1", "records": "transcripts/p1-reply.jsonl"},
+      {"after": 4.5, "do": "append", "pane": "p1", "records": "transcripts/p1-done.jsonl"},
       {"after": 0.3, "do": "screen", "pane": "p1", "screen": "screens/p1-migrating.screen"},
       {"after": 0.4, "do": "status", "pane": "p1", "status": "working"},
       {"after": 4.5, "do": "screen", "pane": "p1", "screen": "screens/p1-deployed.screen"},

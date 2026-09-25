@@ -25,6 +25,7 @@ targets:
     platform: iOS
     sources:
       - App
+      - Shared
     dependencies:
       - package: HerdwickCore
         product: HerdrAPI
@@ -36,11 +37,23 @@ targets:
       # Built by scripts/mini/build-tailscalekit.sh; not checked in.
       - framework: Frameworks/TailscaleKit.xcframework
         embed: true
+      - target: HerdwickWidgets
+    entitlements:
+      path: App/Herdwick.entitlements
+      properties:
+        com.apple.security.application-groups: [group.dev.btuckerc.herdwick]
     info:
       path: App/Info.plist
       properties:
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: Herdwick connects to herdr on computers on your local network.
+        # Background refresh reconnects briefly to raise alerts and update widgets.
+        UIBackgroundModes: [fetch]
+        BGTaskSchedulerPermittedIdentifiers: [dev.btuckerc.herdwick.refresh]
+        # Alerts and widgets open an agent with herdwick://open?host=…&session=…&pane=…
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.btuckerc.herdwick
+            CFBundleURLSchemes: [herdwick]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.btuckerc.herdwick
@@ -54,3 +67,25 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         GENERATE_INFOPLIST_FILE: YES
+  HerdwickWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Widgets
+      - Shared
+    entitlements:
+      path: Widgets/HerdwickWidgets.entitlements
+      properties:
+        com.apple.security.application-groups: [group.dev.btuckerc.herdwick]
+    info:
+      path: Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: Herdwick
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.btuckerc.herdwick.widgets
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES

@@ -1,38 +1,32 @@
-Your coding agents keep working after you close the laptop. Herdwick is how you answer them when they stop.
+Your coding agent needs an answer. Send it from your phone.
+Herdwick connects to herdr on your own machines over SSH.
+Read agent conversations, review tool steps and reply from iPhone or iPad.
 
-Herdwick is a native iPhone and iPad client for herdr, the open-source terminal workspace your coding agents run in. It connects to your own machines, shows every agent herdr is tracking, and lets you read and answer any of them from wherever you are.
+ONE INBOX
+See agents across your saved hosts. The ones that need you come first.
 
-THE ONE THAT NEEDS YOU, FIRST
-Agents are grouped by attention: Needs you, Done, Working, Idle. A blocked agent rises to the top, and with Herdwick open your phone taps you the moment it happens.
+READ THE CONVERSATION
+View transcripts from omp, Claude Code and Codex as chat. Expand tool steps, plans and diffs. Open the terminal for other agents or unavailable transcripts.
 
-A REAL TERMINAL, SIZED FOR YOUR SCREEN
-Open any pane and see its live terminal as it looks on your machine: colours, prompts and full-screen TUIs intact.
+ANSWER IN PLACE
+Choose an answer to a supported question or permission prompt, or write a reply. The terminal is always available.
 
-ANSWER FROM THE COMPOSER
-Write a reply with the normal iOS keyboard and send it in one go. A key bar covers the keys agents ask for: Esc, Tab, arrows, Enter, Ctrl-C. Need more? Turn on typing and take over the pane.
+USE THE TERMINAL
+Live output, a message composer and keys for Esc, Tab, arrows, Enter and Ctrl-C. Optional typing mode takes control and resizes the host pane.
 
-TAILSCALE BUILT IN
-Sign in to your tailnet, pick a machine and connect with Tailscale SSH. No keys to copy, no VPN to switch on, no ports to open. The Tailscale app doesn't need to be installed.
+CONNECT YOUR MACHINES
+Use SSH with a device-generated key or password. Tailscale sign-in and a machine picker are built in; Tailscale SSH requires host and tailnet configuration. No extra Herdwick service to install.
 
-OR PLAIN SSH
-Add a host by address and use the key Herdwick makes on this device, or a password. The private key never leaves your iPhone or iPad.
+KEEP YOUR PLACE
+The last session snapshot stays visible while Herdwick reconnects. Choose from seven terminal themes, with separate light and dark settings.
 
-PICKS UP WHERE IT DROPPED
-Lose signal on the train and the last snapshot stays on screen while Herdwick reconnects, then updates in place.
+TRY THE DEMO
+Explore a scripted host before connecting your own. No Herdwick account required.
 
-YOUR TERMINAL, YOUR LOOK
-Herdwick Night and Day, Catppuccin Mocha and Latte, Tokyo Night, Gruvbox Dark and Solarized Light, with separate light and dark choices and adjustable font size.
-
-WORKS WITH THE AGENTS YOU ALREADY RUN
-Claude Code, Codex, opencode and anything else herdr detects. Herdwick doesn't wrap or replace them; it shows you their terminals.
-
-TRY IT FIRST
-No machine handy? Explore the built-in demo host: a scripted herdr session with agents to open and answer.
-
-PRIVATE BY DESIGN
-No account. No analytics. No servers of ours in the path. Herdwick runs herdr's own commands over SSH, installs nothing on your computer, and terminal output travels only between your device and your machine.
+YOUR CONNECTION
+The SSH private key stays in the device Keychain. Messages and attachments go to your host, not a Herdwick server. Optional Tailscale use is subject to its privacy policy.
 
 REQUIREMENTS
-A Mac or Linux machine running herdr, reachable over SSH directly or through your tailnet.
+Requires iOS 26 or later and a reachable Mac or Linux host running herdr. Coding agents run on your host, not on your phone.
 
-Herdwick is an independent project. It is not affiliated with, endorsed by or sponsored by the herdr project or Tailscale Inc. Tailscale is a registered trademark of Tailscale Inc.
+Herdwick is independent and is not affiliated with or endorsed by the herdr project or Tailscale Inc. Tailscale is a registered trademark of Tailscale Inc.

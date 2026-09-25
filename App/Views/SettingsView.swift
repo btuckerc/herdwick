@@ -62,6 +62,7 @@ struct SettingsView: View {
                 } footer: {
                     Text("Choose the inbox view, host scope, grouping, sort order, and whether read idle agents are folded.")
                 }
+                NotificationSettings()
                 Section("Terminal") {
                     Picker("Font", selection: $settings.font) {
                         ForEach(TerminalFont.allCases) { Text($0.label).tag($0) }
@@ -135,6 +136,42 @@ struct SettingsView: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
             .sheet(isPresented: $addingHost) { AddHostView() }
+        }
+    }
+}
+
+/// Alerts are local: they come while Herdwick is open or refreshing in the background,
+/// which iOS schedules as it sees fit.
+private struct NotificationSettings: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Settings.self) private var settings
+    @State private var denied = false
+
+    var body: some View {
+        Section {
+            Toggle("Needs You", isOn: binding(\.notifyNeedsYou))
+            Toggle("Finished", isOn: binding(\.notifyFinished))
+            if denied {
+                Link("Allow Notifications in Settings", destination: URL(string: UIApplication.openNotificationSettingsURLString)!)
+            }
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text("Alerts come while Herdwick is open, or when iOS lets it check in the background, which can be late. Needs You also badges the app icon. Opening a finished agent, at its latest message, marks it read.")
+        }
+    }
+
+    /// Turning an alert on asks for permission first and stays off if it isn't given.
+    private func binding(_ key: ReferenceWritableKeyPath<Settings, Bool>) -> Binding<Bool> {
+        Binding {
+            settings[keyPath: key]
+        } set: { on in
+            guard on else { settings[keyPath: key] = false; return }
+            Task {
+                let allowed = await model.requestNotifications()
+                denied = !allowed
+                settings[keyPath: key] = allowed
+            }
         }
     }
 }

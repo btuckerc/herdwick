@@ -1,6 +1,6 @@
 // Captures every scene in marketing/scenes.json from the real app in the simulator.
 // Runs on the Mini after scripts/mini/sync-and-build.sh; see marketing/README.md.
-//   bun marketing/capture/capture.mjs [--device iphone|ipad] [--scene <id>] [--no-preview]
+//   bun marketing/capture/capture.mjs [--device iphone|ipad] [--scene <id>|preview] [--no-preview]
 import { readFile, mkdir, rm, access, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,7 @@ const argv = process.argv.slice(2);
 const flag = name => { const i = argv.indexOf(name); return i < 0 ? null : argv[i + 1]; };
 const onlyDevice = flag('--device');
 const onlyScene = flag('--scene');
-const withPreview = !argv.includes('--no-preview') && !onlyScene;
+const withPreview = !argv.includes('--no-preview') && (!onlyScene || onlyScene === 'preview');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const exists = async p => { try { await access(p); return true; } catch { return false; } };

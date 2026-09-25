@@ -1,1 +1,1 @@
-An agent is blocked and you're nowhere near your desk. Open Herdwick, read its terminal and answer from your phone. Every claude, codex and opencode session in one list.
+Read agent conversations and answer questions from your phone. Connect to your own herdr hosts over SSH, with optional Tailscale sign-in.

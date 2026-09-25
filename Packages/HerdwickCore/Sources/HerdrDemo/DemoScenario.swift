@@ -40,6 +40,11 @@ public struct DemoScenario: Sendable {
     let screenFiles: [String: String]
     /// Initial screen (resolved file path) by pane id.
     let screens: [String: String]
+    let transcripts: [String: String]
+    let transcriptFiles: [String: Data]
+    let childTranscripts: [String: [String: String]]
+
+    static func transcriptPath(_ pane: String) -> String { "/Users/alex/.omp/agent/sessions/studio/\(pane).jsonl" }
     /// Status and screen changes applied before the app connects.
     let setup: [Action]
     let timeline: [TimedStep]
@@ -92,6 +97,8 @@ public struct DemoScenario: Sendable {
             throw DemoError.invalidScenario("\(name): needs snapshot")
         }
         screens = raw.screens.map { $0.mapValues(resolve) } ?? base?.screens ?? [:]
+        transcripts = raw.transcripts.map { $0.mapValues(resolve) } ?? base?.transcripts ?? [:]
+        childTranscripts = raw.childTranscripts.map { $0.mapValues { $0.mapValues(resolve) } } ?? base?.childTranscripts ?? [:]
 
         // Fail at load, not mid-capture: the snapshot must decode as herdr's and every
         // pane and screen a step names must exist.
@@ -137,6 +144,36 @@ public struct DemoScenario: Sendable {
             files[path] = text
         }
         screenFiles = files
+        var records = base?.transcriptFiles ?? [:]
+        for pane in transcripts.keys {
+            guard panes.contains(pane), decoded.agents.contains(where: { $0.paneID == pane }) else {
+                throw DemoError.invalidScenario("\(name): transcript for unknown agent \(pane)")
+            }
+        }
+        for (pane, children) in childTranscripts {
+            guard transcripts[pane] != nil, children.keys.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" } }) else {
+                throw DemoError.invalidScenario("\(name): childTranscripts needs a transcript pane and simple child ids")
+            }
+        }
+        var appended: [String] = []
+        for action in named {
+            guard case .append(let pane, let path) = action else { continue }
+            guard transcripts[pane] != nil else { throw DemoError.invalidScenario("append needs transcript for \(pane)") }
+            appended.append(path)
+        }
+        for path in Array(transcripts.values) + childTranscripts.values.flatMap(\.values) + appended where records[path] == nil {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)), data.last == 0x0A else {
+                throw DemoError.invalidScenario("\(name): missing or non-newline-terminated transcript \(path)")
+            }
+            for line in data.split(separator: 0x0A) {
+                guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                      record["type"] is String else {
+                    throw DemoError.invalidScenario("\(name): invalid transcript record in \(path)")
+                }
+            }
+            records[path] = data
+        }
+        transcriptFiles = records
     }
 
     private struct Raw: Decodable {
@@ -145,6 +182,8 @@ public struct DemoScenario: Sendable {
         var host: Host?
         var herdr: Herdr?
         var screens: [String: String]?
+        var transcripts: [String: String]?
+        var childTranscripts: [String: [String: String]]?
         var tailnet: Tailnet?
         var setup: [Step]?
         var timeline: [Step]?
@@ -161,6 +200,7 @@ public struct DemoScenario: Sendable {
         var pane: String?
         var status: String?
         var screen: String?
+        var records: String?
         var cue: String?
         var text: String?
         var `for`: Double?
@@ -202,6 +242,7 @@ struct Trigger: Sendable {
 enum Action: Sendable {
     case status(pane: String, AgentStatus)
     case screen(pane: String, path: String)
+    case append(pane: String, path: String)
     case cue(DemoCue)
     /// Kill every channel and refuse new ones for `seconds`, or for good when nil.
     case drop(Double?)
@@ -221,6 +262,9 @@ enum Action: Sendable {
         case "screen":
             guard let path = step.screen else { throw DemoError.invalidScenario("screen step needs screen") }
             self = .screen(pane: try pane(), path: resolve(path))
+        case "append":
+            guard let path = step.records else { throw DemoError.invalidScenario("append step needs records") }
+            self = .append(pane: try pane(), path: resolve(path))
         case "drop":
             self = .drop(step.for)
         case "ui":

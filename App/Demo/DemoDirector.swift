@@ -7,15 +7,19 @@ import SwiftUI
 /// `UserDefaults`, so `-appearance dark` and `-theme.dark tokyo-night` also work as-is):
 ///
 ///     -HerdwickDemo <scenario>                  studio | preview | any bundled HerdrDemo scenario
-///     -HerdwickScene <scene>                    agents | workspaces | pane:<id> | onboarding | tailscale | settings
+///     -HerdwickScene <scene>                    agents | workspaces | pane:<id> | terminal:<id> | onboarding | tailscale | settings
 ///     -HerdwickDraft <text>                     composer text on the opened pane
 ///     -HerdwickDrop YES                         drop the link after the first snapshot (reconnect UI)
 ///     -HerdwickHold YES                         start the timeline only once Documents/demo-go exists
 ///
 /// Once the scene has rendered, the app writes `Documents/demo-ready` for the capture script.
+/// `pane:` uses the agent's conversation when available; `terminal:` always shows the
+/// terminal. `pane:p1` shows the studio question, `pane:p2` its completed review,
+/// `pane:p5 -showWorkingSubagents YES` delegated work; `agents -inboxView machines`
+/// shows Machines. Draft/send cues also drive the conversation composer.
 struct DemoLaunch: Equatable {
     enum Scene: Equatable {
-        case agents, workspaces, pane(String), onboarding, tailscale, settings
+        case agents, workspaces, pane(String), terminal(String), onboarding, tailscale, settings
 
         init?(_ raw: String) {
             switch raw {
@@ -25,6 +29,10 @@ struct DemoLaunch: Equatable {
             case "tailscale": self = .tailscale
             case "settings": self = .settings
             default:
+                if raw.hasPrefix("terminal:") {
+                    self = .terminal(String(raw.dropFirst(9)))
+                    return
+                }
                 guard raw.hasPrefix("pane:") else { return nil }
                 self = .pane(String(raw.dropFirst(5)))
             }
@@ -70,6 +78,9 @@ final class DemoDirector {
     private(set) var sendCount = 0
     /// Set by the open pane once its terminal has painted a frame.
     var terminalReady = false
+    /// Set after the conversation feed's initial backlog has painted.
+    var conversationReady = false
+    private var forceTerminal = false
 
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
 
@@ -81,6 +92,7 @@ final class DemoDirector {
         switch launch?.scene {
         case .workspaces: mode = .workspaces
         case .pane(let id): paneID = id
+        case .terminal(let id): paneID = id; forceTerminal = true
         case .settings: showsSettings = true
         default: break
         }
@@ -129,10 +141,18 @@ final class DemoDirector {
         tasks = []
     }
 
+    func route(for pane: String, connection: HostConnection) -> Route {
+        let address = connection.address(paneID: pane)
+        let hasTranscript = connection.snapshot?.agents.first { $0.paneID == pane }?.hasTranscript == true
+        return !forceTerminal && hasTranscript ? .conversation(address) : .terminal(address)
+    }
+
     private func apply(_ cue: DemoCue) async {
         switch cue {
         case .openPane(let id):
             terminalReady = false
+            conversationReady = false
+            forceTerminal = false
             paneID = id
         case .back:
             paneID = nil
@@ -174,7 +194,13 @@ final class DemoDirector {
             return false
         }
         guard connection.isLive else { return false }
-        if case .pane = launch.scene { return terminalReady }
+        switch launch.scene {
+        case .pane(let id):
+            if case .conversation = route(for: id, connection: connection) { return conversationReady }
+            return terminalReady
+        case .terminal: return terminalReady
+        default: break
+        }
         return true
     }
 

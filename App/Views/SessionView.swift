@@ -45,6 +45,23 @@ struct SessionView: View {
     }
 
     var body: some View {
+        presented
+            .onChange(of: demo?.mode, initial: true) { _, next in
+                if let next { settings.inboxGrouping = next == .workspaces ? .workspace : .none }
+            }
+            .onChange(of: demo?.paneID, initial: true) { _, next in
+                if let demo { model.navigationPath = next.map { [demo.route(for: $0, connection: connection)] } ?? [] }
+            }
+            .onChange(of: connection.snapshot == nil) { _, missing in
+                if !missing, let demo, let pane = demo.paneID {
+                    model.navigationPath = [demo.route(for: pane, connection: connection)]
+                }
+            }
+            .onChange(of: demo?.showsSettings, initial: true) { _, shows in if shows == true { sheet = .settings } }
+    }
+
+    /// Split from `body`, whose single modifier chain overran the type-checker's time limit.
+    private var presented: some View {
         content
             .id(connection.profile.id)
             .transition(.push(from: pushEdge))
@@ -86,13 +103,6 @@ struct SessionView: View {
             )) { Button("OK", role: .cancel) { closeError = nil } } message: {
                 Text(closeError ?? "")
             }
-            .onChange(of: demo?.mode, initial: true) { _, next in
-                if let next { settings.inboxGrouping = next == .workspaces ? .workspace : .none }
-            }
-            .onChange(of: demo?.paneID, initial: true) { _, next in
-                if demo != nil { model.navigationPath = next.map { [.terminal(connection.address(paneID: $0))] } ?? [] }
-            }
-            .onChange(of: demo?.showsSettings, initial: true) { _, shows in if shows == true { sheet = .settings } }
     }
 
     private var hostList: some View {
@@ -260,6 +270,7 @@ struct SessionView: View {
             NavigationLink(value: thread.agent.hasTranscript ? Route.conversation(thread.address) : Route.terminal(thread.address)) {
                 AgentRow(
                     agent: thread.agent,
+                    status: thread.connection.presentedStatus(thread.agent),
                     workspace: thread.workspace?.label,
                     unread: thread.connection.isUnread(thread.agent),
                     host: allHosts ? "\(thread.connection.profile.name) · \(thread.address.session)" : nil,
@@ -267,6 +278,13 @@ struct SessionView: View {
                 )
             }
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                if thread.connection.isUnread(thread.agent) {
+                    Button("Mark as Read", systemImage: "envelope.open") { thread.connection.markSeen(thread.agent) }
+                        .tint(.accentColor)
+                } else if thread.connection.presentedStatus(thread.agent) == .idle {
+                    Button("Mark as Unread", systemImage: "envelope.badge") { thread.connection.markUnread(thread.agent) }
+                        .tint(.accentColor)
+                }
                 if hidden {
                     Button("Unhide", systemImage: "eye") { thread.connection.unhide(thread.agent) }
                         .tint(.gray)
@@ -463,6 +481,8 @@ enum Route: Hashable {
 
 struct AgentRow: View {
     let agent: Agent
+    /// What the row shows, which may differ from the host's state: see `HostConnection.presentedStatus`.
+    let status: AgentStatus
     let workspace: String?
     let unread: Bool
     var host: String? = nil
@@ -471,7 +491,7 @@ struct AgentRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            StatusDot(status: agent.agentStatus)
+            StatusDot(status: status)
             VStack(alignment: .leading, spacing: 3) {
                 Text(agent.conversationTitle)
                     .font(.body.weight(unread ? .semibold : .regular))
@@ -492,8 +512,8 @@ struct AgentRow: View {
     /// Status, then where it runs: "Working · 2 subagents · herdwick".
     private var caption: String {
         let place = workspace ?? agent.cwd.map { ($0 as NSString).lastPathComponent }
-        let helpers = agent.agentStatus == .working && subagents > 0 ? (subagents == 1 ? "1 subagent" : "\(subagents) subagents") : nil
-        return [agent.agentStatus.label, helpers, place, host].compactMap { $0 }.joined(separator: " · ")
+        let helpers = status == .working && subagents > 0 ? (subagents == 1 ? "1 subagent" : "\(subagents) subagents") : nil
+        return [status.label, helpers, place, host].compactMap { $0 }.joined(separator: " · ")
     }
 }
 

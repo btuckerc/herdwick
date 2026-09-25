@@ -11,6 +11,8 @@
     {"t": 6.0, "do": "ui", "cue": "draft", "text": "Run the migrations first, then deploy"},
     {"t": 8.8, "do": "ui", "cue": "send"},
     {"on": "send_input", "pane": "p1", "then": [
+      {"after": 0.3, "do": "append", "pane": "p1", "records": "../studio/transcripts/p1-reply.jsonl"},
+      {"after": 3.6, "do": "append", "pane": "p1", "records": "../studio/transcripts/p1-done.jsonl"},
       {"after": 0.3, "do": "screen", "pane": "p1", "screen": "../studio/screens/p1-migrating.screen"},
       {"after": 0.4, "do": "status", "pane": "p1", "status": "working"},
       {"after": 3.6, "do": "screen", "pane": "p1", "screen": "../studio/screens/p1-deployed.screen"},

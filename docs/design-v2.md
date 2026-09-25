@@ -1,7 +1,7 @@
 # Herdwick v2 design
 
 Synthesised 2026-09-25 from a council (Fable A, Fable B, Astra review) over a verified
-protocol map. Status: phases 1–4 built except local notifications (see Phases).
+protocol map. Status: phases 1–5 built (see Phases).
 
 ## Mental model: agents are conversations
 One screen answers "who needs me, what do they want, answer it".
@@ -12,7 +12,7 @@ One screen answers "who needs me, what do they want, answer it".
 | agent (pane with a detected agent) | a conversation |
 | workspace | caption on the conversation (label, branch) |
 | tab, pane, split, layout | hidden; shells (`unknown`) sit in a collapsed "Terminals" section |
-| `agent_status` | blocked → pinned "Needs you"; `done` (unseen idle) → unread dot; working → typing dots; idle → plain |
+| `agent_status` | blocked → pinned "Needs you"; a finish not yet read here → "Done" with an unread dot; working → typing dots; idle or a read finish → "Idle" |
 
 Order: blocked agents pinned in a "Needs You" section, everything else by `state_change_seq`
 descending (most recent change first, like a messages list).
@@ -58,8 +58,9 @@ and a leading Start swipe action; Machines uses the same empty-workspace wording
 Inbox options (Settings, persisted in `UserDefaults`): Agents or Machines (herdr's host ›
 workspace › tab › pane tree, with Close Tab/Close Workspace swipes); all hosts or the current
 one; grouping None/Host/Workspace/Status, with "Needs You" always pinned first; sort Recent or
-Priority (blocked, unread done, working, read done, idle, unknown); collapse idle. Rows swipe
-leading to Hide/Unhide (local) and trailing to Close (confirmed). "+" opens New Agent/Workspace.
+Priority (blocked, unread done, working, idle, unknown); collapse idle. Rows swipe leading to
+Mark as Read/Unread (full swipe) and Hide/Unhide (local), trailing to Close (confirmed). "+"
+opens New Agent/Workspace.
 The composer attaches files and images, uploaded to the host and cleaned up after the chosen
 retention (1 hour/day/week, default a day). The on-screen Return adds a line unless "On-screen
 Return Sends" is on; on a hardware keyboard Return and ⌘↩ send, ⇧↩ or ⌥↩ adds a line.
@@ -112,9 +113,41 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
   - Rendered in file order; the `parentId` tree is not walked.
 - Agents with no known format or no session id/path open the terminal directly; a transcript
   that can't be located says so in the conversation.
-- Unread is local (`HostConnection.isUnread`/`markSeen`): the `state_change_seq` last seen per
-  pane, persisted per host and session; agents first seen start read. We never call
+- Read state is local (`ReadState` in Core, held by `HostConnection`, persisted per host and
+  session). herdr says `done` only while nobody at the desk has looked, and a finish in the
+  desk's focused pane goes straight to `idle`, so a finish is `done` or a working agent seen to
+  stop. Reading records the `state_change_seq` on screen; the desk acknowledging later bumps
+  it without making it unread again. A conversation is read only when the app is active, the
+  transcript has loaded and its end is on screen (`onScrollGeometryChange`); new output that
+  arrives while you're scrolled back stays unread. A read finish shows as Idle; reading a
+  blocked agent drops the dot, never the orange. Agents first seen start read. We never call
   `agent.focus`/tab focus: that would move the user's desk.
+- Sending while an omp agent works queues the message as steering: it shows dimmed under the
+  conversation, "Queued · Tap to Edit", until the transcript records it. Tapping the newest
+  sends omp's Alt+Up (restore the last queued message to its editor), checks omp's editor on
+  screen (`OmpEditor`), clears it with Ctrl+C (which leaves the turn running) and puts the
+  text back in the composer. If omp took the message first, its editor stays empty and
+  nothing is cleared.
+
+## Attention: alerts, badge, widgets
+Local only, from the councils of 2026-09-25 (`Attention`):
+- Alerts for Needs You and Finished, each a Settings toggle that asks permission when turned
+  on. They fire on a new unread state (one per pane and `state_change_seq`, remembered so a
+  reconnect never repeats one), not for the conversation on screen, and are withdrawn once
+  the agent is read or answered. Tapping one opens that agent. With Needs You on, the badge
+  counts blocked agents across hosts; finished work is not a debt.
+- The app only sees hosts while it runs. In the background iOS wakes it now and then
+  (`BGAppRefreshTask`, earliest 15 min): it reconnects each link for one snapshot (20 s cap),
+  which raises alerts and updates the widgets, then lets go.
+- Widgets (`HerdwickWidgets`, Home small and Lock Screen rectangular/circular/inline) read an
+  `AttentionSnapshot` the app writes to the App Group: blocked, then unread finishes, with
+  whether every host answered. The app reloads timelines only when that content changes.
+  They say when counts are old or a host was offline and never claim "all clear" then.
+  `herdwick://open?host=&session=&pane=` deep-links alerts and widgets.
+- Not built: timely alerts with the app closed need a host-side helper and a push relay
+  (APNs with end-to-end encrypted payloads); widget pushes and a "Watch this run" Live
+  Activity come after that. T3 Code's "settled" shelf was not adopted: Hide already parks
+  work and resurfaces it when it needs you.
 
 ## Subagent transcript state
 Core derives working children from omp `task`, Claude `Agent`/`Task`, and Codex
@@ -200,4 +233,6 @@ and No (rejected, "[Request interrupted…]" notice), Claude Edit Yes (diff in t
 4. Screen prompts; Claude Code / Codex transcripts; rich tool steps (`ToolDetail` →
    `ToolStepView`: shell command + output + exit code, diffs from omp `details.diff`, Claude
    `structuredPatch`, Codex `apply_patch`; plans from TodoWrite/Tasks/`update_plan`/
-   `todo_write`). Built. Local notifications for blocked: not built.
+   `todo_write`). Built.
+5. Attention: local alerts, badge, widgets, visibility-based read state, Mark as Read/Unread,
+   undo of queued omp messages. Built.

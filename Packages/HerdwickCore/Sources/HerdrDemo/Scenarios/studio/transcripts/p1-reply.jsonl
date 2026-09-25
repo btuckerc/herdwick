@@ -1,0 +1,2 @@
+{"type":"message","id":"deploy-answer","message":{"role":"toolResult","toolCallId":"deploy-approval","content":"Run migrations, then deploy","details":{"selectedOptions":["Run migrations, then deploy"]}}}
+{"type":"message","id":"deploy-continue","message":{"role":"assistant","content":[{"type":"text","text":"Applying both migrations to staging, then deploying the build we just tested."},{"type":"toolCall","id":"deploy-run","name":"bash","arguments":{"command":"bun run db:migrate --env staging && bun run deploy --env staging"}}]}}

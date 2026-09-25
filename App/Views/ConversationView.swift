@@ -6,6 +6,8 @@ import SwiftUI
 struct ConversationView: View {
     @Environment(AppModel.self) private var model
     @Environment(Settings.self) private var settings
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(DemoDirector.self) private var demo: DemoDirector?
     let connection: HostConnection
     let paneID: String
     /// Pushes the terminal; alerts can't hold navigation links.
@@ -23,50 +25,83 @@ struct ConversationView: View {
     /// The permission or approval prompt on the agent's screen while it is blocked.
     @State private var screenPrompt: ScreenPrompt?
     @State private var choosing: String?
+    /// Messages omp is holding until the agent next takes input; the last can be unsent.
+    @State private var queued: [QueuedSend] = []
+    @State private var unsending = false
     @State private var detailOverride: DetailLevel?
     private var detailSelection: Binding<DetailLevel> {
         Binding(get: { detailOverride ?? settings.detailLevel }, set: { detailOverride = $0 })
     }
     @State private var sentCount = 0
     @FocusState private var composerFocused: Bool
+    /// The newest content is on screen; only then does a finished agent count as read.
+    @State private var atLatest = true
 
     private var agent: Agent? { connection.snapshot?.agents.first { $0.paneID == paneID } }
     private var blocked: Bool { agent?.agentStatus == .blocked }
 
     var body: some View {
-        let detail = detailOverride ?? settings.detailLevel
-        let items = feed.conversation.items(at: detail)
-        let finalAssistantID = items.reversed().first { if case .assistant = $0 { true } else { false } }?.id
-        let finished = detail == .digest && (agent?.agentStatus == .done || agent?.agentStatus == .idle)
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
-                if feed.hasEarlier {
-                    Button("Show Earlier Messages") { feed.showEarlier() }
-                        .font(.footnote)
-                        .frame(maxWidth: .infinity)
-                }
-                ForEach(ConversationRow.rows(items, full: detail == .full,
-                                             lastAssistantID: finished ? finalAssistantID : nil,
-                                             subagents: { feed.conversation.subagents(spawnedBy: $0) })) { row in
-                    row.view
-                }
-                if let plan = openPlan {
-                    TodoCard(tool: plan)
-                }
-                // A running step already spins in its row; this covers the model thinking.
-                if agent?.agentStatus == .working, feed.state == .live, !stepRunning {
-                    WorkingRow()
+        observed
+            .sensoryFeedback(.success, trigger: sentCount) { _, _ in settings.haptics }
+            .alert("Couldn't send", isPresented: .init(get: { sendError != nil }, set: { if !$0 { sendError = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(sendError ?? "")
+            }
+            .alert("Answer in the terminal", isPresented: .init(get: { askFailure != nil }, set: { if !$0 { askFailure = nil } })) {
+                Button("Open Terminal", action: openTerminal)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(askFailure ?? "")
+            }
+    }
+
+    /// Split from `body`, whose single modifier chain overran the type-checker's time limit.
+    private var observed: some View {
+        scroller
+            .toolbar { toolbar }
+            .task(id: LocateKey(liveID: connection.liveID, ref: agent?.agentSession)) {
+                await locateTranscript()
+            }
+            .task(id: FeedKey(liveID: connection.liveID, location: location, window: feed.window)) {
+                // A channel can end while the transport lives on (a brief background, a killed
+                // `tail`): follow again. A dead transport bumps `liveID`, which restarts this task.
+                while !Task.isCancelled, connection.isLive, let client = connection.client, let location {
+                    await feed.follow(location, client: client)
+                    guard (try? await Task.sleep(for: .seconds(2))) != nil else { return }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-        }
+            .task(id: PromptKey(liveID: connection.liveID, watching: blocked && pendingAsk == nil)) {
+                await watchScreenPrompt()
+            }
+            .onChange(of: ReadKey(sequence: agent?.stateChangeSeq, visible: showsLatest), initial: true) {
+                if showsLatest, let agent { connection.markSeen(agent) }
+            }
+            .onChange(of: demo?.draft, initial: true) { _, text in if let text { draft = text } }
+            .onChange(of: demo?.sendCount) { Task { await sendDraft() } }
+            .onChange(of: feed.state, initial: true) { _, state in demo?.conversationReady = state == .live }
+    }
+
+    /// Read means seen: the app is in front, the transcript has loaded and its end is on screen.
+    private var showsLatest: Bool {
+        scenePhase == .active && feed.state != .loading && atLatest
+    }
+
+    private var scroller: some View {
+        ScrollView { transcript }
         .environment(\.openSubagent) { activity in
             if let route = subagentRoute(activity) { openSubagent(route) }
         }
         .defaultScrollAnchor(.bottom)
         .onChange(of: feed.conversation.workingSubagents.count) { _, count in
             connection.workingSubagents[paneID] = count
+        }
+        .onChange(of: feed.conversation.items.count) { settleQueue() }
+        .onChange(of: agent?.agentStatus) { settleQueue() }
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.visibleRect.maxY >= geometry.contentSize.height - 80
+        } action: { _, latest in
+            atLatest = latest
         }
         .defaultScrollAnchor(.bottom, for: .sizeChanges)
         .scrollDismissesKeyboard(.interactively)
@@ -83,53 +118,62 @@ struct ConversationView: View {
         .navigationTitle(feed.title ?? feed.conversation.title ?? agent?.conversationTitle ?? paneID)
         .navigationSubtitle(subtitle)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink(value: Route.terminal(connection.address(paneID: paneID))) {
-                    Label("Terminal", systemImage: "apple.terminal")
+    }
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            NavigationLink(value: Route.terminal(connection.address(paneID: paneID))) {
+                Label("Terminal", systemImage: "apple.terminal")
+            }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Picker("Detail", selection: detailSelection) {
+                    Text("Full").tag(DetailLevel.full)
+                    Text("Folded").tag(DetailLevel.folded)
+                    Text("Digest").tag(DetailLevel.digest)
+                }
+            } label: {
+                Image(systemName: "line.3.horizontal.decrease")
+            }
+        }
+    }
+
+    private var transcript: some View {
+        let detail = detailOverride ?? settings.detailLevel
+        let items = feed.conversation.items(at: detail)
+        let finalAssistantID = items.reversed().first { if case .assistant = $0 { true } else { false } }?.id
+        let finished = detail == .digest && (agent?.agentStatus == .done || agent?.agentStatus == .idle)
+        // Not lazy: a lazy stack pinned to the bottom estimates the heights of rows it
+        // hasn't drawn, and a new message re-anchors onto those estimates, which left the
+        // screen blank until the next reply. The transcript window bounds the row count.
+        return VStack(alignment: .leading, spacing: 14) {
+            if feed.hasEarlier {
+                Button("Show Earlier Messages") { feed.showEarlier() }
+                    .font(.footnote)
+                    .frame(maxWidth: .infinity)
+            }
+            ForEach(ConversationRow.rows(items, full: detail == .full,
+                                         lastAssistantID: finished ? finalAssistantID : nil,
+                                         subagents: { feed.conversation.subagents(spawnedBy: $0) })) { row in
+                row.view
+            }
+            ForEach(queued) { message in
+                QueuedBubble(text: message.text, canUnsend: message.id == queued.last?.id && !unsending) {
+                    Task { await unsend(message) }
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Picker("Detail", selection: detailSelection) {
-                        Text("Full").tag(DetailLevel.full)
-                        Text("Folded").tag(DetailLevel.folded)
-                        Text("Digest").tag(DetailLevel.digest)
-                    }
-                } label: {
-                    Image(systemName: "line.3.horizontal.decrease")
-                }
+            if let plan = openPlan {
+                TodoCard(tool: plan)
+            }
+            // A running step already spins in its row; this covers the model thinking.
+            if agent?.agentStatus == .working, feed.state == .live, !stepRunning {
+                WorkingRow()
             }
         }
-        .task(id: LocateKey(liveID: connection.liveID, ref: agent?.agentSession)) {
-            await locateTranscript()
-        }
-        .task(id: FeedKey(liveID: connection.liveID, location: location, window: feed.window)) {
-            // A channel can end while the transport lives on (a brief background, a killed
-            // `tail`): follow again. A dead transport bumps `liveID`, which restarts this task.
-            while !Task.isCancelled, connection.isLive, let client = connection.client, let location {
-                await feed.follow(location, client: client)
-                guard (try? await Task.sleep(for: .seconds(2))) != nil else { return }
-            }
-        }
-        .task(id: PromptKey(liveID: connection.liveID, watching: blocked && pendingAsk == nil)) {
-            await watchScreenPrompt()
-        }
-        .onChange(of: agent?.stateChangeSeq, initial: true) {
-            if let agent { connection.markSeen(agent) }
-        }
-        .sensoryFeedback(.success, trigger: sentCount) { _, _ in settings.haptics }
-        .alert("Couldn't send", isPresented: .init(get: { sendError != nil }, set: { if !$0 { sendError = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(sendError ?? "")
-        }
-        .alert("Answer in the terminal", isPresented: .init(get: { askFailure != nil }, set: { if !$0 { askFailure = nil } })) {
-            Button("Open Terminal", action: openTerminal)
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(askFailure ?? "")
-        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
     private var subtitle: String {
@@ -210,8 +254,11 @@ struct ConversationView: View {
 
     private func sendDraft() async {
         let text = draft
-        guard !sending, connection.isLive, agent != nil,
+        guard !sending, connection.isLive, let agent,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
+        // omp holds a message sent mid-turn as steering and can hand it back (Alt+Up).
+        let queues = agent.agent == "omp" && agent.agentStatus == .working && attachments.isEmpty
+        let usersBefore = userTexts.count
         sending = true
         defer { sending = false }
         do {
@@ -219,11 +266,58 @@ struct ConversationView: View {
                                    agent: true, retention: settings.attachmentRetention) { updated in
                 attachments = updated
             }
+            if queues { queued.append(QueuedSend(text: text, usersBefore: usersBefore)) }
             draft = ""
             attachments = []
             sentCount += 1
         } catch {
             sendError = "The message wasn't delivered completely. Your draft and attachments are still here. \(error.localizedDescription)"
+        }
+    }
+
+    private var userTexts: [String] {
+        feed.conversation.items.compactMap { if case .user(_, let text, _) = $0 { text } else { nil } }
+    }
+
+    /// A queued message leaves once the transcript has it, or once the turn ends (omp sends
+    /// what it held, or someone at the desk took it back).
+    private func settleQueue() {
+        guard !queued.isEmpty else { return }
+        if let status = agent?.agentStatus, status == .idle || status == .done {
+            queued.removeAll()
+            return
+        }
+        let users = userTexts
+        queued.removeAll { message in
+            users.dropFirst(message.usersBefore).contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == message.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
+    }
+
+    /// omp's Alt+Up puts its last queued message back in its editor; that text moves to the
+    /// composer here and omp's editor is cleared. If the agent took the message first, the
+    /// editor stays empty and the transcript shows it as sent.
+    private func unsend(_ message: QueuedSend) async {
+        guard message.id == queued.last?.id, !unsending, let client = connection.client,
+              let session = connection.activeSession else { return }
+        unsending = true
+        defer { unsending = false }
+        do {
+            let before = try await client.readPane(paneID, session: session)
+            guard OmpEditor.draft(inScreen: before.text) == nil else {
+                sendError = "omp has unsent text in its editor. Clear it in the terminal first."
+                return
+            }
+            try await connection.sendKeys(["alt+up"], pane: paneID)
+            try await Task.sleep(for: .milliseconds(300))
+            let after = try await client.readPane(paneID, session: session)
+            queued.removeAll { $0.id == message.id }
+            guard OmpEditor.draft(inScreen: after.text) != nil else { return }
+            // With text in its editor, Ctrl+C clears it and leaves the turn running.
+            try await connection.sendKeys(["ctrl+c"], pane: paneID)
+            draft = draft.isEmpty ? message.text : message.text + "\n" + draft
+            composerFocused = true
+        } catch {
+            sendError = "The message couldn't be taken back. \(error.localizedDescription)"
         }
     }
 
@@ -340,6 +434,11 @@ private struct PromptKey: Hashable {
     let watching: Bool
 }
 
+private struct ReadKey: Hashable {
+    let sequence: Int?
+    let visible: Bool
+}
+
 // MARK: - Rows
 
 /// Transcript items as the chat shows them: runs of tool calls and thinking fold into
@@ -397,6 +496,39 @@ enum ConversationRow: Identifiable {
         case .item(.subagentResult(_, let activity), _): SubagentResultRow(activity: activity)
         case .item: EmptyView()
         }
+    }
+}
+
+struct QueuedSend: Identifiable {
+    let id = UUID()
+    let text: String
+    /// User messages in the transcript when this was sent; only later ones can be it.
+    let usersBefore: Int
+}
+
+/// A sent message omp hasn't taken yet. The newest one can be tapped back into the composer.
+private struct QueuedBubble: View {
+    let text: String
+    let canUnsend: Bool
+    let unsend: () -> Void
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Button(action: unsend) {
+                UserBubble(text: text, imageCount: 0)
+                    .opacity(0.55)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canUnsend)
+            Text(canUnsend ? "Queued · Tap to Edit" : "Queued")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Queued: \(text)")
+        .accessibilityHint(canUnsend ? "Takes the message back to edit" : "")
+        .accessibilityAddTraits(canUnsend ? .isButton : [])
     }
 }
 

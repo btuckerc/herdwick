@@ -1,0 +1,5 @@
+{"type":"message","id":"deploy-result","message":{"role":"toolResult","toolCallId":"deploy-run","content":"0041_add_chart_cache applied\n0042_backfill_team_ids applied · 128 rows\nDeployed to https://staging.dashboard.example.com"}}
+{"type":"message","id":"smoke-call","message":{"role":"assistant","content":[{"type":"toolCall","id":"smoke","name":"bash","arguments":{"command":"curl -fsS https://staging.dashboard.example.com/api/health"}}]}}
+{"type":"message","id":"smoke-result","message":{"role":"toolResult","toolCallId":"smoke","content":"{\"status\":\"ok\",\"database\":\"ok\",\"charts\":\"ok\"}"}}
+{"type":"message","id":"deploy-final","message":{"role":"assistant","content":"Staging is deployed.\n\n- Both migrations applied; the backfill updated 128 rows.\n- Health and chart checks passed.\n- Production was not touched.\n\nReady for a quick browser check at https://staging.dashboard.example.com."}}
+{"type":"custom","customType":"session_exit","data":{}}

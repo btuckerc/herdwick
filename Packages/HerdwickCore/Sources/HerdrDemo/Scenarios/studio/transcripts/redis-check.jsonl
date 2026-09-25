@@ -1,0 +1,6 @@
+{"type":"title","title":"Check Redis atomicity"}
+{"type":"message","id":"redis-user","message":{"role":"user","content":"Check the token-bucket Lua script under concurrent requests from two API workers. Don't edit files."}}
+{"type":"message","id":"redis-test","message":{"role":"assistant","content":[{"type":"toolCall","id":"redis-run","name":"bash","arguments":{"command":"bun test tests/limits/concurrency.test.ts"}}]}}
+{"type":"message","id":"redis-result","message":{"role":"toolResult","toolCallId":"redis-run","content":"4 pass · 0 fail\nTwo workers, one team key, one remaining token: exactly one request admitted."}}
+{"type":"message","id":"redis-final","message":{"role":"assistant","content":"Token consumption is atomic. The last-token race passes across two workers. Use Redis TIME for refill calculations: worker clock skew otherwise grants tokens early."}}
+{"type":"custom","customType":"session_exit","data":{}}

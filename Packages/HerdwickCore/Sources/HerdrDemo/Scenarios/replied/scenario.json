@@ -1,6 +1,8 @@
 {
   "extends": "studio",
   "setup": [
+    {"do": "append", "pane": "p1", "records": "../studio/transcripts/p1-reply.jsonl"},
+    {"do": "append", "pane": "p1", "records": "../studio/transcripts/p1-done.jsonl"},
     {"do": "screen", "pane": "p1", "screen": "../studio/screens/p1-deployed.screen"},
     {"do": "status", "pane": "p1", "status": "done"}
   ],

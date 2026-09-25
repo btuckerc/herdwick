@@ -1,25 +1,21 @@
 <gray>></> ship the dashboard to staging once the build is green
 
-<green>●</> <b>Bash</>(bun run build)
-  <gray>⎿</>  <green>✓</> built in 8.4s <gray>· 214 modules</>
+<green>●</> <b>bash</> bun run build && bun test
+  <green>142 pass</> · 0 fail
 
-<green>●</> <b>Bash</>(bun test)
-  <gray>⎿</>  <green>142 pass</> <gray>· 0 fail · 3.1s</>
+<green>●</> <b>bash</> bun run db:status --env staging
+  0041_add_chart_cache pending
+  0042_backfill_team_ids pending
+  Backup: staging-2026-09-25T09:00Z
 
-<green>●</> <b>Bash</>(bun run db:status --env staging)
-  <gray>⎿</>  staging is <yellow>2 migrations</> behind production
-     0041_add_chart_cache
-     0042_backfill_team_ids
+Staging needs both migrations for the new chart query.
+Production will not be touched.
 
 <footer>
-<blue><rule></>
- <inverse><blue> Deploy </></>
- <b>Staging is 2 migrations behind. How should I deploy?</>
-
- <blue>❯ 1. Run migrations, then deploy</>
-      <gray>Applies 0041 and 0042 to staging first</>
-   2. Deploy the frontend only
-      <gray>Charts will 500 until 0041 lands</>
-   3. Type something.
-
- <gray>Enter to select · ↑/↓ to navigate · Esc to cancel</>
+╭─ Ask ──────────────────────────────────────────────────────╮
+│ Apply the two staging migrations before deploying?         │
+├────────────────────────────────────────────────────────────┤
+│   Run migrations, then deploy                            │
+│     Staging only. Verify the chart endpoint afterward.     │
+╰────────────────────────────────────────────────────────────╯
+<gray>Enter to select · Esc to cancel</>

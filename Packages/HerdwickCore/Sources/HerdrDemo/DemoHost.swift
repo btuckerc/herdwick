@@ -36,6 +36,8 @@ private actor DemoEngine {
 
     private var snapshot: [String: Any]
     private var screens: [String: String]
+    private var transcripts: [String: Data]
+    private var screenOverrides: [String: String] = [:]
     private var clockStarted = false
     private var dropped = false
     private var dropScheduled = false
@@ -44,6 +46,7 @@ private actor DemoEngine {
         case bridge
         case events
         case terminal(pane: String, cols: Int, rows: Int, seq: UInt64)
+        case file(path: String, offset: Int)
     }
 
     private struct Open {
@@ -60,15 +63,34 @@ private actor DemoEngine {
         self.dropAfterReady = dropAfterReady
         var snapshot = (try? JSONSerialization.jsonObject(with: scenario.snapshotJSON) as? [String: Any]) ?? [:]
         var screens = scenario.screens
+        var transcripts = Dictionary(uniqueKeysWithValues: scenario.transcripts.map {
+            (DemoScenario.transcriptPath($0.key), scenario.transcriptFiles[$0.value] ?? Data())
+        })
+        for (pane, children) in scenario.childTranscripts {
+            for (id, file) in children {
+                if let path = SubagentTranscript.path(parentPath: DemoScenario.transcriptPath(pane), format: .omp, subagentID: id) {
+                    transcripts[path] = scenario.transcriptFiles[file]
+                }
+            }
+        }
+        snapshot["agents"] = (snapshot["agents"] as? [[String: Any]] ?? []).map { agent in
+            var agent = agent
+            if let pane = agent["pane_id"] as? String, scenario.transcripts[pane] != nil {
+                agent["agent_session"] = ["source": "herdr:omp", "agent": "omp", "kind": "path", "value": DemoScenario.transcriptPath(pane)]
+            }
+            return agent
+        }
         for action in scenario.setup {
             switch action {
             case .status(let pane, let status): Self.apply(status, pane: pane, to: &snapshot)
             case .screen(let pane, let path): screens[pane] = path
+            case .append(let pane, let path): transcripts[DemoScenario.transcriptPath(pane), default: Data()].append(scenario.transcriptFiles[path] ?? Data())
             case .cue, .drop: break
             }
         }
         self.snapshot = snapshot
         self.screens = screens
+        self.transcripts = transcripts
     }
 
     // MARK: Commands
@@ -87,6 +109,30 @@ private actor DemoEngine {
         } else if let terminal = Self.terminalRequest(command) {
             channels[channel.id] = Open(channel: channel, role: .terminal(pane: terminal.pane, cols: terminal.cols, rows: terminal.rows, seq: 0))
             paint(channel.id)
+        } else if let request = Self.fileRequest(command) {
+            let data = transcripts[request.path] ?? Data()
+            if let limit = request.limit {
+                channel.send("\(data.count)\n")
+                channel.send(Data(data.dropFirst(request.offset).prefix(limit)))
+                channel.finish()
+            } else {
+                if data.count > request.offset { channel.send(Data(data.dropFirst(request.offset))) }
+                channels[channel.id] = Open(channel: channel, role: .file(path: request.path, offset: max(request.offset, data.count)))
+            }
+        } else if command.contains("for spec in"), command.contains("p.tombstone") {
+            let script = command.replacingOccurrences(of: "'\\''", with: "'")
+            let regex = try NSRegularExpression(pattern: #"'([^'|]+)\|([^']+)'"#)
+            for match in regex.matches(in: script, range: NSRange(script.startIndex..., in: script)) {
+                guard let idRange = Range(match.range(at: 1), in: script),
+                      let pathRange = Range(match.range(at: 2), in: script) else { continue }
+                let path = String(script[pathRange])
+                let state: String
+                if let data = transcripts[path] {
+                    state = String(decoding: data.suffix(4096), as: UTF8.self).contains("\"customType\":\"session_exit\"") ? "exited" : "active"
+                } else { state = "missing" }
+                channel.send("\(script[idRange]) \(state)\n")
+            }
+            channel.finish()
         } else {
             channel.finish(throwing: CommandError.exited(status: 127, stderr: "demo host: unsupported command"))
         }
@@ -106,6 +152,26 @@ private actor DemoEngine {
         return (String(pane), cols, rows)
     }
 
+    /// Decode only the shell forms emitted by PaneRead, never execute scenario commands.
+    private static func fileRequest(_ command: String) -> (path: String, offset: Int, limit: Int?)? {
+        let prefix = "/bin/sh -c '"
+        guard command.hasPrefix(prefix), command.hasSuffix("'") else { return nil }
+        let script = String(command.dropFirst(prefix.count).dropLast()).replacingOccurrences(of: "'\\''", with: "'")
+        func capture(_ pattern: String) -> [String]? {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: script, range: NSRange(script.startIndex..., in: script)) else { return nil }
+            return (1..<match.numberOfRanges).compactMap { Range(match.range(at: $0), in: script).map { String(script[$0]) } }
+        }
+        if let parts = capture(#"tail -c \+\$\(\((\d+) \+ 1\)\) (\S+) \| head -c (\d+)$"#),
+           let offset = Int(parts[0]), let limit = Int(parts[2]) {
+            return (parts[1], offset, limit)
+        }
+        if let parts = capture(#"^tail -c \+(\d+) -F (\S+) 2>/dev/null"#), let start = Int(parts[0]), start > 0 {
+            return (parts[1], start - 1, nil)
+        }
+        return nil
+    }
+
     func received(_ bytes: [UInt8], on id: ObjectIdentifier) {
         guard var open = channels[id] else { return }
         open.pending += bytes
@@ -119,7 +185,7 @@ private actor DemoEngine {
             guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
             switch open.role {
             case .bridge: request(object, on: id)
-            case .events: break
+            case .events, .file: break
             case .terminal: terminalCommand(object, on: id)
             }
         }
@@ -157,12 +223,22 @@ private actor DemoEngine {
             return
         case "pane.read":
             let pane = params["pane_id"] as? String ?? ""
-            let markup = screens[pane].flatMap { scenario.screenFiles[$0] } ?? ""
+            let markup = screenOverrides[pane] ?? screens[pane].flatMap { scenario.screenFiles[$0] } ?? ""
             let text = ScreenMarkup.text(markup, cols: 80, rows: 40).joined(separator: "\n")
             reply(["read": ["text": text, "revision": 1, "truncated": false] as [String: Any]])
         case "pane.send_input", "pane.send_keys":
             reply([String: Any]())
             let pane = params["pane_id"] as? String
+            if let pane, method == "pane.send_keys", let keys = params["keys"] as? [String],
+               let markup = screenOverrides[pane] ?? screens[pane].flatMap({ scenario.screenFiles[$0] }),
+               ScreenPrompt.parse(ScreenMarkup.text(markup, cols: 80, rows: 40).joined(separator: "\n"))?.style == .ompAsk {
+                movePrompt(keys, pane: pane)
+                if !keys.contains("enter") {
+                    channels[id] = nil
+                    open.channel.finish()
+                    return
+                }
+            }
             for trigger in scenario.triggers where trigger.method == method && (trigger.pane == nil || trigger.pane == pane) {
                 schedule(trigger.then)
             }
@@ -171,6 +247,21 @@ private actor DemoEngine {
         }
         channels[id] = nil
         open.channel.finish()
+    }
+
+    private func movePrompt(_ keys: [String], pane: String) {
+        let markup = screenOverrides[pane] ?? screens[pane].flatMap { scenario.screenFiles[$0] } ?? ""
+        var lines = markup.components(separatedBy: "\n")
+        let options = lines.indices.filter { lines[$0].contains("\u{F10C}") }
+        guard let selected = options.firstIndex(where: { lines[$0].contains("\u{F054}") }) else { return }
+        var cursor = selected
+        for key in keys {
+            if key == "down" { cursor = min(cursor + 1, options.count - 1) }
+            if key == "up" { cursor = max(cursor - 1, 0) }
+        }
+        lines[options[selected]] = lines[options[selected]].replacingOccurrences(of: "\u{F054}", with: " ")
+        lines[options[cursor]] = lines[options[cursor]].replacingOccurrences(of: "  \u{F10C}", with: "\u{F054} \u{F10C}")
+        screenOverrides[pane] = lines.joined(separator: "\n")
     }
 
     // MARK: Terminal
@@ -225,8 +316,19 @@ private actor DemoEngine {
             setStatus(status, pane: pane)
         case .screen(let pane, let path):
             screens[pane] = path
+            screenOverrides[pane] = nil
             for (id, open) in channels {
                 if case .terminal(pane, _, _, _) = open.role { paint(id) }
+            }
+        case .append(let pane, let path):
+            let hostPath = DemoScenario.transcriptPath(pane)
+            transcripts[hostPath, default: Data()].append(scenario.transcriptFiles[path] ?? Data())
+            guard let data = transcripts[hostPath] else { return }
+            for (id, open) in channels {
+                if case .file(let path, let offset) = open.role, path == hostPath {
+                    if data.count > offset { open.channel.send(Data(data.dropFirst(offset))) }
+                    channels[id]?.role = .file(path: path, offset: max(offset, data.count))
+                }
             }
         case .cue(let cue):
             cues.yield(cue)

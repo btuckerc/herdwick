@@ -25,6 +25,8 @@ final class HostConnection {
     /// Pane id → subagents last seen working in that agent's conversation. Feeds only run
     /// while a conversation is open, so this is last-known; the inbox gates it on the agent working.
     var workingSubagents: [String: Int] = [:]
+    /// Called when a snapshot arrives or something is read, for alerts, the badge and widgets.
+    var onAttentionChange: ((HostConnection) -> Void)?
 
     private var supervisor = ConnectionSupervisor()
     private var ssh: SSHConnection?
@@ -101,23 +103,44 @@ final class HostConnection {
 
     // MARK: Read state
 
-    /// The `state_change_seq` each agent had when last opened here. herdr's own "seen"
-    /// belongs to the desk (it clears when a tab is focused there), so this stays local.
-    private var seen: [String: Int] = [:]
+    /// What has been read on this phone; see `ReadState`. herdr's own "seen" belongs to the
+    /// desk (it clears when a tab is focused there), so this stays local.
+    private var read = ReadState()
 
     private var hiddenKey: String { "hidden.\(profile.id.uuidString).\(activeSession ?? "")" }
-    private var seenKey: String { "seen.\(profile.id.uuidString).\(activeSession ?? "")" }
+    private var readKey: String { "read.\(profile.id.uuidString).\(activeSession ?? "")" }
 
-    /// Changed since it was last opened on this phone, and waiting on nobody but you.
+    private func loadRead() {
+        read = UserDefaults.standard.data(forKey: readKey)
+            .flatMap { try? JSONDecoder().decode(ReadState.self, from: $0) } ?? ReadState()
+    }
+
+    private func saveRead() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(read), forKey: readKey)
+    }
+
+    /// Needs you or finished since it was last read on this phone. Reading never changes the
+    /// host's own state.
     func isUnread(_ agent: Agent) -> Bool {
-        guard agent.agentStatus != .working, let seq = agent.stateChangeSeq, let last = seen[agent.paneID] else { return false }
-        return seq > last
+        read.isUnread(pane: agent.paneID, status: agent.agentStatus, sequence: agent.stateChangeSeq ?? 0)
+    }
+
+    /// The state a row shows: an unread finish is done, a read one idle.
+    func presentedStatus(_ agent: Agent) -> AgentStatus {
+        read.presented(pane: agent.paneID, status: agent.agentStatus, sequence: agent.stateChangeSeq ?? 0)
     }
 
     func markSeen(_ agent: Agent) {
-        guard let seq = agent.stateChangeSeq, seen[agent.paneID] != seq else { return }
-        seen[agent.paneID] = seq
-        UserDefaults.standard.set(seen, forKey: seenKey)
+        guard isUnread(agent) else { return }
+        read.markRead(pane: agent.paneID, sequence: agent.stateChangeSeq ?? 0)
+        saveRead()
+        onAttentionChange?(self)
+    }
+
+    func markUnread(_ agent: Agent) {
+        read.markUnread(pane: agent.paneID, sequence: agent.stateChangeSeq ?? 0)
+        saveRead()
+        onAttentionChange?(self)
     }
 
     func hide(_ agent: Agent) {
@@ -140,12 +163,9 @@ final class HostConnection {
 
     /// Agents seen for the first time start read; only later changes count.
     private func recordBaseline(_ snapshot: Snapshot) {
-        var changed = false
-        for agent in snapshot.agents where seen[agent.paneID] == nil {
-            seen[agent.paneID] = agent.stateChangeSeq ?? 0
-            changed = true
+        if read.observe(snapshot.agents.map { ($0.paneID, $0.agentStatus, $0.stateChangeSeq ?? 0) }) {
+            saveRead()
         }
-        if changed { UserDefaults.standard.set(seen, forKey: seenKey) }
     }
 
     // MARK: Inputs
@@ -303,7 +323,7 @@ final class HostConnection {
                 }
                 self.activeSession = session
                 self.hidden = UserDefaults.standard.dictionary(forKey: self.hiddenKey) as? [String: Int] ?? [:]
-                self.seen = UserDefaults.standard.dictionary(forKey: self.seenKey) as? [String: Int] ?? [:]
+                self.loadRead()
                 self.onSessions?(self)
 
                 for try await snapshot in client.mirror(session: session) {
@@ -311,6 +331,7 @@ final class HostConnection {
                     self.snapshot = snapshot
                     self.recordBaseline(snapshot)
                     self.reconcileHidden(snapshot)
+                    self.onAttentionChange?(self)
                     if !wentLive {
                         wentLive = true
                         self.client = client

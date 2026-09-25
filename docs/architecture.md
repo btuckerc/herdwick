@@ -49,6 +49,10 @@ Decisions as of 2026-09-24. The evidence behind them is in
 - Hosts: every saved host gets its own `HostConnection` (one SSH transport and
   herdr session each); `Route`/`PaneAddress` carry the host profile with the
   pane, so the all-hosts inbox and navigation reach the right connection.
+- Widget extension `HerdwickWidgets` (`Widgets/`): reads the `AttentionSnapshot`
+  (`Shared/`, compiled into both targets) that the app's `Attention` writes to the
+  App Group `group.dev.btuckerc.herdwick`. The app also declares background fetch
+  (`dev.btuckerc.herdwick.refresh`) and the `herdwick://` URL scheme.
 
 ## Remote commands (no server-side install)
 - Discovery: `$SHELL -lc 'command -v herdr'`, then `~/.local/bin/herdr`,

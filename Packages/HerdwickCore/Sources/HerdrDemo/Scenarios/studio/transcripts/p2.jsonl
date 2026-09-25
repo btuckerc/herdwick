@@ -1,0 +1,9 @@
+{"type":"title","title":"Review PR #412"}
+{"type":"message","id":"review-user","message":{"role":"user","content":"Review PR #412. Focus on cache invalidation when a chart moves between teams. Don't change files."}}
+{"type":"message","id":"review-diff","message":{"role":"assistant","content":[{"type":"toolCall","id":"diff","name":"bash","arguments":{"command":"git diff main...HEAD -- src/charts db/migrations"}}]}}
+{"type":"message","id":"review-diff-result","message":{"role":"toolResult","toolCallId":"diff","content":"src/charts/cache.ts: cache keys now include team_id\nsrc/charts/move.ts: deletes the old team's cache before updating ownership\ndb/migrations/0042_backfill_team_ids.sql: fills existing cache rows"}}
+{"type":"message","id":"review-thought","message":{"role":"assistant","content":"The move path invalidates the old key inside the same transaction as the ownership update. I'll check the rollback case and access from the previous team."}}
+{"type":"message","id":"review-tests","message":{"role":"assistant","content":[{"type":"toolCall","id":"review-test","name":"bash","arguments":{"command":"bun test src/charts/move.test.ts"}}]}}
+{"type":"message","id":"review-tests-result","message":{"role":"toolResult","toolCallId":"review-test","content":"8 pass · 0 fail\nIncludes failed-move rollback and previous-team access denial."}}
+{"type":"message","id":"review-final","message":{"role":"assistant","content":"No blocking findings in PR #412.\n\nThe old team's cache key is removed transactionally, and rollback restores it if the move fails. The access check runs before cache lookup, so the previous team cannot read the moved chart. All 8 focused tests passed.\n\nOne deployment note: apply 0042 before enabling the new query. Existing rows need team IDs. I left the working tree unchanged."}}
+{"type":"custom","customType":"session_exit","data":{}}

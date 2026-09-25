@@ -116,6 +116,9 @@ final class Settings {
     var collapseIdle: Bool { didSet { save() } }
     /// How much of a thread shows by default; a thread can override it for itself.
     var detailLevel: DetailLevel { didSet { save() } }
+    /// Alerts for agents that need you (with the badge) and for finished work.
+    var notifyNeedsYou: Bool { didSet { save() } }
+    var notifyFinished: Bool { didSet { save() } }
 
     private let defaults = UserDefaults.standard
 
@@ -137,6 +140,8 @@ final class Settings {
         inboxSort = InboxSort(rawValue: defaults.string(forKey: "inboxSort") ?? "") ?? .recent
         collapseIdle = defaults.object(forKey: "collapseIdle") as? Bool ?? false
         detailLevel = DetailLevel(rawValue: defaults.string(forKey: "detailLevel") ?? "") ?? .folded
+        notifyNeedsYou = defaults.object(forKey: "notifyNeedsYou") as? Bool ?? false
+        notifyFinished = defaults.object(forKey: "notifyFinished") as? Bool ?? false
     }
 
     func theme(for scheme: ColorScheme) -> TerminalTheme {
@@ -160,6 +165,8 @@ final class Settings {
         defaults.set(inboxSort.rawValue, forKey: "inboxSort")
         defaults.set(collapseIdle, forKey: "collapseIdle")
         defaults.set(detailLevel.rawValue, forKey: "detailLevel")
+        defaults.set(notifyNeedsYou, forKey: "notifyNeedsYou")
+        defaults.set(notifyFinished, forKey: "notifyFinished")
     }
 }
 

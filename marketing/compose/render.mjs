@@ -42,74 +42,98 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: transparen
 .canvas { position: absolute; inset: 0; overflow: hidden; }
 h1 { font-family: Head; font-weight: 700; letter-spacing: -0.035em; line-height: 0.98; }
 p { font-family: Mono; letter-spacing: -0.01em; line-height: 1.3; }
-.shot { position: absolute; overflow: hidden; }
-.shot img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.bezel { position: absolute; border: solid rgba(255,255,255,0.13); pointer-events: none; }
 `;
 
 function page(body, css = '') {
   return `<!doctype html><html><head><meta charset="utf-8"><style>${baseCSS}${css}</style></head><body>${body}</body></html>`;
 }
 
-/// A screen capture with rounded corners, a hairline bezel and a soft shadow.
-function shot(src, { x, y, w, h, r, rotate = 0, day = false, shadow = true }) {
-  const bezel = Math.max(2, Math.round(w / 360));
-  const style = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;border-radius:${r}px;transform:rotate(${rotate}deg)`;
-  const glow = shadow ? `box-shadow:0 ${Math.round(w / 18)}px ${Math.round(w / 6)}px rgba(0,0,0,${day ? 0.18 : 0.55})` : '';
-  return `<div class="shot" style="${style};${glow}"><img src="${url(src)}"></div>` +
-    `<div class="bezel" style="${style};border-width:${bezel}px;border-color:${day ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.13)'}"></div>`;
+// MARK: Panorama stills
+//
+// Each device's stills are one continuous canvas (`slides.json` › `panorama`): a grid, two
+// colour pools and a gold thread run across every slide, and a fragment of the next slide's
+// screen straddles each boundary so the set reads as one strip. The canvas is rendered once
+// and cut into slides, so the seams match exactly. Geometry is per device, in slide-local
+// pixels; every screen is a real capture, whole or cropped (`crop`: x, y, width, height as
+// fractions of the capture).
+
+/// A capture in a generic device frame: a graphite surround and a hairline edge.
+function device(src, { x, y, w, r, size: [cw, ch], transform = '' }) {
+  const h = Math.round(w * ch / cw), s = 12;
+  return `<div style="position:absolute;left:${x - s}px;top:${y - s}px;width:${w + 2 * s}px;height:${h + 2 * s}px;border-radius:${r + s}px;background:${palette.plane};border:2px solid ${palette.edge};box-shadow:0 36px 90px rgba(0,0,0,.53);transform:${transform}">
+    <img src="${url(src)}" style="position:absolute;left:${s - 2}px;top:${s - 2}px;width:${w}px;height:${h}px;border-radius:${r}px"></div>`;
 }
 
-function glow(accent, { x, y, size, opacity = 0.2 }) {
-  return `<div style="position:absolute;left:${x - size / 2}px;top:${y - size / 2}px;width:${size}px;height:${size}px;border-radius:50%;background:${accent};filter:blur(${Math.round(size / 4)}px);opacity:${opacity}"></div>`;
+/// A region of a capture on a raised card, at `w` wide and never upscaled past 1:1.
+function card(src, crop, { x, y, w, size: [cw, ch], edge = palette.rule }) {
+  const [cx, cy, cwf, chf] = crop;
+  const scale = Math.min(1, w / (cwf * cw));
+  const width = Math.round(cwf * cw * scale), height = Math.round(chf * ch * scale);
+  return `<div style="position:absolute;left:${x}px;top:${y}px;width:${width}px;height:${height}px;border-radius:28px;overflow:hidden;background:${palette.canvas};border:2px solid ${edge};box-shadow:0 40px 110px rgba(0,0,0,.6)">
+    <img src="${url(src)}" style="position:absolute;left:${-cx * cw * scale}px;top:${-cy * ch * scale}px;width:${cw * scale}px;max-width:none"></div>`;
 }
 
-function header(slide, { x, y, width, head, sub, align = 'left', day = false }) {
-  const text = day ? palette.dayText : palette.text;
-  return `<header style="position:absolute;left:${x}px;top:${y}px;width:${width}px;text-align:${align}">
-    <h1 style="font-size:${head}px;color:${text}">${lines(slide.headline)}</h1>
-    <p style="font-size:${sub}px;color:${slide.accent};margin-top:${Math.round(head * 0.34)}px">${lines(slide.subline)}</p>
+function panelHeader(slide, index, g) {
+  const h = g.header;
+  return `<header style="position:absolute;left:${h.x}px;top:${h.y}px;width:${h.width}px">
+    <p style="font-size:${h.eyebrow}px;color:${palette.muted};letter-spacing:0.06em;text-transform:uppercase"><span style="color:${palette.gold}">${String(index + 1).padStart(2, '0')}</span>&nbsp;&nbsp;${esc(slide.eyebrow)}</p>
+    <h1 style="font-size:${h.head}px;color:${palette.bright};margin-top:${Math.round(h.eyebrow * 1.3)}px">${lines(slide.headline)}</h1>
+    <p style="font-size:${h.sub}px;color:${palette.text};opacity:0.78;margin-top:${Math.round(h.head * 0.22)}px">${lines(slide.subline)}</p>
   </header>`;
 }
 
-/// iPhone still layouts at 1320×2868; iPad at 2064×2752.
-const stillLayouts = {
-  phone(slide, W, H) {
-    const w = 1060, h = Math.round(w * H / W), x = (W - w) / 2, y = 700;
-    return glow(slide.accent, { x: W * 0.78, y: 1500, size: 1300, opacity: 0.16 }) +
-      header(slide, { x: 130, y: 210, width: W - 260, head: 124, sub: 44 }) +
-      shot(capture('iphone', slide.capture), { x, y, w, h, r: 150 });
-  },
-  loupe(slide, W, H) {
-    // The whole phone, and a magnified band of it (`slide.band`: top and bottom as
-    // fractions of the capture's height) in a card laid over its upper half.
-    const w = 940, h = Math.round(w * H / W), x = (W - w) / 2, y = H - h - 90;
-    const [top, bottom] = slide.band;
-    const cw = 1200, scale = cw / W, ch = Math.round((bottom - top) * H * scale);
-    const src = capture('iphone', slide.capture);
-    const card = `<div style="position:absolute;left:${(W - cw) / 2}px;top:${y + h * top - ch - 150}px;width:${cw}px;height:${ch}px;
-        border-radius:56px;overflow:hidden;border:4px solid ${slide.accent};box-shadow:0 50px 140px rgba(0,0,0,.7)">
-        <img src="${url(src)}" style="position:absolute;left:0;top:${-top * H * scale}px;width:${cw}px">
-      </div>`;
-    return glow(slide.accent, { x: W * 0.5, y: y + h * top, size: 1400, opacity: 0.14 }) +
-      header(slide, { x: 130, y: 210, width: W - 260, head: 124, sub: 44 }) +
-      shot(src, { x, y, w, h, r: 134 }) + card;
-  },
-  trio(slide, W, H) {
-    const [a, b, c] = slide.captures.map(name => capture('iphone', name));
-    const side = 640, sh = Math.round(side * H / W), mid = 760, mh = Math.round(mid * H / W);
-    return header(slide, { x: 130, y: 210, width: W - 260, head: 124, sub: 44, day: true }) +
-      shot(a, { x: -60, y: 1060, w: side, h: sh, r: 90, rotate: -5, day: true }) +
-      shot(c, { x: W - side + 60, y: 1060, w: side, h: sh, r: 90, rotate: 5, day: true }) +
-      shot(b, { x: (W - mid) / 2, y: 860, w: mid, h: mh, r: 108, day: true });
-  },
-  tablet(slide, W, H) {
-    const w = 1720, h = Math.round(w * H / W), x = (W - w) / 2, y = 640;
-    return glow(slide.accent, { x: W * 0.8, y: 1400, size: 1500, opacity: 0.14 }) +
-      header(slide, { x: 172, y: 190, width: W - 344, head: 128, sub: 46 }) +
-      shot(capture('ipad', slide.capture), { x, y, w, h, r: 64 });
-  },
-};
+/// One slide's screens, at slide-local coordinates. Returns [behind, front] layers.
+function panelScreens(slide, device_, g, size) {
+  const cap = name => capture(device_, name);
+  switch (slide.layout) {
+    case 'full': {
+      let front = device(cap(slide.capture), { ...g.full, r: g.radius, size });
+      if (slide.calloutCapture) front += card(cap(slide.calloutCapture), slide.crop, { ...slide.callout, size, edge: palette.gold });
+      return front;
+    }
+    case 'detail': {
+      const d = g.detail;
+      return device(cap(slide.capture), { ...d.screen, r: g.radius, size }) +
+        card(cap(slide.calloutCapture ?? slide.capture), slide.crop, { ...d.callout, ...slide.callout, size, edge: palette.gold });
+    }
+    case 'trio': {
+      const [a, b, c] = slide.captures.map(cap);
+      const t = g.trio;
+      return device(a, { ...t[0], r: g.radius * 0.6, size, transform: 'perspective(2400px) rotateY(6deg) rotateZ(-3deg)' }) +
+        device(c, { ...t[2], r: g.radius * 0.6, size, transform: 'perspective(2400px) rotateY(-6deg) rotateZ(3deg)' }) +
+        device(b, { ...t[1], r: g.radius * 0.7, size });
+    }
+    default:
+      throw new Error(`unknown layout ${slide.layout} on ${slide.id}`);
+  }
+}
+
+function panorama(device_, slides) {
+  const g = manifest.panorama[device_];
+  const [W, H] = g.size, N = slides.length, total = W * N;
+  const at = (i, html) => `<div style="position:absolute;left:${i * W}px;top:0;width:${W}px;height:${H}px">${html}</div>`;
+  const grid = `linear-gradient(to right, rgba(220,215,205,0.04) 1px, transparent 1px), linear-gradient(to bottom, rgba(220,215,205,0.04) 1px, transparent 1px)`;
+  const pools = `radial-gradient(circle ${g.pool}px at ${total * 0.23}px ${H * 0.6}px, rgba(232,194,122,0.10), transparent), radial-gradient(circle ${g.pool}px at ${total * 0.76}px ${H * 0.62}px, rgba(156,196,138,0.08), transparent)`;
+
+  // The thread: a rule under the headers across the strip, dropping at each seam that has
+  // a bridge into the fragment that straddles it.
+  let thread = `<line x1="0" y1="${g.thread}" x2="${total}" y2="${g.thread}"/>`;
+  const bridges = [];
+  slides.forEach((slide, i) => {
+    if (!slide.bridge || i === N - 1) return;
+    const seam = (i + 1) * W, b = g.bridge;
+    thread += `<line x1="${seam}" y1="${g.thread}" x2="${seam}" y2="${b.y}"/><circle cx="${seam}" cy="${g.thread}" r="9"/>`;
+    bridges.push(at(i, card(capture(device_, slide.bridge.capture), slide.bridge.crop ?? b.crop, { x: b.x, y: b.y, w: b.w, size: g.size })));
+  });
+  const svg = `<svg width="${total}" height="${H}" style="position:absolute;left:0;top:0" stroke="${palette.gold}" stroke-width="4" fill="${palette.gold}">${thread}</svg>`;
+
+  const screens = slides.map((slide, i) => at(i, panelScreens(slide, device_, g, g.size))).join('');
+  const headers = slides.map((slide, i) => at(i, panelHeader(slide, i, g) + (slide.cta
+    ? `<p style="position:absolute;left:${g.header.x}px;top:${g.cta}px;font-size:${g.header.sub}px;color:${palette.gold}">${esc(slide.cta)}</p>`
+    : ''))).join('');
+  return `<main class="canvas" style="width:${total}px;background:${palette.canvas};background-image:${pools}"><div style="position:absolute;inset:0;background-image:${grid};background-size:120px 120px"></div>
+    ${svg}${bridges.join('')}${screens}${headers}</main>`;
+}
 
 // MARK: Rendering
 
@@ -130,7 +154,7 @@ async function png(html, W, H, file, { transparent = false } = {}) {
   await writeFile(source, html);
   await tab.setViewportSize({ width: W, height: H });
   await tab.goto(url(source), { waitUntil: 'load' });
-  await tab.evaluate(() => document.fonts.ready);
+  await tab.evaluate(() => Promise.all([document.fonts.ready, ...[...document.images].map(i => i.decode())]));
   await tab.screenshot({ path: file, type: 'png', omitBackground: transparent });
   await rm(source);
   // App Store Connect rejects alpha; overlays for ffmpeg keep it.
@@ -138,17 +162,20 @@ async function png(html, W, H, file, { transparent = false } = {}) {
 }
 
 async function stills() {
-  const devices = { iphone: ['iphone-69', 1320, 2868], ipad: ['ipad-13', 2064, 2752] };
-  for (const [device, [dir, W, H]] of Object.entries(devices)) {
+  const dirs = { iphone: 'iphone-69', ipad: 'ipad-13' };
+  for (const [device_, dir] of Object.entries(dirs)) {
+    const slides = manifest.stills[device_];
+    const [W, H] = manifest.panorama[device_].size;
     const target = join(out, 'appstore/en-US', dir);
     await rm(target, { recursive: true, force: true });
     await mkdir(target, { recursive: true });
-    for (const [i, slide] of manifest.stills[device].entries()) {
-      const canvas = slide.day ? palette.dayCanvas : palette.canvas;
-      const body = `<main class="canvas" style="background:${canvas}">${stillLayouts[slide.layout](slide, W, H)}</main>`;
-      const file = join(target, `${String(i + 1).padStart(2, '0')}-${slide.id}.png`);
-      await png(page(body), W, H, file);
-      console.log(`still ${dir}/${String(i + 1).padStart(2, '0')}-${slide.id}`);
+    await mkdir(work, { recursive: true });
+    const master = join(work, `panorama-${device_}.png`);
+    await png(page(panorama(device_, slides)), W * slides.length, H, master);
+    for (const [i, slide] of slides.entries()) {
+      const name = `${String(i + 1).padStart(2, '0')}-${slide.id}`;
+      await run('magick', [master, '-crop', `${W}x${H}+${i * W}+0`, '+repage', '-alpha', 'off', join(target, `${name}.png`)]);
+      console.log(`still ${dir}/${name}`);
     }
   }
 }
@@ -288,42 +315,59 @@ async function social() {
       file: join(dir, 'launch-1920x1080.mp4'), endCard: endCard(1920, 1080, 0.8), endHold: 2.5 });
   }
 
-  // Link cards: the app's name, the headline, the blocked pane right, cropped by the edge.
-  for (const [name, W, H] of [['og-1200x630.png', 1200, 630], ['x-card-1600x900.png', 1600, 900]]) {
-    const s = W / 1600;
-    const w = Math.round(560 * s), h = Math.round(w * 2868 / 1320);
-    const body = `<main class="canvas" style="background:${palette.canvas}">
-      ${glow('#F0A04B', { x: W * 0.8, y: H * 0.5, size: 900 * s, opacity: 0.16 })}
-      <header style="position:absolute;left:${110 * s}px;top:0;height:${H}px;width:${780 * s}px;display:flex;flex-direction:column;justify-content:center">
-        <div style="display:flex;align-items:center;gap:${22 * s}px;margin-bottom:${56 * s}px">
-          <img src="${url(icon)}" style="width:${76 * s}px;height:${76 * s}px;border-radius:${17 * s}px">
-          <span style="font-family:Head;font-size:${44 * s}px;color:${palette.text}">Herdwick</span>
+  // Link cards: name, headline, a real conversation and its question on a raised card.
+  const { main, callout, crop } = manifest.social.captures;
+  const phone = [1320, 2868];
+  const cards = [
+    ['og-1200x630.png', 1200, 630, { text: [64, 120, 540], head: 64, sub: 24, mark: 56, screen: { x: 730, y: 54, w: 300 }, ask: { x: 630, y: 380, w: 530 } }],
+    ['x-card-1600x900.png', 1600, 900, { text: [88, 180, 680], head: 88, sub: 30, mark: 72, screen: { x: 1020, y: 80, w: 430 }, ask: { x: 800, y: 560, w: 700 } }],
+  ];
+  for (const [name, W, H, g] of cards) {
+    const [tx, ty, tw] = g.text;
+    const body = `<main class="canvas" style="${backdrop(W, H)}">
+      ${thread(W, H, ty - 36)}
+      ${device(capture('iphone', main), { ...g.screen, r: Math.round(g.screen.w * 0.09), size: phone })}
+      ${card(capture('iphone', callout), crop, { ...g.ask, size: phone, edge: palette.gold })}
+      <header style="position:absolute;left:${tx}px;top:${ty}px;width:${tw}px">
+        <div style="display:flex;align-items:center;gap:${g.mark * 0.3}px;margin-bottom:${g.mark * 0.6}px">
+          <img src="${url(icon)}" style="width:${g.mark}px;height:${g.mark}px;border-radius:${g.mark * 0.225}px">
+          <span style="font-family:Head;font-size:${g.mark * 0.6}px;color:${palette.bright}">Herdwick</span>
         </div>
-        <h1 style="font-size:${104 * s}px;color:${palette.text}">${esc(headline)}</h1>
-        <p style="font-size:${34 * s}px;color:${palette.gold};margin-top:${34 * s}px">${esc(tagline)}</p>
+        <h1 style="font-size:${g.head}px;color:${palette.bright}">${lines(headline)}</h1>
+        <p style="font-size:${g.sub}px;color:${palette.text};opacity:0.78;margin-top:${g.head * 0.3}px">${esc(tagline)}</p>
       </header>
-      ${shot(capture('iphone', 'pane-blocked'), { x: W - w - 150 * s, y: 90 * s, w, h, r: Math.round(w * 0.14) })}
     </main>`;
     await png(page(body), W, H, join(dir, name));
     console.log(`social ${name}`);
   }
 }
 
+/// The panorama's ground at any size: canvas, the 120 px grid and the two colour pools.
+function backdrop(W, H) {
+  const grid = `linear-gradient(to right, rgba(220,215,205,0.04) 1px, transparent 1px), linear-gradient(to bottom, rgba(220,215,205,0.04) 1px, transparent 1px)`;
+  const pools = `radial-gradient(circle ${W * 0.45}px at ${W * 0.3}px ${H * 0.6}px, rgba(232,194,122,0.10), transparent), radial-gradient(circle ${W * 0.4}px at ${W * 0.85}px ${H * 0.5}px, rgba(156,196,138,0.08), transparent)`;
+  return `background-color:${palette.canvas};background-image:${grid},${pools};background-size:120px 120px,120px 120px,100% 100%,100% 100%`;
+}
+
+/// The gold thread across a single canvas at `y`.
+function thread(W, H, y) {
+  return `<svg width="${W}" height="${H}" style="position:absolute;left:0;top:0"><line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="${palette.gold}" stroke-width="${Math.max(2, Math.round(W / 960))}"/></svg>`;
+}
+
 async function press() {
   const dir = join(out, 'press');
   await mkdir(dir, { recursive: true });
-  // Three distinct screens side by side, none cropped: the list, a reply, the machines.
-  const W = 3840, H = 2160, w = 700, h = Math.round(w * 2868 / 1320), gap = 70, left = 1480;
-  const phones = ['agents', 'pane-reply', 'tailscale'].map((name, i) =>
-    shot(capture('iphone', name), { x: left + i * (w + gap), y: (H - h) / 2 + (i === 1 ? -70 : 50), w, h, r: 100 }));
-  const hero = `<main class="canvas" style="background:${palette.canvas}">
-    ${glow('#F0A04B', { x: 2700, y: 1100, size: 2200, opacity: 0.12 })}
-    <header style="position:absolute;left:260px;top:0;height:${H}px;width:1300px;display:flex;flex-direction:column;justify-content:center">
-      <img src="${url(icon)}" style="width:220px;height:220px;border-radius:50px;margin-bottom:90px">
-      <h1 style="font-size:200px;color:${palette.text}">Herdwick</h1>
-      <p style="font-size:64px;color:${palette.gold};margin-top:50px">Coding agents,<br>from anywhere.</p>
-    </header>
+  const W = 3840, H = 2160, phone = [1320, 2868];
+  const spots = [{ x: 1450, y: 380 }, { x: 2230, y: 250 }, { x: 3010, y: 380 }];
+  const phones = manifest.social.press.map((name, i) => device(capture('iphone', name), { ...spots[i], w: 700, r: 62, size: phone }));
+  const hero = `<main class="canvas" style="${backdrop(W, H)}">
+    ${thread(W, H, 1080)}
     ${phones.join('')}
+    <header style="position:absolute;left:200px;top:0;height:${H}px;width:1100px;display:flex;flex-direction:column;justify-content:center">
+      <img src="${url(icon)}" style="width:200px;height:200px;border-radius:45px;margin-bottom:80px">
+      <h1 style="font-size:200px;color:${palette.bright}">Herdwick</h1>
+      <p style="font-size:64px;color:${palette.gold};margin-top:50px">${lines(manifest.social.brand)}</p>
+    </header>
   </main>`;
   await png(page(hero), W, H, join(dir, 'hero-3840x2160.png'));
   await png(page(`<main class="canvas" style="background:${palette.canvas};display:grid;place-items:center">

@@ -1,9 +1,4 @@
 Herdwick 1.0
 
-• Every coding agent on your machines in one list, sorted by who needs you first.
-• The live terminal of any pane, sized for your screen. Reply from the composer or take over typing.
-• Tailscale built in: sign in, pick a machine, connect with Tailscale SSH. No keys to copy.
-• Or plain SSH, with a key made on this device or a password.
-• Keeps the last snapshot on screen through a dropped connection and picks up in place.
-• Seven terminal themes, light and dark.
-• A built-in demo host, so you can look around before connecting anything.
+An agent inbox, conversations and live terminals for your herdr hosts.
+Connect over SSH or through Tailscale. Explore the demo before adding a host.

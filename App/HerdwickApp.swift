@@ -14,9 +14,13 @@ struct HerdwickApp: App {
                 .environment(model.tailnet)
                 .environment(model.demo)
                 .preferredColorScheme(model.settings.appearance.colorScheme)
+                .onOpenURL { model.open($0) }
         }
         .onChange(of: scenePhase) { _, phase in
             model.scenePhaseChanged(phase)
+        }
+        .backgroundTask(.appRefresh(AppModel.refreshTask)) {
+            await model.backgroundRefresh()
         }
     }
 }
@@ -46,6 +50,9 @@ struct RootView: View {
                             case .terminal:
                                 PaneView(connection: target, paneID: address.paneID)
                             }
+                        } else if model.connections.contains(where: { $0.profile.id == address.hostID && !$0.isLive }) {
+                            // Opened from an alert or a widget while the host is still connecting.
+                            ProgressView()
                         } else {
                             ContentUnavailableView("Session unavailable", systemImage: "network.slash",
                                                    description: Text("This host or session is no longer in the inbox."))

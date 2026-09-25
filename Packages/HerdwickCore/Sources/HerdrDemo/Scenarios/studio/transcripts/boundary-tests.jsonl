@@ -1,0 +1,4 @@
+{"type":"title","title":"Refill boundary tests"}
+{"type":"message","id":"boundary-user","message":{"role":"user","content":"Test empty-bucket Retry-After, fractional refill, and capacity clamping. Use a controlled Redis clock."}}
+{"type":"message","id":"boundary-note","message":{"role":"assistant","content":"The empty bucket must round Retry-After up to a whole second. I'm checking a request just before the next token becomes available, then advancing the clock across the boundary."}}
+{"type":"message","id":"boundary-call","message":{"role":"assistant","content":[{"type":"toolCall","id":"boundary-run","name":"bash","arguments":{"command":"bun test tests/limits/refill.test.ts"}}]}}

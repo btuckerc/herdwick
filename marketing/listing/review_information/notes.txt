@@ -1,19 +1,21 @@
-Herdwick is a client for herdr, open-source software (Apache-2.0, github.com/herdrdev/herdr) that developers run on their own Mac or Linux machine to host terminal sessions for coding agents. Herdwick connects to that machine over SSH, lists the agents herdr tracks, shows a pane's live terminal and sends replies. There is no account and no server operated by the developer.
+Herdwick is a client for herdr, open-source software (Apache-2.0, github.com/herdrdev/herdr) that developers run on their own Mac or Linux machine to host terminal sessions for coding agents. Herdwick connects to that machine over SSH, lists the agents herdr tracks, shows each agent's conversation and live terminal, and sends replies. There is no account and no server operated by the developer.
 
 HOW TO REVIEW WITHOUT A MACHINE
 On the first screen, tap "No machine handy? Explore a demo host". This opens a scripted herdr host built into the app, so every screen can be reached without SSH access:
-1. Agents: agents grouped by Needs you, Done, Working and Idle. Switch to Workspaces with the segmented control.
-2. Tap "Deploy to staging" (Needs you). The pane shows the agent's terminal with a question.
-3. Type a reply in the Message field (for example "Run the migrations first, then deploy") and tap Send. The agent moves to Working, then Done.
-4. The key bar above the composer sends Esc, Tab, arrows, Enter and Ctrl-C. The keyboard button takes over typing.
-5. The gear button opens Settings: appearance, terminal themes, font, haptics.
-6. The host menu (top left) has "Leave Demo" to return to the first screen.
+1. Inbox: agents grouped by Needs you, Done, Working and Idle. The view button (bottom left) switches between Agents and Machines (host, workspace, tab and pane).
+2. Tap "Deploy to staging" (Needs you). Its conversation opens with the agent's question at the bottom.
+3. Choose an answer (for example "Run the migrations first, then deploy") and tap Send. The agent moves to Working, then Done.
+4. "Terminal" (top right of a conversation) shows the pane's live terminal. The key bar above the composer sends Esc, Tab, arrows, Enter and Ctrl-C.
+5. The gear button opens Settings: appearance, conversation detail, inbox, notifications, terminal themes and font, haptics.
+6. Tap the title to open Hosts; "Leave Demo" returns to the first screen.
 
 REAL CONNECTIONS
 - Address: SSH to any host running herdr, using a key generated on the device (shown in Settings to add to authorized_keys) or a password.
 - Tailscale: optional. It needs the reviewer's own Tailscale account and a machine on that tailnet; the embedded Tailscale client (libtailscale) runs inside the app and does not install a VPN profile. The Address path covers the same features.
 
 PERMISSIONS AND DATA
-Network access only. SSH keys and passwords are stored in the iOS Keychain on the device. No analytics or tracking. Terminal content goes directly between the device and the user's machine.
+- Network: connections go directly between the device and the user's machine. SSH keys and passwords are stored in the iOS Keychain on the device. No analytics or tracking.
+- Notifications: off until the user turns on Settings > Notifications. Alerts are local, posted when the app is open or during iOS background refresh, when an agent needs input or finishes. There is no push server.
+- Photos: only when the user attaches an image to a message; it is uploaded to the user's own machine.
 
 Herdwick is an independent project, not affiliated with the herdr project or Tailscale Inc.

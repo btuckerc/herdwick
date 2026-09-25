@@ -85,6 +85,92 @@ import HerdrAPI
             _ = try Fixture.scenario(timeline: #"[{"t": 1, "do": "status", "pane": "p9", "status": "done"}]"#)
         }
     }
+
+    @Test(.timeLimit(.minutes(1))) func transcriptsReadFollowAndAppendThroughClient() async throws {
+        let scenario = try DemoScenario.bundled("studio")
+        let client = HerdrClient(runner: DemoHost(scenario: scenario))
+        let snapshot = try await client.snapshot(session: "main")
+        let ref = try #require(snapshot.agents.first { $0.paneID == "p1" }?.agentSession)
+        let location = try #require(try await client.locateTranscript(ref, pane: "p1", session: "main"))
+        let initial = try await client.readFileTail(path: location.path, from: 0, limit: 100_000)
+        #expect(initial.fileSize == initial.bytes.count)
+        let slice = try await client.readFileTail(path: location.path, from: 13, limit: 27)
+        #expect(slice.bytes == Array(initial.bytes[13..<40]))
+        #expect(slice.fileSize == initial.fileSize)
+        #expect(try await client.readFileTail(path: location.path, from: initial.fileSize + 10, limit: 40).bytes.isEmpty)
+        #expect(try await client.readFileTail(path: "/missing.jsonl", from: 0, limit: 40).fileSize == 0)
+
+        var stream = client.followFile(path: location.path, from: 13).makeAsyncIterator()
+        #expect(try await stream.next() == Array(initial.bytes.dropFirst(13)))
+        var reader = TranscriptReader()
+        var conversation = Conversation()
+        conversation.apply(reader.append(initial.bytes))
+        let ask = try #require(conversation.pendingAsk)
+        let prompt = try #require(ScreenPrompt.parse(try await client.readPane("p1", session: "main").text))
+        #expect(prompt.title == ask.questions[0].question)
+        #expect(prompt.options.map(\.label) == ask.questions[0].options.map(\.label))
+
+        try await PromptDriver.answer(ask, replies: [.init(selected: ["Run migrations, then deploy"])],
+                                      io: DemoPromptIO(client: client, path: location.path))
+        conversation.apply(reader.append(try #require(try await stream.next())))
+        #expect(conversation.pendingAsk == nil)
+        conversation.apply(reader.append(try #require(try await stream.next())))
+        #expect(conversation.items.last?.id == "deploy-final")
+        let finished = try await client.readFileTail(path: location.path, from: initial.fileSize, limit: 100_000)
+        var finishedReader = TranscriptReader()
+        #expect(finishedReader.append(finished.bytes).contains { if case .message(let message) = $0 { message.id == "deploy-final" } else { false } })
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(try await client.snapshot(session: "main").agents.first { $0.paneID == "p1" }?.agentStatus == .done)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func timelineAppendAndChildTranscripts() async throws {
+        let scenario = try Fixture.scenario(timeline: #"[{"t":0.01,"do":"append","pane":"p1","records":"reply.jsonl"}]"#, transcript: true)
+        let host = DemoHost(scenario: scenario)
+        let client = HerdrClient(runner: host)
+        let path = DemoScenario.transcriptPath("p1")
+        let head = try await client.readFileTail(path: path, from: 0, limit: 1000)
+        var stream = client.followFile(path: path, from: head.fileSize).makeAsyncIterator()
+        host.startClock()
+        let appended = try #require(try await stream.next())
+        #expect(String(decoding: appended, as: UTF8.self) == "{\"type\":\"title\",\"title\":\"After\"}\n")
+
+        let studio = HerdrClient(runner: DemoHost(scenario: try .bundled("studio")))
+        let parent = DemoScenario.transcriptPath("p5")
+        let active = try #require(SubagentTranscript.path(parentPath: parent, format: .omp, subagentID: "boundary-tests"))
+        let exited = try #require(SubagentTranscript.path(parentPath: parent, format: .omp, subagentID: "redis-check"))
+        #expect(try await studio.childTranscriptStates(["active": active, "exited": exited, "gone": "/gone.jsonl"]) == ["active": .active, "exited": .exited, "gone": .missing])
+        var reader = TranscriptReader()
+        var conversation = Conversation()
+        conversation.apply(reader.append(try await studio.readFileTail(path: parent, from: 0, limit: 100_000).bytes))
+        #expect(conversation.workingSubagents.map(\.id) == ["boundary-tests"])
+        #expect(conversation.subagents.first { $0.id == "redis-check" }?.state == .completed)
+        let child = try await studio.readFileTail(path: active, from: 0, limit: 100_000)
+        var childReader = TranscriptReader()
+        var childConversation = Conversation()
+        childConversation.apply(childReader.append(child.bytes))
+        #expect(childConversation.items.contains { if case .tool(let tool) = $0 { tool.id == "boundary-run" && tool.state == .running } else { false } })
+    }
+
+    @Test(.timeLimit(.minutes(1))) func previewComposerSendContinuesConversation() async throws {
+        let client = HerdrClient(runner: DemoHost(scenario: try .bundled("preview")))
+        let path = DemoScenario.transcriptPath("p1")
+        let head = try await client.readFileTail(path: path, from: 0, limit: 100_000)
+        var stream = client.followFile(path: path, from: head.fileSize).makeAsyncIterator()
+        try await client.sendText("Run the migrations first, then deploy", pane: "p1", submit: true, session: "main")
+        var reader = TranscriptReader()
+        var conversation = Conversation()
+        conversation.apply(reader.append(head.bytes))
+        conversation.apply(reader.append(try #require(try await stream.next())))
+        #expect(conversation.pendingAsk == nil)
+        conversation.apply(reader.append(try #require(try await stream.next())))
+        #expect(conversation.items.contains { if case .tool(let tool) = $0 { tool.id == "deploy-run" && tool.state == .succeeded } else { false } })
+    }
+
+    @Test func appendRequiresDeclaredTranscript() throws {
+        #expect(throws: DemoError.self) {
+            _ = try Fixture.scenario(timeline: #"[{"t":0,"do":"append","pane":"p1","records":"reply.jsonl"}]"#)
+        }
+    }
 }
 
 @Suite struct ScreenMarkupTests {
@@ -119,13 +205,35 @@ import HerdrAPI
     }
 }
 
+private struct DemoPromptIO: PromptIO {
+    let client: HerdrClient
+    let path: String
+    func readVisible() async throws -> String { try await client.readPane("p1", session: "main").text }
+    func send(keys: [String]) async throws { try await client.sendKeys(keys, pane: "p1", session: "main") }
+    func type(_ text: String) async throws { try await client.sendText(text, pane: "p1", submit: false, session: "main") }
+    func waitForResult(toolCallId: String, timeout: Duration) async throws -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            var reader = TranscriptReader()
+            var conversation = Conversation()
+            conversation.apply(reader.append(try await client.readFileTail(path: path, from: 0, limit: 100_000).bytes))
+            if case .ask(let ask) = conversation.item(id: toolCallId), ask.answer != nil { return true }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        return false
+    }
+}
+
 private enum Fixture {
     /// A one-pane scenario on disk with the given timeline JSON.
-    static func scenario(timeline: String) throws -> DemoScenario {
+    static func scenario(timeline: String, transcript: Bool = false) throws -> DemoScenario {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("herdwick-demo-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try "before".write(to: dir.appendingPathComponent("before.screen"), atomically: true, encoding: .utf8)
         try "after".write(to: dir.appendingPathComponent("after.screen"), atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "{\"type\":\"title\",\"title\":\"Before\"}\n".write(to: dir.appendingPathComponent("initial.jsonl"), atomically: true, encoding: .utf8)
+        try "{\"type\":\"title\",\"title\":\"After\"}\n".write(to: dir.appendingPathComponent("reply.jsonl"), atomically: true, encoding: .utf8)
         let json = """
             {
               "host": {"name": "box", "address": "box", "user": "me"},
@@ -139,6 +247,7 @@ private enum Fixture {
                 "agents": [{"pane_id": "p1", "workspace_id": "w1", "tab_id": "t1", "agent_status": "working", "focused": true}]
               },
               "screens": {"p1": "before.screen"},
+              "transcripts": \(transcript ? #"{"p1":"initial.jsonl"}"# : "{}"),
               "timeline": \(timeline)
             }
             """

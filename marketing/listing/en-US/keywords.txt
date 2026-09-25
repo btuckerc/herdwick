@@ -1,1 +1,1 @@
-ssh,terminal,tailscale,remote,console,mobile,cli,ai,shell,dev,tmux,monitor,vibe,pair,mosh,code
+console,shell,cli,session,workspace,monitor,command,prompt,reply,permission,server,connection,mobile

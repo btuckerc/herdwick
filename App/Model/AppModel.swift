@@ -1,3 +1,4 @@
+import BackgroundTasks
 import Foundation
 import Network
 import SwiftUI
@@ -41,6 +42,8 @@ final class AppModel {
     private let pathMonitor = NWPathMonitor()
     private var pathSignature: String?
     private var isForeground = true
+    @ObservationIgnored private var attention: Attention?
+    static let refreshTask = "dev.btuckerc.herdwick.refresh"
 
     init() {
         if let launch = DemoLaunch.current {
@@ -49,6 +52,9 @@ final class AppModel {
             return
         }
         profiles = ProfileStorage.load()
+        attention = Attention(settings: settings, links: { [weak self] in self?.connections ?? [] },
+                              onScreen: { [weak self] in self?.onScreen },
+                              open: { [weak self] in self?.open($0) })
         if profiles.contains(where: \.isTailnet) || tailnet.isConfigured {
             tailnet.start()
         }
@@ -117,6 +123,7 @@ final class AppModel {
                     self?.reconcileSessions(link)
                 }) { [weak self] updated in self?.store(updated) }
                 link.includesAllSessions = settings.allHosts
+                link.onAttentionChange = { [weak self] in self?.attention?.changed($0) }
                 primary[profile.id] = link
                 if isForeground { link.handle(.start) }
             }
@@ -140,6 +147,7 @@ final class AppModel {
             // would require a new host-level supervisor and cross-session cancellation
             // ownership. Cost: one SSH keepalive per session, all closed in background.
             let link = HostConnection(profile: profile, tailnet: tailnet) { _ in }
+            link.onAttentionChange = { [weak self] in self?.attention?.changed($0) }
             additional[key] = link
             if isForeground { link.handle(.start) }
         }
@@ -247,6 +255,58 @@ final class AppModel {
         demo = nil
     }
 
+    // MARK: Attention
+
+    func requestNotifications() async -> Bool {
+        await attention?.requestAuthorization() ?? false
+    }
+
+    /// An alert or a widget asked for this agent: show its host, then its conversation.
+    func open(_ address: PaneAddress) {
+        guard demo == nil, let profile = profiles.first(where: { $0.id == address.hostID }) else { return }
+        if !settings.allHosts {
+            if selectedHostID != address.hostID { select(address.hostID) }
+            if profile.session != address.session { selectSession(address.session) }
+        }
+        navigationPath = [.conversation(address)]
+    }
+
+    func open(_ url: URL) {
+        guard let link = AttentionLink.parse(url) else { return }
+        open(PaneAddress(hostID: link.host, session: link.session, paneID: link.pane))
+    }
+
+    private var onScreen: PaneAddress? {
+        guard isForeground, case .conversation(let address)? = navigationPath.last else { return nil }
+        return address
+    }
+
+    /// iOS wakes the app now and then: reconnect long enough for one snapshot per link,
+    /// which raises any alerts and refreshes the widgets, then let go again.
+    func backgroundRefresh() async {
+        scheduleRefresh()
+        guard demo == nil, !isForeground else { return }
+        let links = connections
+        let before = links.map(\.liveID)
+        for link in links { link.handle(.foregrounded) }
+        let deadline = ContinuousClock.now + .seconds(20)
+        func settled(_ link: HostConnection, _ id: Int) -> Bool {
+            if case .failed = link.phase { return true }
+            return link.phase == .offline || link.liveID != id
+        }
+        while ContinuousClock.now < deadline, !isForeground, !zip(links, before).allSatisfy(settled) {
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        guard !isForeground else { return }
+        for link in links { link.handle(.backgrounded) }
+    }
+
+    private func scheduleRefresh() {
+        let request = BGAppRefreshTaskRequest(identifier: Self.refreshTask)
+        request.earliestBeginDate = .now.addingTimeInterval(15 * 60)
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
     // MARK: Lifecycle
 
     func scenePhaseChanged(_ phase: ScenePhase) {
@@ -259,6 +319,7 @@ final class AppModel {
         case .background:
             isForeground = false
             for link in connections { link.handle(.backgrounded) }
+            if demo == nil { scheduleRefresh() }
         default:
             break
         }

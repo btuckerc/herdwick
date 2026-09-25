@@ -44,11 +44,11 @@ func inboxSections(
     let urgent = visible.filter { $0.agent.agentStatus == .blocked }
     let rest = visible.filter { $0.agent.agentStatus != .blocked }
     @MainActor func priority(_ thread: Thread) -> Int {
-        let status = thread.agent.agentStatus
+        let status = thread.connection.presentedStatus(thread.agent)
         if status == .blocked { return 0 }
-        if status == .done && thread.connection.isUnread(thread.agent) { return 1 }
+        if status == .done { return 1 }
         if status == .working { return 2 }
-        if status == .done || status == .idle { return 3 }
+        if status == .idle { return 3 }
         return 4
     }
     @MainActor func precedes(_ lhs: Thread, _ rhs: Thread) -> Bool {
@@ -72,7 +72,9 @@ func inboxSections(
             let label = thread.workspace?.label ?? "Workspace"
             let id = "\(thread.address.hostID).\(thread.address.session).\(thread.agent.workspaceID)"
             return (id, allHosts ? "\(thread.connection.profile.name) · \(label)" : label)
-        case .status: return (thread.agent.agentStatus.label, thread.agent.agentStatus.label)
+        case .status:
+            let label = thread.connection.presentedStatus(thread.agent).label
+            return (label, label)
         }
     }
     // In priority mode the most urgent member determines a group's position.
@@ -87,7 +89,7 @@ func inboxSections(
     }
     let sections = keys.map { key -> InboxSection in
         let sorted = groups[key]!
-        let idle = collapseIdle ? sorted.filter { $0.agent.agentStatus == .idle && !$0.connection.isUnread($0.agent) } : []
+        let idle = collapseIdle ? sorted.filter { $0.connection.presentedStatus($0.agent) == .idle } : []
         let collapsed = idle.count >= 2
         let idleIDs = Set(idle.map(\.address))
         return InboxSection(id: key, title: group(sorted[0]).title, threads: collapsed ? sorted.filter { !idleIDs.contains($0.address) } : sorted, idle: collapsed ? idle : [])
