@@ -143,8 +143,9 @@ From the councils of 2026-09-25 (`Attention`, `Push`):
   read an `AttentionSnapshot` the app writes to the App Group: every visible agent as the app
   presents it (needs you, unread done, working, idle; newest change first within each), when
   the app saw that state begin, and whether every host answered. Small shows the three counts
-  and the most pressing agent; medium adds up to three agents, each a link, with a live
-  "4 minutes ago". The app reloads timelines only when that content changes. Widgets say when
+  and the most pressing agent; medium adds the two most pressing agents, each a link, with a
+  live "4m ago", and drops to one agent (then counts only) when the widget or text size leaves
+  no room, so nothing clips. The app reloads timelines only when that content changes. Widgets say when
   what they show is old or a host was offline and never claim "all clear" then.
   `herdwick://open?host=&session=&pane=` deep-links alerts and widgets.
 - Alerts while away (opt-in, Settings › Alerts While Away, with a How It Works page). As the

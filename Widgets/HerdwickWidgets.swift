@@ -133,6 +133,7 @@ struct AttentionView: View {
             ViewThatFits(in: .horizontal) {
                 counts(font: .title3, spacing: 12)
                 counts(font: .headline, spacing: 8)
+                counts(font: .footnote, spacing: 6)
             }
             Spacer(minLength: 0)
             if let top {
@@ -164,40 +165,52 @@ struct AttentionView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    /// Two rows at most: in priority order, so idle agents only fill space nothing else wants.
+    /// ViewThatFits takes the first layout whose natural height fits, so nothing clips on a small
+    /// phone or at a large text size; the chosen one then spreads over the widget's height.
     private var medium: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                counts(font: .headline, spacing: 14)
-                Spacer(minLength: 8)
-                Text(footnote)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        let rows = items.prefix(2)
+        return ViewThatFits(in: .vertical) {
+            mediumLayout(rows, titleLines: 1)
+            mediumLayout(rows.prefix(1), titleLines: 2)
+            mediumLayout(rows.prefix(1), titleLines: 1)
+            mediumLayout([], titleLines: 1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func mediumLayout(_ rows: ArraySlice<AttentionSnapshot.Item>, titleLines: Int) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                counts(font: .subheadline, spacing: 12)
+                    .fixedSize()
+                Spacer(minLength: 0)
+                ViewThatFits(in: .horizontal) {
+                    Text(footnote)
+                    Text(shortFootnote)
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
             if items.isEmpty {
-                Spacer(minLength: 0)
+                Spacer(minLength: 10)
                 Text(emptyText)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
             } else {
-                VStack(alignment: .leading, spacing: 7) {
-                    ForEach(items.prefix(3)) { item in
-                        Link(destination: item.url) { row(item) }
-                    }
+                ForEach(rows) { item in
+                    Spacer(minLength: 10)
+                    Link(destination: item.url) { row(item, titleLines: titleLines) }
                 }
-                Spacer(minLength: 0)
-                if items.count > 3 {
-                    Text("\(items.count - 3) more")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                if rows.count < 2 { Spacer(minLength: 0) }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func row(_ item: AttentionSnapshot.Item) -> some View {
+    /// Icon for the state, then title over "host · session · 2m ago", the age ticking without a reload.
+    private func row(_ item: AttentionSnapshot.Item, titleLines: Int) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: item.state.symbol)
                 .font(.subheadline)
@@ -206,28 +219,25 @@ struct AttentionView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.title)
                     .font(.subheadline.weight(item.state == .idle ? .regular : .semibold))
-                    .lineLimit(1)
-                detail(item, showsState: true)
+                    .lineLimit(titleLines)
+                Group {
+                    if let since = item.since {
+                        let age = Text(.currentDate, format: Date.AnchoredRelativeFormatStyle(
+                            anchor: since, allowedFields: [.minute, .hour, .day],
+                            presentation: .numeric, unitsStyle: .narrow))
+                        Text("\(item.place) · \(age)")
+                    } else {
+                        Text(item.place)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(item.state.label), \(item.title), \(item.place)")
         .privacySensitive()
-    }
-
-    /// "Working · studio · api · 4 min ago": the time ticks without a widget reload.
-    private func detail(_ item: AttentionSnapshot.Item, showsState: Bool) -> some View {
-        let lead = (showsState ? [item.state.label, item.place] : [item.place]).joined(separator: " · ")
-        return Group {
-            if let since = item.since {
-                let ago = Text(.currentDate, format: .reference(to: since, allowedFields: [.minute, .hour, .day],
-                                                                maxFieldCount: 1))
-                Text("\(lead) · \(ago)")
-            } else {
-                Text(lead)
-            }
-        }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
     }
 
     /// Needs you, done and working as symbol and number; zero reads secondary.
@@ -238,7 +248,9 @@ struct AttentionView: View {
                 Label {
                     Text("\(value)").font(.system(font, design: .rounded).weight(.semibold))
                 } icon: {
-                    Image(systemName: state.symbol).foregroundStyle(value > 0 ? state.color : .secondary)
+                    Image(systemName: state.symbol)
+                        .font(.system(font))
+                        .foregroundStyle(value > 0 ? state.color : .secondary)
                 }
                 .labelStyle(CountLabelStyle())
                 .foregroundStyle(value > 0 ? .primary : .secondary)
@@ -271,6 +283,13 @@ struct AttentionView: View {
         let time = snapshot.updated.formatted(date: .omitted, time: .shortened)
         if !snapshot.complete { return "Some hosts offline · \(time)" }
         return stale ? "As of \(time)" : time
+    }
+
+    /// The footnote where width is short: the warning kept, the wording cut.
+    private var shortFootnote: String {
+        guard let snapshot else { return "Open Herdwick" }
+        let time = snapshot.updated.formatted(date: .omitted, time: .shortened)
+        return snapshot.complete ? time : "Offline · \(time)"
     }
 }
 
