@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "bundleID": "dev.btuckerc.herdwick",
+  "app": "build/DerivedData/Build/Products/Debug-iphonesimulator/Herdwick.app",
+  "devices": {
+    "iphone": {"simulator": "iPhone 18 Pro Max", "size": [1320, 2868]},
+    "ipad": {"simulator": "iPad Pro 13-inch (M5)", "size": [2064, 2752], "args": ["-fontSize", "18"]}
+  },
+  "defaults": ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-appearance", "dark", "-theme.dark", "herdwick-night", "-fontSize", "14"],
+  "scenes": [
+    {"id": "agents", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "agents"]},
+    {"id": "workspaces", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "workspaces"]},
+    {"id": "pane-blocked", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p1"]},
+    {"id": "pane-reply", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p1", "-HerdwickDraft", "Run the migrations first, then deploy"]},
+    {"id": "pane-replied", "scenario": "replied", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p1"]},
+    {"id": "reconnecting", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "agents", "-HerdwickDrop", "YES"]},
+    {"id": "tailscale", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "tailscale"]},
+    {"id": "onboarding", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "onboarding"]},
+    {"id": "settings", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "settings"]},
+    {"id": "theme-day", "devices": ["iphone"], "args": ["-HerdwickScene", "pane:p2", "-appearance", "light", "-theme.light", "herdwick-day"]},
+    {"id": "theme-mocha", "devices": ["iphone"], "args": ["-HerdwickScene", "pane:p2", "-theme.dark", "catppuccin-mocha"]},
+    {"id": "theme-gruvbox", "devices": ["iphone"], "args": ["-HerdwickScene", "pane:p2", "-theme.dark", "gruvbox-dark"]}
+  ],
+  "preview": {"scenario": "preview", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "agents"]}
+}

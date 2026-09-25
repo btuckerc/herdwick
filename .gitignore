@@ -1,0 +1,12 @@
+.build*/
+.swiftpm/
+*.xcodeproj/
+DerivedData/
+build/
+*.xcarchive/
+*.ipa
+*.p8
+Frameworks/TailscaleKit.xcframework/
+App/Info.plist
+.DS_Store
+xcuserdata/

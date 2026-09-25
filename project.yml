@@ -1,0 +1,56 @@
+name: Herdwick
+options:
+  bundleIdPrefix: dev.btuckerc
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: 7F3KV9WTNW
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+packages:
+  HerdwickCore:
+    path: Packages/HerdwickCore
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: "1.20.0"
+targets:
+  Herdwick:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    dependencies:
+      - package: HerdwickCore
+        product: HerdrAPI
+      - package: HerdwickCore
+        product: HerdwickSSH
+      - package: HerdwickCore
+        product: HerdrDemo
+      - package: SwiftTerm
+      # Built by scripts/mini/build-tailscalekit.sh; not checked in.
+      - framework: Frameworks/TailscaleKit.xcframework
+        embed: true
+    info:
+      path: App/Info.plist
+      properties:
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: Herdwick connects to herdr on computers on your local network.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.btuckerc.herdwick
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        INFOPLIST_KEY_CFBundleDisplayName: Herdwick
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        GENERATE_INFOPLIST_FILE: YES

@@ -1,0 +1,19 @@
+<b>Token-bucket rate limiter</>
+
+<cyan>┃</> add a token-bucket limiter to /v1, 100 req/min per key
+
+<gray>⚙</> <b>write</> internal/ratelimit/bucket.go
+<gray>⚙</> <b>write</> internal/ratelimit/bucket_test.go
+<gray>⚙</> <b>edit</>  cmd/api/router.go <green>+6</> <red>-1</>
+
+<gray>$</> go test ./internal/ratelimit/...
+<green>ok</>   api/internal/ratelimit   0.412s
+
+<gray>$</> go test -race ./...
+<gray>…</>
+
+<footer>
+<cyan>■■■</><gray>■■■■■</>  <b>Running tests</>
+
+<cyan>┃</> <gray>Type a message</>
+<gray>build · opencode</>

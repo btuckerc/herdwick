@@ -1,0 +1,38 @@
+{
+  "version": 2,
+  "palette": {"canvas": "#1B1D1F", "text": "#DCD7CD", "muted": "#8E8A82", "gold": "#E8C27A", "dayCanvas": "#F6F3EC", "dayText": "#33312D"},
+  "stills": {
+    "iphone": [
+      {"id": "needs-you", "layout": "phone", "capture": "pane-blocked", "headline": "Your agent needs you.", "subline": "Answer it from anywhere.", "accent": "#F0A04B"},
+      {"id": "agents", "layout": "phone", "capture": "agents", "headline": "Every agent.\nOne list.", "subline": "The one that needs you comes first.", "accent": "#E8C27A"},
+      {"id": "reply", "layout": "phone", "capture": "pane-replied", "headline": "Read it. Reply.\nMove on.", "subline": "A live terminal and a real composer.", "accent": "#8CC08A"},
+      {"id": "tailscale", "layout": "phone", "capture": "tailscale", "headline": "Tailscale\nbuilt in.", "subline": "Sign in, pick a machine. No VPN to switch on.", "accent": "#7FA7D9"},
+      {"id": "keys", "layout": "loupe", "capture": "pane-reply", "band": [0.855, 0.955], "headline": "The keys agents\nask for.", "subline": "Esc, Tab, arrows, Enter, Ctrl-C.", "accent": "#E8C27A"},
+      {"id": "themes", "layout": "trio", "captures": ["theme-day", "theme-mocha", "theme-gruvbox"], "headline": "Your terminal,\nyour look.", "subline": "Seven themes, light and dark.", "accent": "#B8894A", "day": true},
+      {"id": "demo", "layout": "phone", "capture": "onboarding", "headline": "No account.\nNothing to install.", "subline": "Look around the demo host first.", "accent": "#E8C27A"}
+    ],
+    "ipad": [
+      {"id": "agents", "layout": "tablet", "capture": "agents", "headline": "Every agent, every workspace.", "subline": "The one that needs you comes first.", "accent": "#E8C27A"},
+      {"id": "needs-you", "layout": "tablet", "capture": "pane-blocked", "headline": "Your agent needs you.", "subline": "Its live terminal, with room to breathe.", "accent": "#F0A04B"},
+      {"id": "reply", "layout": "tablet", "capture": "pane-replied", "headline": "Answer from the couch.", "subline": "Read the terminal. Reply in place.", "accent": "#8CC08A"},
+      {"id": "tailscale", "layout": "tablet", "capture": "tailscale", "headline": "Tailscale built in.", "subline": "Sign in, pick a machine. No VPN to switch on.", "accent": "#7FA7D9"},
+      {"id": "settings", "layout": "tablet", "capture": "settings", "headline": "Make it yours.", "subline": "Seven themes, light and dark.", "accent": "#E8C27A"}
+    ]
+  },
+  "preview": {
+    "lead": 0.6,
+    "tail": 0.8,
+    "captions": [
+      {"start": 0.0, "end": 2.9, "text": "Your agent needs you."},
+      {"start": 3.0, "end": 5.9, "text": "Its live terminal."},
+      {"start": 6.0, "end": 12.9, "text": "Answer from anywhere."},
+      {"start": 13.0, "end": 16.9, "text": "Every agent. One list."},
+      {"start": 17.0, "end": 21.0, "text": "Drops happen. It picks up."}
+    ]
+  },
+  "social": {
+    "headline": "Your agent needs you.",
+    "tagline": "Herdwick for herdr. Coding agents, from anywhere.",
+    "endCard": {"title": "Herdwick", "line": "Free on the App Store"}
+  }
+}

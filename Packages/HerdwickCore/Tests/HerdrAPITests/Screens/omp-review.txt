@@ -1,0 +1,26 @@
+
+ Call the ask tool exactly once with a single multi-select question (multi: true): 'Which fruits do you like?' with
+ options Apple, Banana, Cherry. Then reply with what I picked.
+
+
+
+ Now call the ask tool once with two questions in one call: id 'size' 'Which size?' options Small, Medium, Large
+ (recommended index 1); id 'drink' 'Which drink?' options Tea, Coffee. Then reply with my answers.
+
+
+  󱊷 Working…
+
+╭─ Ask ────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  size    drink    Submit                                                                                             │
+│ Review answers                                                                                                       │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 1. size: Large                                                                                                       │
+│ 2. drink: “Sparkling water”                                                                                          │
+│                                                                                                                      │
+│  Submit                                                                                                             │
+│                                                                                                                      │
+│                                                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Enter submit · ↑/↓ scroll · Esc cancel                                                                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+work

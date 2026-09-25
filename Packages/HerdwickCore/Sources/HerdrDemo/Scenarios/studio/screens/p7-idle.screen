@@ -1,0 +1,15 @@
+<gray>></> go through the API reference and flag endpoints whose examples no longer match the handlers
+
+<green>●</> Checked 38 endpoints. 3 examples are stale:
+
+  <yellow>GET /v1/charts</>      <gray>range is now required</>
+  <yellow>POST /v1/teams</>      <gray>returns 201, not 200</>
+  <yellow>DELETE /v1/keys/:id</> <gray>body removed</>
+
+  I haven't changed anything. Say the word and I'll update the examples.
+
+<footer>
+<gray><rule></>
+<gray>></>
+<gray><rule></>
+  <gray>? for shortcuts</>

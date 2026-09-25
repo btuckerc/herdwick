@@ -1,0 +1,8 @@
+{
+  "extends": "studio",
+  "setup": [
+    {"do": "screen", "pane": "p1", "screen": "../studio/screens/p1-deployed.screen"},
+    {"do": "status", "pane": "p1", "status": "done"}
+  ],
+  "timeline": []
+}

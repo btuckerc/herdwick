@@ -1,0 +1,20 @@
+<gray>></> the retry test fails about 1 run in 20 on CI. find out why
+
+<green>●</> <b>Bash</>(for i in $(seq 50); do pytest tests/test_retry.py -q || break; done)
+  <gray>⎿</>  <red>1 failed</> on run 17: <gray>expected 3 attempts, got 2</>
+
+<green>●</> The test sleeps 0.1s and asserts the third attempt has started. On a loaded runner the backoff jitter pushes it past 0.1s.
+
+<green>●</> <b>Update</>(tests/test_retry.py)
+  <gray>⎿</>  Replaced the sleep with a fake clock; the test now advances time explicitly.
+
+<green>●</> <b>Bash</>(for i in $(seq 200); do pytest tests/test_retry.py -q || break; done)
+  <gray>⎿</>  <green>200/200 passed</>
+
+<green>●</> Fixed. The flake was timing, not the retry logic.
+
+<footer>
+<gray><rule></>
+<gray>></>
+<gray><rule></>
+  <gray>? for shortcuts</>

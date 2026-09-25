@@ -1,0 +1,40 @@
+╭───────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.157.0)            │
+│                                       │
+│ model:     GPT-5.4   /model to change │
+│ directory: /tmp/hw-agents/work        │
+╰───────────────────────────────────────╯
+
+
+› Run this shell command with network access, requesting escalated permissions: curl -sI https://example.com | head -1
+
+
+• Running curl -sI https://example.com | head -1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Do you want to allow network access to run this curl request to example.com?
+
+  $ curl -sI https://example.com | head -1
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `curl -sI https://example.com` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

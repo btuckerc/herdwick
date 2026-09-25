@@ -1,0 +1,24 @@
+<b>›</> review PR #412: move chart queries behind the edge cache
+
+<b>•</> Explored
+  <gray>└</> Read src/lib/cache.ts, src/routes/charts.ts
+
+<b>•</> Ran <cyan>bun test src/lib/cache.test.ts</>
+  <gray>└</> <green>18 pass</> <gray>· 0 fail · 212 ms</>
+
+<b>•</> Edited <cyan>src/routes/charts.ts</> <green>(+4</> <red>-1)</>
+  <gray>41</>  export async function load({ params }) {
+  <gray>42</> <red>-  const rows = await db.query(sql, params)</>
+  <gray>42</> <green>+  const key = `charts:${params.range}`</>
+  <gray>43</> <green>+  const rows = await cache.wrap(key, 60,</>
+  <gray>44</> <green>+    () => db.query(sql, params))</>
+  <gray>45</>    return json(rows)
+  <gray>46</>  }
+
+<b>•</> <magenta>Note</> cache keys ignore <cyan>team_id</>; two teams with the same range would share rows. Fixing.
+
+<footer>
+<cyan>◦</> <b>Working</> <gray>(1m 12s · esc to interrupt)</>
+
+<b>›</> <gray>Ask anything</>
+  <gray>62% context left</>

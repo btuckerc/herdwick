@@ -1,0 +1,40 @@
+
+  Thought for 13s
+
+● Write(notes.md)
+  ⎿  Wrote 3 lines to notes.md
+      1 # Notes
+      2 - First item
+      3 - Second item
+
+  Thought for 40s
+
+● Update(notes.md)
+  ⎿  User rejected update to notes.md
+      1 -# Notes
+      1 +# Field Notes
+      2  - First item
+      3  - Second item
+
+✻ Cogitated for 53s · done 5:22 AM
+
+❯ Use AskUserQuestion once with one single-select question 'Pick a pet' header 'Pet', options Cat, Dog. Then tell me
+  my answer.
+
+  Thought for 1m 36s
+
+● Understood — I'll stop the edit (notes.md still has the original # Notes heading). Now asking your pet question.
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Pet
+
+Pick a pet
+
+❯ 1. Cat
+     A cat.
+  2. Dog
+     A dog.
+  3. Type something.
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

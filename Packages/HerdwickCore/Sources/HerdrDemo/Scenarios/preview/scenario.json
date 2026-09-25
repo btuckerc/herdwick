@@ -1,0 +1,22 @@
+{
+  "extends": "studio",
+  "setup": [
+    {"do": "status", "pane": "p1", "status": "working"},
+    {"do": "screen", "pane": "p1", "screen": "../studio/screens/p1-building.screen"}
+  ],
+  "timeline": [
+    {"t": 0.8, "do": "screen", "pane": "p1", "screen": "../studio/screens/p1-question.screen"},
+    {"t": 0.8, "do": "status", "pane": "p1", "status": "blocked"},
+    {"t": 3.0, "do": "ui", "cue": "openPane", "pane": "p1"},
+    {"t": 6.0, "do": "ui", "cue": "draft", "text": "Run the migrations first, then deploy"},
+    {"t": 8.8, "do": "ui", "cue": "send"},
+    {"on": "send_input", "pane": "p1", "then": [
+      {"after": 0.3, "do": "screen", "pane": "p1", "screen": "../studio/screens/p1-migrating.screen"},
+      {"after": 0.4, "do": "status", "pane": "p1", "status": "working"},
+      {"after": 3.6, "do": "screen", "pane": "p1", "screen": "../studio/screens/p1-deployed.screen"},
+      {"after": 3.7, "do": "status", "pane": "p1", "status": "done"}
+    ]},
+    {"t": 13.0, "do": "ui", "cue": "back"},
+    {"t": 17.0, "do": "drop", "for": 2.5}
+  ]
+}

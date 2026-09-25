@@ -1,0 +1,40 @@
+
+
+• ok
+
+  5:53 AM
+
+
+› HW-EXEC please
+
+
+✔ You approved codex to run curl -sI https://example.org | head -1 this time
+
+• Ran curl -sI https://example.org | head -1
+  └ HTTP/2 200
+
+• Done.
+
+  5:55 AM
+
+
+› HW-EXEC again
+
+
+• Running curl -sI https://example.org | head -1
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow network access to fetch example.org?
+
+  $ curl -sI https://example.org | head -1
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `curl -sI https://example.org` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

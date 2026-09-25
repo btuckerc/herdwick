@@ -1,0 +1,17 @@
+<b>›</> backfill March orders into the warehouse, 10k per batch
+
+<b>•</> Ran <cyan>uv run pipeline backfill --month 2026-03</>
+  <gray>└</> batch  1/14  <green>10000 rows</>  <gray>4.1s</>
+    batch  2/14  <green>10000 rows</>  <gray>3.9s</>
+    batch  3/14  <green>10000 rows</>  <gray>4.0s</>
+    batch  4/14  <green>10000 rows</>  <gray>4.3s</>
+    batch  5/14  <yellow> 9996 rows</>  <gray>4.2s</>
+                 <yellow>4 skipped: null customer_id</>
+    batch  6/14  <green>10000 rows</>  <gray>3.8s</>
+    batch  7/14  <green>10000 rows</>  <gray>4.0s</>
+
+<footer>
+<cyan>◦</> <b>Working</> <gray>(6m 40s · esc to interrupt)</>
+
+<b>›</> <gray>Ask anything</>
+  <gray>48% context left</>

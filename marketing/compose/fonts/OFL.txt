@@ -1,0 +1,4 @@
+Copyright 2010 The Lato Authors (https://github.com/Sorkin-Type/Lato)
+
+This font software is licensed under the SIL Open Font License, Version 1.1.
+The production pipeline uses these vendored OFL-compatible files as a deterministic fallback for Inter Tight and JetBrains Mono when the exact families are unavailable. See OFL-1.1.txt at https://scripts.sil.org/OFL.

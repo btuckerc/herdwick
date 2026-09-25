@@ -1,0 +1,30 @@
+
+ ▐▛███▛█   Claude Code v2.1.282
+▝▜██████▀  Sonnet 4.5 · API Usage Billing
+ ▝▝   ▝▝   /tmp/hw-agents/work
+
+
+❯ Use the AskUserQuestion tool once with two questions: (1) 'Which color?' header 'Color', single-select options Red,
+  Green, Blue; (2) 'Which toppings?' header 'Toppings', multiSelect true, options Cheese, Olives, Basil. Then tell me
+  my answers.
+
+  Thought for 48s
+
+● I'll ask you those two questions now.
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Color  ☐ Toppings  ✔ Submit  →
+
+Which toppings?
+
+❯ 1. [ ] Cheese
+         Melted cheese.
+  2. [ ] Olives
+         Sliced olives.
+  3. [ ] Basil
+         Fresh basil leaves.
+  4. [ ] Type something
+     Submit
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

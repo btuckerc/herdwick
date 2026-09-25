@@ -1,0 +1,7 @@
+<cyan>~/src/api</> <gray>on</> <magenta>main</>
+<green>❯</> git status --short
+ M cmd/api/router.go
+?? internal/ratelimit/
+
+<cyan>~/src/api</> <gray>on</> <magenta>main</> <red>[!?]</>
+<green>❯</>

@@ -1,0 +1,8 @@
+{
+  "name":"herdwick-marketing-compose",
+  "private":true,
+  "type":"module",
+  "scripts":{"render":"bun render.mjs","validate":"bun validate.mjs"},
+  "dependencies":{"playwright":"1.55.0"},
+  "devDependencies":{}
+}

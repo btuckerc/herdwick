@@ -1,0 +1,38 @@
+Your coding agents keep working after you close the laptop. Herdwick is how you answer them when they stop.
+
+Herdwick is a native iPhone and iPad client for herdr, the open-source terminal workspace your coding agents run in. It connects to your own machines, shows every agent herdr is tracking, and lets you read and answer any of them from wherever you are.
+
+THE ONE THAT NEEDS YOU, FIRST
+Agents are grouped by attention: Needs you, Done, Working, Idle. A blocked agent rises to the top, and with Herdwick open your phone taps you the moment it happens.
+
+A REAL TERMINAL, SIZED FOR YOUR SCREEN
+Open any pane and see its live terminal as it looks on your machine: colours, prompts and full-screen TUIs intact.
+
+ANSWER FROM THE COMPOSER
+Write a reply with the normal iOS keyboard and send it in one go. A key bar covers the keys agents ask for: Esc, Tab, arrows, Enter, Ctrl-C. Need more? Turn on typing and take over the pane.
+
+TAILSCALE BUILT IN
+Sign in to your tailnet, pick a machine and connect with Tailscale SSH. No keys to copy, no VPN to switch on, no ports to open. The Tailscale app doesn't need to be installed.
+
+OR PLAIN SSH
+Add a host by address and use the key Herdwick makes on this device, or a password. The private key never leaves your iPhone or iPad.
+
+PICKS UP WHERE IT DROPPED
+Lose signal on the train and the last snapshot stays on screen while Herdwick reconnects, then updates in place.
+
+YOUR TERMINAL, YOUR LOOK
+Herdwick Night and Day, Catppuccin Mocha and Latte, Tokyo Night, Gruvbox Dark and Solarized Light, with separate light and dark choices and adjustable font size.
+
+WORKS WITH THE AGENTS YOU ALREADY RUN
+Claude Code, Codex, opencode and anything else herdr detects. Herdwick doesn't wrap or replace them; it shows you their terminals.
+
+TRY IT FIRST
+No machine handy? Explore the built-in demo host: a scripted herdr session with agents to open and answer.
+
+PRIVATE BY DESIGN
+No account. No analytics. No servers of ours in the path. Herdwick runs herdr's own commands over SSH, installs nothing on your computer, and terminal output travels only between your device and your machine.
+
+REQUIREMENTS
+A Mac or Linux machine running herdr, reachable over SSH directly or through your tailnet.
+
+Herdwick is an independent project. It is not affiliated with, endorsed by or sponsored by the herdr project or Tailscale Inc. Tailscale is a registered trademark of Tailscale Inc.

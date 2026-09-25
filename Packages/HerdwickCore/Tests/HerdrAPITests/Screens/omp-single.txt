@@ -1,0 +1,19 @@
+ Call the ask tool exactly once with one question: header Colour, question: Which colour should the sheep be?, options
+ Red (warm), Green (grass), Blue (sky), recommended Green. Do nothing else.
+
+   Working…
+
+╭─ Ask ─────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Which colour should the sheep be?                                                                                 │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│    Red                                                                                                           │
+│       warm                                                                                                        │
+│   Green (Recommended)                                                                                           │
+│       grass                                                                                                       │
+│    Blue                                                                                                          │
+│       sky                                                                                                         │
+│    Other (type your own)                                                                                         │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Enter select · n note · ↑/↓ move · Esc cancel                                                                     │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+tmp

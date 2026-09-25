@@ -1,0 +1,17 @@
+<gray>></> ship the dashboard to staging once the build is green
+
+<green>●</> <b>Bash</>(bun run build)
+  <gray>⎿</>  <green>✓</> built in 8.4s <gray>· 214 modules</>
+
+<green>●</> <b>Bash</>(bun test)
+  <gray>⎿</>  <green>142 pass</> <gray>· 0 fail · 3.1s</>
+
+<green>●</> <b>Bash</>(bun run db:status --env staging)
+  <gray>⎿</>  Running…
+
+<footer>
+<yellow>✻</> <yellow>Checking staging…</> <gray>(1m 02s · esc to interrupt)</>
+
+<gray><rule></>
+<gray>></>
+<gray><rule></>
