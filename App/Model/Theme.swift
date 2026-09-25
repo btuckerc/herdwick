@@ -119,6 +119,8 @@ final class Settings {
     /// Alerts for agents that need you (with the badge) and for finished work.
     var notifyNeedsYou: Bool { didSet { save() } }
     var notifyFinished: Bool { didSet { save() } }
+    /// Opt-in: while the app is away, hosts send alerts through the push relay (`Push`).
+    var pushWhileAway: Bool { didSet { save() } }
 
     private let defaults = UserDefaults.standard
 
@@ -142,6 +144,7 @@ final class Settings {
         detailLevel = DetailLevel(rawValue: defaults.string(forKey: "detailLevel") ?? "") ?? .folded
         notifyNeedsYou = defaults.object(forKey: "notifyNeedsYou") as? Bool ?? false
         notifyFinished = defaults.object(forKey: "notifyFinished") as? Bool ?? false
+        pushWhileAway = defaults.object(forKey: "pushWhileAway") as? Bool ?? false
     }
 
     func theme(for scheme: ColorScheme) -> TerminalTheme {
@@ -167,6 +170,7 @@ final class Settings {
         defaults.set(detailLevel.rawValue, forKey: "detailLevel")
         defaults.set(notifyNeedsYou, forKey: "notifyNeedsYou")
         defaults.set(notifyFinished, forKey: "notifyFinished")
+        defaults.set(pushWhileAway, forKey: "pushWhileAway")
     }
 }
 

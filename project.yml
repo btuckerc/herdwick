@@ -38,10 +38,12 @@ targets:
       - framework: Frameworks/TailscaleKit.xcframework
         embed: true
       - target: HerdwickWidgets
+      - target: HerdwickNotifications
     entitlements:
       path: App/Herdwick.entitlements
       properties:
         com.apple.security.application-groups: [group.dev.btuckerc.herdwick]
+        aps-environment: $(APS_ENVIRONMENT)
     info:
       path: App/Info.plist
       properties:
@@ -54,10 +56,14 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: dev.btuckerc.herdwick
             CFBundleURLSchemes: [herdwick]
+        # Opt-in alerts while away go through this relay (relay/); it holds the team's APNs key.
+        # A build signed by another team needs its own relay here, or an empty string for none.
+        HerdwickPushRelay: https://herdwick-push.btuckerc-flare.workers.dev
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.btuckerc.herdwick
         TARGETED_DEVICE_FAMILY: "1,2"
+        APS_ENVIRONMENT: development
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         INFOPLIST_KEY_CFBundleDisplayName: Herdwick
@@ -67,6 +73,13 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         GENERATE_INFOPLIST_FILE: YES
+      configs:
+        # TestFlight: API-made profiles (scripts/mini/app-store-profiles.mjs), no Xcode account.
+        Release:
+          APS_ENVIRONMENT: production
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: Herdwick App Store
   HerdwickWidgets:
     type: app-extension
     platform: iOS
@@ -89,3 +102,38 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: YES
         SKIP_INSTALL: YES
+      configs:
+        # TestFlight: API-made profiles (scripts/mini/app-store-profiles.mjs), no Xcode account.
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: Herdwick Widgets App Store
+  HerdwickNotifications:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Notifications
+      - Shared
+    entitlements:
+      path: Notifications/HerdwickNotifications.entitlements
+      properties:
+        com.apple.security.application-groups: [group.dev.btuckerc.herdwick]
+    info:
+      path: Notifications/Info.plist
+      properties:
+        CFBundleDisplayName: Herdwick
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.btuckerc.herdwick.notifications
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+      configs:
+        # TestFlight: API-made profiles (scripts/mini/app-store-profiles.mjs), no Xcode account.
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: Herdwick Notifications App Store

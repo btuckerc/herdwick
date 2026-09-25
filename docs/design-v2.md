@@ -130,7 +130,7 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
   nothing is cleared.
 
 ## Attention: alerts, badge, widgets
-Local only, from the councils of 2026-09-25 (`Attention`):
+From the councils of 2026-09-25 (`Attention`, `Push`):
 - Alerts for Needs You and Finished, each a Settings toggle that asks permission when turned
   on. They fire on a new unread state (one per pane and `state_change_seq`, remembered so a
   reconnect never repeats one), not for the conversation on screen, and are withdrawn once
@@ -139,15 +139,36 @@ Local only, from the councils of 2026-09-25 (`Attention`):
 - The app only sees hosts while it runs. In the background iOS wakes it now and then
   (`BGAppRefreshTask`, earliest 15 min): it reconnects each link for one snapshot (20 s cap),
   which raises alerts and updates the widgets, then lets go.
-- Widgets (`HerdwickWidgets`, Home small and Lock Screen rectangular/circular/inline) read an
-  `AttentionSnapshot` the app writes to the App Group: blocked, then unread finishes, with
-  whether every host answered. The app reloads timelines only when that content changes.
-  They say when counts are old or a host was offline and never claim "all clear" then.
+- Widgets (`HerdwickWidgets`: Home small and medium, Lock Screen rectangular/circular/inline)
+  read an `AttentionSnapshot` the app writes to the App Group: every visible agent as the app
+  presents it (needs you, unread done, working, idle; newest change first within each), when
+  the app saw that state begin, and whether every host answered. Small shows the three counts
+  and the most pressing agent; medium adds up to three agents, each a link, with a live
+  "4 minutes ago". The app reloads timelines only when that content changes. Widgets say when
+  what they show is old or a host was offline and never claim "all clear" then.
   `herdwick://open?host=&session=&pane=` deep-links alerts and widgets.
-- Not built: timely alerts with the app closed need a host-side helper and a push relay
-  (APNs with end-to-end encrypted payloads); widget pushes and a "Watch this run" Live
-  Activity come after that. T3 Code's "settled" shelf was not adopted: Hide already parks
-  work and resurfaces it when it needs you.
+- Alerts while away (opt-in, Settings › Alerts While Away, with a How It Works page). As the
+  app backgrounds it arms a watcher on each live link over the SSH it already holds
+  (`PushWatch`, inside a background task) and disarms it when the link next comes up in the
+  foreground, including after the app was closed. The watcher is a POSIX `sh` script written
+  to `~/.herdwick/` (secrets on stdin into a 0600 file, nothing in the process list): per agent
+  one `herdr agent wait` blocked on herdr's socket (measured on herdr 0.9.1: no CPU, no context
+  switches in 20 s, ~6 MB), one `agent list` (~20 ms CPU) every 120 s for agents started
+  meanwhile, one `curl` per alert, and it exits after 24 h or when herdr stops. No daemon, no
+  port, no install. `idle` after `working` counts as done (herdr skips `done` for the pane
+  focused at the desk).
+- The post carries only the device token and opaque ids (host UUID, session, pane, state,
+  seq). The relay (`relay/`, a ~70-line Cloudflare Worker holding the APNs key) validates
+  them, rate-limits 20 a minute per device, sends a generic `mutable-content` alert with a
+  collapse id per agent, and stores and logs nothing. The notification service
+  (`HerdwickNotifications`) fills in the title and place from the snapshot, records the seq in
+  the App Group so the app never repeats the alert, moves the agent in the snapshot, sets the
+  badge and reloads widgets. A user can't run their own relay for this build: that would mean
+  sharing the APNs key. Self-built copies set `HerdwickPushRelay` to their own team's relay.
+- Ruled out: CloudKit (web tokens are single-use), Local Push Connectivity (restricted
+  entitlement, named Wi-Fi only), Tailscale (the phone's node is down while suspended).
+  Not built: a "Watch this run" Live Activity. T3 Code's "settled" shelf was not adopted:
+  Hide already parks work and resurfaces it when it needs you.
 
 ## Subagent transcript state
 Core derives working children from omp `task`, Claude `Agent`/`Task`, and Codex

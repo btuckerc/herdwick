@@ -15,7 +15,8 @@ const out = join(marketing, 'build/out');
 const work = join(marketing, 'build/work');
 const manifest = JSON.parse(await readFile(join(marketing, 'slides.json'), 'utf8'));
 const palette = manifest.palette;
-const icon = resolve(marketing, '../App/Assets.xcassets/AppIcon.appiconset/AppIcon.png');
+// Exported from App/AppIcon.icon: ictool --export-image --rendition Default --design-generation 27.
+const icon = resolve(marketing, 'icon.png');
 const only = process.argv.slice(2); // e.g. `stills`, `previews`, `social`, `press`
 const wants = part => only.length === 0 || only.includes(part);
 

@@ -53,8 +53,15 @@ Decisions as of 2026-09-24. The evidence behind them is in
   (`Shared/`, compiled into both targets) that the app's `Attention` writes to the
   App Group `group.dev.btuckerc.herdwick`. The app also declares background fetch
   (`dev.btuckerc.herdwick.refresh`) and the `herdwick://` URL scheme.
+- Notification service extension `HerdwickNotifications` (`Notifications/`): dresses
+  alerts-while-away pushes from `snapshot` data and updates the snapshot and badge. The
+  push relay is `relay/` (Cloudflare Worker, `wrangler deploy` from there; secrets
+  `APNS_KEY`, `APNS_KEY_ID`, `APNS_TEAM_ID`); the app finds it through the
+  `HerdwickPushRelay` Info.plist key.
 
 ## Remote commands (no server-side install)
+- Alerts while away: `PushWatch` writes `~/.herdwick/{push.env,watch.sh}` and runs the
+  watcher with `nohup` only while the app is away; see `design-v2.md` › Attention.
 - Discovery: `$SHELL -lc 'command -v herdr'`, then `~/.local/bin/herdr`,
   `/opt/homebrew/bin/herdr`, `/usr/local/bin/herdr`. Cache the path per host.
 - API: `herdr --session <s> remote-api-bridge` (probe with `--check`).
@@ -126,10 +133,16 @@ keyboard accessory (sticky ctrl) replaces the key bar.
 ## Build
 - `scripts/mini/sync-and-build.sh` rsyncs to the Mini, runs XcodeGen
   (`project.yml`) and builds for the simulator; `testflight` archives and
-  uploads with `ASC_KEY_ID` and `ASC_ISSUER_ID`.
+  uploads with `ASC_KEY_ID` and `ASC_ISSUER_ID`. Release signs manually with an
+  API-made Apple Distribution identity and App Store profiles
+  (`scripts/mini/app-store-profiles.mjs`, rerun after adding a target or a
+  capability), so no Apple ID has to be signed in to Xcode.
 - `scripts/mini/build-tailscalekit.sh` builds `Frameworks/TailscaleKit.xcframework`
   from libtailscale with `GOTOOLCHAIN=go1.25.5`; Go 1.27's json/v2 breaks
   `go-json-experiment` ("undefined: json.SkipFunc").
+- App icon: `App/AppIcon.icon` (Icon Composer; flat SVG layers for fleece, face and
+  prompt, lit by the system in Default, Dark, Clear and Tinted). Edit it in Icon Composer
+  or by hand; `marketing/icon.png` is its Default export (`ictool --export-image`).
 
 ## Demo host and marketing
 - Onboarding offers "Explore a demo host" (the `studio` scenario), so App

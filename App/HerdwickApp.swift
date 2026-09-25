@@ -3,6 +3,7 @@ import SwiftUI
 
 @main
 struct HerdwickApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 

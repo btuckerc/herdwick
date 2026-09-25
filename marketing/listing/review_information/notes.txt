@@ -1,4 +1,4 @@
-Herdwick is a client for herdr, open-source software (Apache-2.0, github.com/herdrdev/herdr) that developers run on their own Mac or Linux machine to host terminal sessions for coding agents. Herdwick connects to that machine over SSH, lists the agents herdr tracks, shows each agent's conversation and live terminal, and sends replies. There is no account and no server operated by the developer.
+Herdwick is a client for herdr, open-source software (Apache-2.0, github.com/herdrdev/herdr) that developers run on their own Mac or Linux machine to host terminal sessions for coding agents. Herdwick connects to that machine over SSH, lists the agents herdr tracks, shows each agent's conversation and live terminal, and sends replies. There is no account. The only developer-run service is the optional, stateless push relay described below.
 
 HOW TO REVIEW WITHOUT A MACHINE
 On the first screen, tap "No machine handy? Explore a demo host". This opens a scripted herdr host built into the app, so every screen can be reached without SSH access:
@@ -15,7 +15,7 @@ REAL CONNECTIONS
 
 PERMISSIONS AND DATA
 - Network: connections go directly between the device and the user's machine. SSH keys and passwords are stored in the iOS Keychain on the device. No analytics or tracking.
-- Notifications: off until the user turns on Settings > Notifications. Alerts are local, posted when the app is open or during iOS background refresh, when an agent needs input or finishes. There is no push server.
+- Notifications: off until the user turns on Settings > Notifications. Alerts are local, posted when the app is open or during iOS background refresh, when an agent needs input or finishes. A second opt-in, Settings > Notifications > Alerts While Away, lets the user's machine send alerts through a stateless push relay while the app is closed; it carries only the push token and opaque ids, never names or content, and stores nothing. How It Works in that section explains it.
 - Photos: only when the user attaches an image to a message; it is uploaded to the user's own machine.
 
 Herdwick is an independent project, not affiliated with the herdr project or Tailscale Inc.

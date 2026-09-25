@@ -57,9 +57,10 @@ Title: `Show HN: Herdwick – iOS client for herdr, answer blocked coding agents
 > Replies go through `pane.send_input`. Tailscale is optional and embedded via
 > libtailscale, so there's no VPN profile and no keys to copy.
 >
-> What it doesn't do: no push server. Notifications are local, posted while it's open or
-> when iOS grants a background refresh, so they can be late. There are no servers of mine
-> in the path.
+> Notifications are local by default, posted while it's open or when iOS grants a
+> background refresh, so they can be late. For on-time alerts, opt in to Alerts While Away:
+> your machine sends only ids through a small stateless relay (source in the repo) to Apple's
+> push service. Nothing else of mine is in the path.
 >
 > There's a built-in demo host if you want to look around without connecting anything.
 

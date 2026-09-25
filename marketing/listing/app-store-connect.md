@@ -56,9 +56,12 @@ third party for the optional Tailscale connection: node identity, device and con
 metadata, and diagnostic logs, under Tailscale's own privacy policy. It must also say
 that nothing else leaves the device except the user's SSH connection to their own machine.
 
-Notifications are opt-in and local, posted while the app is open or during background refresh
-(`App/Model/Attention.swift`, `AppModel.swift`). There is no push server and no data leaves the
-device, so there is nothing to declare for them.
+Notifications are opt-in. Local alerts are posted while the app is open or during background
+refresh (`App/Model/Attention.swift`). Alerts While Away, a second opt-in, has the user's own
+machine send the device's push token and opaque ids (host UUID, session, pane, state) to the
+push relay (`relay/`, a Cloudflare Worker), which forwards them to APNs in real time and stores
+and logs nothing. Apple's definition excludes data processed only in real time and not
+retained, so there is nothing to declare for it. The privacy policy must still describe it.
 
 ## Pricing
 

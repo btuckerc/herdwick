@@ -20,13 +20,18 @@ final class HostConnection {
     /// Set when the host presented a key that differs from the pinned one.
     private(set) var rejectedHostKey: SSHHostKey?
     var hidden: [String: Int] = [:] {
-        didSet { UserDefaults.standard.set(hidden, forKey: hiddenKey) }
+        didSet {
+            UserDefaults.standard.set(hidden, forKey: hiddenKey)
+            if hidden != oldValue { onAttentionChange?(self) }
+        }
     }
     /// Pane id → subagents last seen working in that agent's conversation. Feeds only run
     /// while a conversation is open, so this is last-known; the inbox gates it on the agent working.
     var workingSubagents: [String: Int] = [:]
     /// Called when a snapshot arrives or something is read, for alerts, the badge and widgets.
     var onAttentionChange: ((HostConnection) -> Void)?
+    /// Called each time a fresh transport goes live.
+    var onLive: ((HostConnection) -> Void)?
 
     private var supervisor = ConnectionSupervisor()
     private var ssh: SSHConnection?
@@ -280,6 +285,18 @@ final class HostConnection {
         try await client.sendKeys(keys, pane: pane, session: activeSession)
     }
 
+    /// Starts this session's push watcher with `config`, or stops it given nil. Over the SSH
+    /// link, so only while it is live.
+    func watch(_ config: PushWatch.Config?) async throws {
+        guard let ssh, isLive, let activeSession else { throw HerdrError.noResponse }
+        if let config {
+            guard let herdrPath = Self.cachedHerdrPath(profile) else { throw HerdrError.noResponse }
+            try await PushWatch.arm(config, session: activeSession, herdrPath: herdrPath, runner: ssh)
+        } else {
+            try await PushWatch.disarm(session: activeSession, runner: ssh)
+        }
+    }
+
     // MARK: Effects
 
     private func connect() {
@@ -337,6 +354,7 @@ final class HostConnection {
                         self.client = client
                         self.liveID += 1
                         self.handle(.connected)
+                        self.onLive?(self)
                     }
                 }
                 guard generation == self.generation, !Task.isCancelled else { return }

@@ -43,6 +43,7 @@ final class AppModel {
     private var pathSignature: String?
     private var isForeground = true
     @ObservationIgnored private var attention: Attention?
+    @ObservationIgnored private var push: Push?
     static let refreshTask = "dev.btuckerc.herdwick.refresh"
 
     init() {
@@ -55,6 +56,7 @@ final class AppModel {
         attention = Attention(settings: settings, links: { [weak self] in self?.connections ?? [] },
                               onScreen: { [weak self] in self?.onScreen },
                               open: { [weak self] in self?.open($0) })
+        push = Push(settings: settings)
         if profiles.contains(where: \.isTailnet) || tailnet.isConfigured {
             tailnet.start()
         }
@@ -124,6 +126,7 @@ final class AppModel {
                 }) { [weak self] updated in self?.store(updated) }
                 link.includesAllSessions = settings.allHosts
                 link.onAttentionChange = { [weak self] in self?.attention?.changed($0) }
+                link.onLive = { [weak self] in self?.wentLive($0) }
                 primary[profile.id] = link
                 if isForeground { link.handle(.start) }
             }
@@ -148,6 +151,7 @@ final class AppModel {
             // ownership. Cost: one SSH keepalive per session, all closed in background.
             let link = HostConnection(profile: profile, tailnet: tailnet) { _ in }
             link.onAttentionChange = { [weak self] in self?.attention?.changed($0) }
+            link.onLive = { [weak self] in self?.wentLive($0) }
             additional[key] = link
             if isForeground { link.handle(.start) }
         }
@@ -261,6 +265,11 @@ final class AppModel {
         await attention?.requestAuthorization() ?? false
     }
 
+    /// Settings turned alerts while away on.
+    func registerForPush() {
+        push?.register()
+    }
+
     /// An alert or a widget asked for this agent: show its host, then its conversation.
     func open(_ address: PaneAddress) {
         guard demo == nil, let profile = profiles.first(where: { $0.id == address.hostID }) else { return }
@@ -318,11 +327,30 @@ final class AppModel {
             Task { await refresh() }
         case .background:
             isForeground = false
-            for link in connections { link.handle(.backgrounded) }
-            if demo == nil { scheduleRefresh() }
+            let links = connections
+            guard demo == nil, let push else {
+                for link in links { link.handle(.backgrounded) }
+                return
+            }
+            scheduleRefresh()
+            // Hand each host its push watcher before the links close.
+            let task = UIApplication.shared.beginBackgroundTask(withName: "push-arm")
+            Task {
+                await push.arm(links)
+                if !isForeground {
+                    for link in links { link.handle(.backgrounded) }
+                }
+                UIApplication.shared.endBackgroundTask(task)
+            }
         default:
             break
         }
+    }
+
+    /// Back in the foreground, the app watches for itself.
+    private func wentLive(_ link: HostConnection) {
+        guard isForeground, let push else { return }
+        Task { await push.disarm(link) }
     }
 
     /// Only real route changes count (Wi-Fi ↔ cellular, a VPN coming up or down);

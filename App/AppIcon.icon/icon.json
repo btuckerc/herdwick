@@ -1,0 +1,58 @@
+{
+  "fill": {
+    "solid": "srgb:0.43,0.55,0.44,1"
+  },
+  "groups": [
+    {
+      "name": "Terminal prompt",
+      "layers": [
+        {
+          "name": "Chevron",
+          "image-name": "chevron.svg",
+          "is-glass": false
+        },
+        {
+          "name": "Cursor",
+          "image-name": "cursor.svg",
+          "is-glass": false
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0
+      }
+    },
+    {
+      "name": "Face",
+      "layers": [
+        {
+          "name": "Face and ears",
+          "image-name": "face.svg",
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {"solid": "srgb:0.95686,0.94118,0.90196,1"}
+            }
+          ],
+          "glass-specializations": [
+            {"appearance": "dark", "value": false}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Fleece",
+      "layers": [
+        {
+          "name": "Fleece silhouette",
+          "image-name": "fleece.svg"
+        }
+      ]
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "iOS"
+    ]
+  }
+}

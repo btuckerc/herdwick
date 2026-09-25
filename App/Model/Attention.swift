@@ -3,8 +3,8 @@ import UserNotifications
 import WidgetKit
 
 /// Turns agents that need you or have finished into alerts, the app badge and the widgets'
-/// snapshot. Everything here is local: it sees what the app sees while it is open or
-/// refreshing in the background.
+/// snapshot. Here it sees what the app sees while it is open or refreshing in the background;
+/// away from the app, push alerts (`Push`) and the notification service take over.
 @MainActor
 final class Attention: NSObject, UNUserNotificationCenterDelegate {
     private let settings: Settings
@@ -15,13 +15,25 @@ final class Attention: NSObject, UNUserNotificationCenterDelegate {
     private let open: (PaneAddress) -> Void
 
     private let center = UNUserNotificationCenter.current()
-    /// Pane key → the `state_change_seq` last alerted, so a reconnect or a background
-    /// refresh never repeats an alert. A pane seen for the first time starts here, silently.
+    /// Pane key → the `state_change_seq` last alerted, so a reconnect, a background refresh or
+    /// a push the notification service already showed never repeats an alert. A pane seen for
+    /// the first time starts here, silently. Read fresh: the service writes it too.
     private var alerted: [String: Int] {
-        didSet { UserDefaults.standard.set(alerted, forKey: "attention.alerted") }
+        get { AttentionSnapshot.shared?.dictionary(forKey: AttentionSnapshot.alertedKey) as? [String: Int] ?? [:] }
+        set { AttentionSnapshot.shared?.set(newValue, forKey: AttentionSnapshot.alertedKey) }
     }
     private var badge = -1
     private var published: AttentionSnapshot?
+    /// Pane key → the change it is at and when the app saw that change happen.
+    private var stamps: [String: Stamp] {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(stamps), forKey: "attention.stamps") }
+    }
+
+    private struct Stamp: Codable, Equatable {
+        let seq: Int
+        /// Nil when the pane was already at `seq` when first seen: its start is unknown.
+        let date: Date?
+    }
 
     init(settings: Settings, links: @escaping () -> [HostConnection], onScreen: @escaping () -> PaneAddress?,
          open: @escaping (PaneAddress) -> Void) {
@@ -29,7 +41,8 @@ final class Attention: NSObject, UNUserNotificationCenterDelegate {
         self.links = links
         self.onScreen = onScreen
         self.open = open
-        alerted = UserDefaults.standard.dictionary(forKey: "attention.alerted") as? [String: Int] ?? [:]
+        stamps = UserDefaults.standard.data(forKey: "attention.stamps")
+            .flatMap { try? JSONDecoder().decode([String: Stamp].self, from: $0) } ?? [:]
         published = AttentionSnapshot.load()
         super.init()
         center.delegate = self
@@ -45,6 +58,8 @@ final class Attention: NSObject, UNUserNotificationCenterDelegate {
     func changed(_ link: HostConnection) {
         guard let snapshot = link.snapshot else { return }
         var settled: [String] = []
+        var alerted = alerted
+        defer { if alerted != self.alerted { self.alerted = alerted } }
         for agent in snapshot.agents {
             let address = link.address(paneID: agent.paneID)
             let key = Self.key(address)
@@ -94,28 +109,44 @@ final class Attention: NSObject, UNUserNotificationCenterDelegate {
     // MARK: Widgets
 
     private func publish() {
-        var items: [(AttentionSnapshot.Item, Int)] = []
-        for link in links() {
-            for agent in link.snapshot?.agents ?? [] {
+        let all = links()
+        var stamps = stamps
+        var present: Set<String> = []
+        var items: [AttentionSnapshot.Item] = []
+        for link in all {
+            for agent in link.snapshot?.agents ?? [] where link.hidden[agent.paneID] == nil {
+                let address = link.address(paneID: agent.paneID)
+                let key = Self.key(address)
+                let seq = agent.stateChangeSeq ?? 0
+                present.insert(key)
+                if let stamp = stamps[key] {
+                    if stamp.seq != seq { stamps[key] = Stamp(seq: seq, date: .now) }
+                } else {
+                    stamps[key] = Stamp(seq: seq, date: nil)
+                }
                 let state: AttentionSnapshot.Item.State
                 switch link.presentedStatus(agent) {
                 case .blocked: state = .blocked
                 case .done: state = .done
-                default: continue
+                case .working: state = .working
+                case .idle: state = .idle
+                case .unknown: continue
                 }
-                let address = link.address(paneID: agent.paneID)
                 let place = [link.profile.name, agent.cwd.map { ($0 as NSString).lastPathComponent }]
                     .compactMap { $0 }.joined(separator: " · ")
-                items.append((AttentionSnapshot.Item(
-                    id: Self.key(address), title: agent.conversationTitle, place: place, state: state,
+                items.append(AttentionSnapshot.Item(
+                    id: key, title: agent.conversationTitle, place: place, state: state, since: stamps[key]?.date,
                     url: AttentionLink.url(host: address.hostID, session: address.session, pane: address.paneID)
-                ), agent.stateChangeSeq ?? 0))
+                ))
             }
         }
-        items.sort { ($0.0.state == .blocked ? 0 : 1, -$0.1) < ($1.0.state == .blocked ? 0 : 1, -$1.1) }
-        let all = links()
-        let snapshot = AttentionSnapshot(items: items.map(\.0), complete: !all.isEmpty && all.allSatisfy(\.isLive),
-                                         updated: .now)
+        let complete = !all.isEmpty && all.allSatisfy(\.isLive)
+        // Forget panes only when every host answered; an offline host's panes may come back.
+        if complete { stamps = stamps.filter { present.contains($0.key) } }
+        if stamps != self.stamps { self.stamps = stamps }
+
+        var snapshot = AttentionSnapshot(items: items, complete: complete, updated: .now)
+        snapshot.sort()
         snapshot.save()
         // Only a change in content costs a widget reload; the time alone is kept for staleness.
         if published?.items != snapshot.items || published?.complete != snapshot.complete {
@@ -146,6 +177,6 @@ final class Attention: NSObject, UNUserNotificationCenterDelegate {
     }
 
     nonisolated private static func key(_ address: PaneAddress) -> String {
-        "\(address.hostID.uuidString)/\(address.session)/\(address.paneID)"
+        AttentionSnapshot.key(host: address.hostID, session: address.session, pane: address.paneID)
     }
 }

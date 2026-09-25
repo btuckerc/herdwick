@@ -140,8 +140,8 @@ struct SettingsView: View {
     }
 }
 
-/// Alerts are local: they come while Herdwick is open or refreshing in the background,
-/// which iOS schedules as it sees fit.
+/// Local alerts come while Herdwick is open or refreshing in the background, which iOS
+/// schedules as it sees fit; alerts while away are the opt-in push path.
 private struct NotificationSettings: View {
     @Environment(AppModel.self) private var model
     @Environment(Settings.self) private var settings
@@ -159,6 +159,20 @@ private struct NotificationSettings: View {
         } footer: {
             Text("Alerts come while Herdwick is open, or when iOS lets it check in the background, which can be late. Needs You also badges the app icon. Opening a finished agent, at its latest message, marks it read.")
         }
+        if Push.relay != nil {
+            Section {
+                Toggle("Alerts While Away", isOn: Binding {
+                    settings.pushWhileAway
+                } set: { on in
+                    settings.pushWhileAway = on
+                    if on { model.registerForPush() }
+                })
+                .disabled(!settings.notifyNeedsYou && !settings.notifyFinished)
+                NavigationLink("How It Works") { PushDisclosure() }
+            } footer: {
+                Text("While Herdwick is closed, your computers send these alerts on time through Herdwick's push relay. Nothing but ids leaves them.")
+            }
+        }
     }
 
     /// Turning an alert on asks for permission first and stays off if it isn't given.
@@ -173,6 +187,26 @@ private struct NotificationSettings: View {
                 settings[keyPath: key] = allowed
             }
         }
+    }
+}
+
+/// Exactly what alerts while away send, and to whom.
+private struct PushDisclosure: View {
+    var body: some View {
+        Form {
+            Section("On Your Computer") {
+                Text("As Herdwick leaves the screen, it starts a small watcher on each connected computer over SSH. The watcher waits on herdr without polling, stops when you come back and exits on its own after a day. It installs nothing that lasts.")
+            }
+            Section("What Is Sent") {
+                Text("When an agent needs you or finishes, the watcher sends this iPhone's notification token, the ids of the computer, session and pane, the new state and a change number. Never a name, a path or anything an agent wrote.")
+            }
+            Section("The Relay") {
+                Text("The relay hands that to Apple's push service and keeps nothing: no storage, no logs. This iPhone fills in the names it already knows.")
+                Link("Relay Source Code", destination: URL(string: "https://github.com/btuckerc/herdwick/blob/main/relay/src/index.js")!)
+            }
+        }
+        .navigationTitle("Alerts While Away")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
