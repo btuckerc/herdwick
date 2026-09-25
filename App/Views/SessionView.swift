@@ -2,7 +2,7 @@ import HerdrAPI
 import SwiftUI
 
 /// The inbox: every agent on the host as a conversation, what needs you first. Plain
-/// shells sit folded at the bottom. The host and session switch from the title menu.
+/// shells sit folded at the bottom. The title swipes between hosts and opens the host list.
 struct SessionView: View {
     @Environment(AppModel.self) private var model
     @Environment(Settings.self) private var settings
@@ -16,6 +16,7 @@ struct SessionView: View {
     @State private var lastChange: [PaneAddress: Date] = [:]
     @State private var hostSelection = 0
     @State private var startFlow = AgentStartFlow()
+    @State private var pushEdge: Edge = .trailing
 
     private struct AgentChange: Equatable {
         let address: PaneAddress
@@ -30,11 +31,12 @@ struct SessionView: View {
     }
 
     enum Sheet: Identifiable {
-        case settings, addHost, editHost(HostProfile)
+        case settings, hosts, addHost, editHost(HostProfile)
         case newThread(HostConnection, NewThreadSheet.Kind)
         var id: String {
             switch self {
             case .settings: "settings"
+            case .hosts: "hosts"
             case .addHost: "add"
             case .editHost(let profile): profile.id.uuidString
             case .newThread(let link, let kind): "new-\(ObjectIdentifier(link))-\(kind)"
@@ -44,34 +46,15 @@ struct SessionView: View {
 
     var body: some View {
         content
+            .id(connection.profile.id)
+            .transition(.push(from: pushEdge))
             .navigationTitle(allHosts ? "All Hosts" : connection.profile.name)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Menu { titleMenu } label: {
-                        HostTitle(name: allHosts ? "All Hosts" : connection.profile.name, subtitle: subtitle)
-                            .simultaneousGesture(DragGesture(minimumDistance: 24).onEnded { value in
-                                guard abs(value.translation.width) > 40, abs(value.translation.height) < 30 else { return }
-                                switchHost(by: value.translation.width < 0 ? 1 : -1)
-                            })
-                            .accessibilityActions {
-                                if canSwitchHosts {
-                                    Button("Previous Host") { switchHost(by: -1) }
-                                    Button("Next Host") { switchHost(by: 1) }
-                                }
-                            }
-                    }
-                    .menuIndicator(.hidden)
-                    .buttonStyle(.plain)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu { newMenu } label: { Image(systemName: "plus") }
-                        .accessibilityLabel("New")
-                }
-            }
+            .toolbar { toolbar }
             .sheet(item: $sheet) { sheet in
                 switch sheet {
                 case .settings: SettingsView()
+                case .hosts: hostList
                 case .addHost: AddHostView()
                 case .editHost(let profile): NavigationStack { HostEditor(profile: profile) }
                 case .newThread(let link, let kind):
@@ -112,6 +95,29 @@ struct SessionView: View {
             .onChange(of: demo?.showsSettings, initial: true) { _, shows in if shows == true { sheet = .settings } }
     }
 
+    private var hostList: some View {
+        HostList(connection: connection) { sheet = $0 }
+            .presentationDetents([.medium, .large])
+    }
+
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            let swipe: ((Int) -> Void)? = canSwitchHosts ? { switchHost(by: $0) } : nil
+            HostTitle(title: allHosts ? "All Hosts" : connection.profile.name, subtitle: subtitle,
+                      previous: neighbor(-1)?.name, next: neighbor(1)?.name,
+                      open: { sheet = .hosts }, switchHost: swipe)
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button("Settings", systemImage: "gearshape") { sheet = .settings }
+        }
+        ToolbarItem(placement: .bottomBar) { viewMenu }
+        ToolbarSpacer(.flexible, placement: .bottomBar)
+        ToolbarItem(placement: .bottomBar) {
+            Menu { newMenu } label: { Image(systemName: "plus") }
+                .accessibilityLabel("New")
+        }
+    }
+
     private var allHosts: Bool { settings.allHosts && model.demo == nil }
     private var links: [HostConnection] { allHosts ? model.connections : [connection] }
     private var threads: [Thread] {
@@ -120,13 +126,18 @@ struct SessionView: View {
     private var agentChanges: [AgentChange] {
         model.threads.map { AgentChange(address: $0.address, status: $0.agent.agentStatus.label, sequence: $0.agent.stateChangeSeq) }
     }
-    private var canSwitchHosts: Bool { !settings.allHosts && model.profiles.count >= 2 }
+    private var canSwitchHosts: Bool { !allHosts && model.profiles.count >= 2 }
+    private var hostIndex: Int? { model.profiles.firstIndex { $0.id == connection.profile.id } }
+    private func neighbor(_ offset: Int) -> HostProfile? {
+        guard canSwitchHosts, let index = hostIndex, model.profiles.indices.contains(index + offset) else { return nil }
+        return model.profiles[index + offset]
+    }
 
+    /// Next host enters from the trailing edge, previous from the leading edge.
     private func switchHost(by offset: Int) {
-        guard canSwitchHosts,
-              let index = model.profiles.firstIndex(where: { $0.id == connection.profile.id }),
-              model.profiles.indices.contains(index + offset) else { return }
-        model.select(model.profiles[index + offset].id)
+        guard let target = neighbor(offset) else { return }
+        pushEdge = offset > 0 ? .trailing : .leading
+        withAnimation(.smooth) { model.select(target.id) }
         hostSelection += 1
     }
 
@@ -317,6 +328,7 @@ struct SessionView: View {
     // MARK: Chrome
 
     private var subtitle: String {
+        if allHosts { return "\(model.profiles.count) hosts" }
         if let link = connection.statusText { return link }
         guard let session = connection.activeSession, connection.sessions.filter(\.running).count > 1 else {
             return connection.profile.address
@@ -330,53 +342,107 @@ struct SessionView: View {
         }
     }
 
-    @ViewBuilder
-    private var titleMenu: some View {
+    /// How the inbox is arranged; where it points is the title's job.
+    private var viewMenu: some View {
         @Bindable var settings = settings
-        Menu("View") {
-            Picker("View", selection: $settings.inboxView) {
-                ForEach(InboxKind.allCases) { Text($0.label).tag($0) }
+        return Menu {
+            choices("View", $settings.inboxView, InboxKind.allCases, label: \.label)
+            if settings.inboxView == .agents {
+                choices("Group", $settings.inboxGrouping, InboxGrouping.allCases, label: \.label)
+                choices("Sort", $settings.inboxSort, InboxSort.allCases, label: \.label)
             }
+        } label: {
+            Image(systemName: "line.3.horizontal.decrease")
         }
-        Menu("Group") {
-            Picker("Group", selection: $settings.inboxGrouping) {
-                ForEach(InboxGrouping.allCases) { Text($0.label).tag($0) }
-            }
-        }
-        Menu("Sort") {
-            Picker("Sort", selection: $settings.inboxSort) {
-                ForEach(InboxSort.allCases) { Text($0.label).tag($0) }
-            }
-        }
-        Toggle("All Hosts", isOn: $settings.allHosts)
-        Section("Hosts") {
-            ForEach(model.profiles) { profile in
-                Toggle(profile.name, isOn: .init(
-                    get: { profile.id == connection.profile.id },
-                    set: { if $0 { model.select(profile.id) } }
+        .accessibilityLabel("View Options")
+    }
+
+    /// A titled menu section of checkmarked choices (an inline `Picker` drops the title).
+    private func choices<Value: Hashable>(_ title: String, _ selection: Binding<Value>, _ values: [Value],
+                                         label: KeyPath<Value, String>) -> some View {
+        Section(title) {
+            ForEach(values, id: \.self) { value in
+                Toggle(value[keyPath: label], isOn: .init(
+                    get: { selection.wrappedValue == value },
+                    set: { if $0 { selection.wrappedValue = value } }
                 ))
             }
-            Button("Add Host…", systemImage: "plus") { sheet = .addHost }
         }
-        let running = connection.sessions.filter(\.running)
-        if running.count > 1 {
-            Section("herdr Session") {
-                ForEach(running) { session in
-                    Toggle(session.name, isOn: .init(
-                        get: { session.name == connection.activeSession },
-                        set: { if $0 { model.selectSession(session.name) } }
-                    ))
+    }
+}
+
+/// The title's host list: All Hosts or one host, in the user's order, plus the host's sessions.
+private struct HostList: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Settings.self) private var settings
+    @Environment(\.dismiss) private var dismiss
+    let connection: HostConnection
+    let present: (SessionView.Sheet) -> Void
+
+    private var allHosts: Bool { settings.allHosts && model.demo == nil }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if model.demo == nil, model.profiles.count > 1 {
+                    row("All Hosts", detail: "\(model.profiles.count) hosts", selected: allHosts) {
+                        settings.allHosts = true
+                    }
+                }
+                Section("Hosts") {
+                    ForEach(model.profiles) { profile in
+                        row(profile.name, detail: profile.address, selected: !allHosts && profile.id == connection.profile.id) {
+                            settings.allHosts = false
+                            model.select(profile.id)
+                        }
+                    }
+                    .onMove { model.moveProfiles(from: $0, to: $1) }
+                    if model.demo == nil {
+                        Button("Add Host…", systemImage: "plus") { present(.addHost) }
+                    }
+                }
+                let running = connection.sessions.filter(\.running)
+                if !allHosts, running.count > 1 {
+                    Section("herdr Session") {
+                        ForEach(running) { session in
+                            row(session.name, selected: session.name == connection.activeSession) {
+                                model.selectSession(session.name)
+                            }
+                        }
+                    }
+                }
+                if model.demo != nil {
+                    Button("Leave Demo", systemImage: "xmark.circle") { dismiss(); model.endDemo() }
+                } else if !allHosts {
+                    Button("Edit \(connection.profile.name)…", systemImage: "pencil") { present(.editHost(connection.profile)) }
                 }
             }
-        }
-        Section {
-            Button("Settings", systemImage: "gearshape") { sheet = .settings }
-            if model.demo == nil {
-                Button("Edit \(connection.profile.name)…", systemImage: "pencil") { sheet = .editHost(connection.profile) }
-            } else {
-                Button("Leave Demo", systemImage: "xmark.circle") { model.endDemo() }
+            .navigationTitle("Hosts")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if model.profiles.count > 1 { ToolbarItem(placement: .topBarLeading) { EditButton() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Done", systemImage: "checkmark") { dismiss() } }
             }
         }
+    }
+
+    private func row(_ title: String, detail: String? = nil, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            dismiss()
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                    if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
+                }
+                Spacer()
+                if selected { Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(Color.accentColor) }
+            }
+            .contentShape(Rectangle())
+        }
+        .tint(.primary)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 

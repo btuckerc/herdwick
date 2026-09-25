@@ -105,8 +105,12 @@ struct ConversationView: View {
             await locateTranscript()
         }
         .task(id: FeedKey(liveID: connection.liveID, location: location, window: feed.window)) {
-            guard let client = connection.client, let location else { return }
-            await feed.follow(location, client: client)
+            // A channel can end while the transport lives on (a brief background, a killed
+            // `tail`): follow again. A dead transport bumps `liveID`, which restarts this task.
+            while !Task.isCancelled, connection.isLive, let client = connection.client, let location {
+                await feed.follow(location, client: client)
+                guard (try? await Task.sleep(for: .seconds(2))) != nil else { return }
+            }
         }
         .task(id: PromptKey(liveID: connection.liveID, watching: blocked && pendingAsk == nil)) {
             await watchScreenPrompt()
@@ -269,7 +273,11 @@ struct ConversationView: View {
             } catch {
                 failure = "The agent's transcript couldn't be found."
             }
-            guard attempt < 4 else { locateFailure = failure; return }
+            guard attempt < 4 else {
+                // A location found before the drop is still right; keep following it.
+                if location == nil, connection.isLive { locateFailure = failure }
+                return
+            }
             guard (try? await Task.sleep(for: .seconds(2 * attempt))) != nil else { return }
         }
     }
@@ -377,7 +385,7 @@ enum ConversationRow: Identifiable {
         case .item(.user(_, let text, let images), _): UserBubble(text: text, imageCount: images)
         case .item(.assistant(_, let text), let finished):
             HStack(alignment: .firstTextBaseline) {
-                AssistantText(text: text)
+                MarkdownText(text: text)
                 if finished { Image(systemName: "checkmark.circle").font(.caption).foregroundStyle(.secondary) }
             }
         case .item(.ask(let ask), _): if ask.answer != nil { AnsweredAsk(ask: ask) }
@@ -436,7 +444,7 @@ private struct PeerMessageCard: View {
             VStack(alignment: outbound ? .trailing : .leading, spacing: 6) {
                 Label("\(outbound ? "to" : "from") \(peer)", systemImage: "bubble.left.and.bubble.right")
                     .font(.caption).foregroundStyle(.secondary)
-                Text(AssistantText.markdown(text))
+                Text(MarkdownText.inline(text))
                     .lineLimit(expanded ? nil : 8).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if text.split(separator: "\n").count > 8 {
@@ -450,21 +458,6 @@ private struct PeerMessageCard: View {
             .overlay { RoundedRectangle(cornerRadius: 16).stroke(outbound ? Color.accentColor.opacity(0.35) : .clear) }
             if !outbound { Spacer(minLength: 44) }
         }
-    }
-}
-
-private struct AssistantText: View {
-    let text: String
-
-    var body: some View {
-        Text(Self.markdown(text))
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    static func markdown(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(text)
     }
 }
 

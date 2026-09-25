@@ -92,7 +92,7 @@ struct SettingsView: View {
                 } footer: {
                     Text("Uploads go to the host's temporary folder. omp, Claude Code and Codex copy images into their own history when sent, so these are swept after this long.")
                 }
-                Section("Hosts") {
+                Section {
                     ForEach(model.profiles) { profile in
                         NavigationLink {
                             HostEditor(profile: profile)
@@ -100,7 +100,12 @@ struct SettingsView: View {
                             LabeledContent(profile.name, value: profile.address)
                         }
                     }
+                    .onMove { model.moveProfiles(from: $0, to: $1) }
                     Button("Add Host…", systemImage: "plus") { addingHost = true }
+                } header: {
+                    Text("Hosts")
+                } footer: {
+                    if model.profiles.count > 1 { Text("Touch and hold a host to drag it into a new order. Swipe the title to move between them.") }
                 }
 
                 AuthorizedKeySection()

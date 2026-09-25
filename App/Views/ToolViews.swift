@@ -85,7 +85,7 @@ struct ToolStepView: View {
             if let output { cappedText(output) }
         case .todo(let items): TodoList(items: items)
         case .plan(let text):
-            if let markdown = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) { Text(markdown) } else { Text(text) }
+            MarkdownText(text: text)
         }
     }
 

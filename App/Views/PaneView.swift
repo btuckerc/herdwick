@@ -20,6 +20,13 @@ struct PaneView: View {
     @State private var sentCount = 0
     @State private var startFlow = AgentStartFlow()
     @FocusState private var composerFocused: Bool
+    @State private var restingSize: CGSize = .zero
+    /// The pane's width on the host; read-only mode renders it in full and scrolls sideways.
+    @State private var paneCols: Int?
+    /// Output above the pane's screen, loaded when reading starts and each time the user
+    /// scrolls up into it.
+    @State private var history: [[ANSIRun]] = []
+    @State private var readingBack = false
 
     private var pane: Pane? { connection.snapshot?.panes.first { $0.id == paneID } }
     private var agent: Agent? { connection.snapshot?.agents.first { $0.paneID == paneID } }
@@ -29,13 +36,52 @@ struct PaneView: View {
     }
     private var theme: TerminalTheme { settings.theme(for: colorScheme) }
 
+    /// Read-only mode renders the pane at its host size (or the view's, if larger): `observe`
+    /// at fewer rows shows only the top rows and hides the prompt, and at fewer columns cuts
+    /// wide output off. Typing mode fits the view and resizes the PTY to match instead.
+    private var liveSize: CGSize {
+        let fit = CGSize(width: max(restingSize.width - 12, 0), height: restingSize.height)
+        guard !typing else { return fit }
+        let cols = CGFloat(paneCols ?? 0), rows = CGFloat(pane?.viewportRows ?? 0)
+        return CGSize(width: max(fit.width, ceil(cols * terminal.cellWidth) + 1),
+                      height: max(fit.height, rows * terminal.cellHeight))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            if agent == nil, pane != nil { startBar }
             ZStack {
                 theme.backgroundColor.ignoresSafeArea(edges: .horizontal)
-                TerminalSurface(controller: terminal)
-                    .padding(.horizontal, 6)
-                    .opacity(connection.isLive && terminal.hasFrame ? 1 : 0.55)
+                // Vertical outside horizontal: each drag moves one way, like a document.
+                // Reading keeps its resting size while the keyboard is up: the keyboard covers
+                // old output instead of reflowing the stream.
+                ScrollView(.vertical) {
+                    ScrollView(.horizontal) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            if !typing, !history.isEmpty {
+                                TerminalHistory(lines: history, theme: theme, font: settings.font.uiFont(size: settings.fontSize),
+                                                lineHeight: terminal.cellHeight)
+                            }
+                            if restingSize != .zero {
+                                TerminalSurface(controller: terminal)
+                                    .frame(width: liveSize.width, height: liveSize.height)
+                            }
+                        }
+                        .padding(.horizontal, 6)
+                    }
+                    .defaultScrollAnchor(.leading)
+                    .scrollIndicators(.hidden)
+                }
+                .defaultScrollAnchor(.bottom)
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                .scrollDisabled(typing)
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.contentOffset.y + geometry.containerSize.height < geometry.contentSize.height - 8
+                } action: { _, up in
+                    if up, !readingBack { Task { await loadHistory() } }
+                    readingBack = up
+                }
+                .opacity(connection.isLive && terminal.hasFrame ? 1 : 0.55)
                 if !terminal.hasFrame, connection.isLive {
                     ProgressView().tint(theme.foregroundColor)
                 }
@@ -50,6 +96,9 @@ struct PaneView: View {
                         .padding()
                         .frame(maxHeight: .infinity, alignment: .top)
                 }
+            }
+            .onGeometryChange(for: CGSize.self, of: \.size) { size in
+                if !composerFocused || typing { restingSize = size }
             }
             .animation(.smooth, value: terminal.hasFrame)
 
@@ -68,6 +117,7 @@ struct PaneView: View {
             await terminal.run(client: client, session: session, pane: paneID, control: typing)
             if typing, !Task.isCancelled { typing = false }
         }
+        .task(id: HistoryKey(liveID: connection.liveID, typing: typing)) { await loadHistory() }
         .sensoryFeedback(.success, trigger: sentCount) { _, _ in settings.haptics }
         // Scenario cues for the demo captures: a typed reply, then the real send.
         .onChange(of: demo?.draft, initial: true) { _, text in if let text { draft = text } }
@@ -104,35 +154,40 @@ struct PaneView: View {
                     }
                 }
             }
-            if agent == nil {
-                HStack {
-                    Button {
-                        start(connection.lastAgentKind)
-                    } label: {
-                        HStack {
-                            if startFlow.running { ProgressView() }
-                            Text("Start \(agentKindLabel(connection.lastAgentKind))")
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.glassProminent)
-                    Menu {
-                        ForEach(["omp", "claude", "codex"], id: \.self) { kind in
-                            Button("Start \(agentKindLabel(kind))") { start(kind) }
-                        }
-                    } label: { Image(systemName: "chevron.down") }
-                    .buttonStyle(.glass)
-                    .accessibilityLabel("Choose agent to start")
-                }
-                .tint(.accentColor)
-                .disabled(startFlow.running)
-            }
             if !typing { composer }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 8)
         .disabled(!connection.isLive || pane == nil)
+    }
+
+    /// Start an agent in this shell; sits under the header so the keyboard area stays for typing.
+    private var startBar: some View {
+        HStack {
+            Button {
+                start(connection.lastAgentKind)
+            } label: {
+                HStack {
+                    if startFlow.running { ProgressView() }
+                    Text("Start \(agentKindLabel(connection.lastAgentKind))")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glassProminent)
+            Menu {
+                ForEach(["omp", "claude", "codex"], id: \.self) { kind in
+                    Button("Start \(agentKindLabel(kind))") { start(kind) }
+                }
+            } label: { Image(systemName: "chevron.down") }
+            .buttonStyle(.glass)
+            .accessibilityLabel("Choose agent to start")
+        }
+        .tint(.accentColor)
+        .disabled(startFlow.running || !connection.isLive)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(theme.backgroundColor)
     }
 
     private var composer: some View {
@@ -175,6 +230,16 @@ struct PaneView: View {
         }
     }
 
+    /// Refreshes the host width and the output above the screen. Read-only calls: the
+    /// host's pane is never scrolled or resized for reading.
+    private func loadHistory() async {
+        guard !typing, let client = connection.client, let session = connection.activeSession else { return }
+        if let size = try? await client.paneSize(paneID, session: session) { paneCols = size.cols }
+        if let lines = try? await client.paneHistory(paneID, session: session, lines: 500), !Task.isCancelled {
+            history = lines
+        }
+    }
+
     private func send(keys: [String]) async {
         do {
             try await connection.sendKeys(keys, pane: paneID)
@@ -182,6 +247,11 @@ struct PaneView: View {
             sendError = "The key wasn't delivered."
         }
     }
+}
+
+private struct HistoryKey: Hashable {
+    let liveID: Int
+    let typing: Bool
 }
 
 private struct StreamKey: Hashable {

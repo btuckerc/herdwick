@@ -118,9 +118,17 @@ public struct Pane: Decodable, Sendable, Equatable, Identifiable {
     public var label: String?
     public var terminalTitle: String?
     public var revision: Int
+    /// The pane's visible rows on the host. `observe` at fewer rows shows only the top ones.
+    public var viewportRows: Int? { scroll?.viewportRows }
+    var scroll: Scroll?
+
+    struct Scroll: Decodable, Sendable, Equatable {
+        var viewportRows: Int?
+        enum CodingKeys: String, CodingKey { case viewportRows = "viewport_rows" }
+    }
 
     enum CodingKeys: String, CodingKey {
-        case focused, agent, cwd, label, revision
+        case focused, agent, cwd, label, revision, scroll
         case id = "pane_id"
         case workspaceID = "workspace_id"
         case tabID = "tab_id"

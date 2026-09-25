@@ -31,8 +31,11 @@ final class ConversationFeed {
         window *= 4
     }
 
-    /// Loads and follows the transcript until cancelled. The view keys this on the link, the
-    /// location and `window`, so a reconnect or "show earlier" starts over cleanly.
+    /// Loads and follows the transcript until cancelled or the channel ends. The view keys
+    /// this on the link, the location and `window`, and calls it again after a dropped
+    /// channel. A conversation already on screen stays there: a lost transport (the app went
+    /// to the background) is not a transcript problem, so only a first read that never
+    /// painted reports `unavailable`.
     func follow(_ location: TranscriptLocation, client: HerdrClient) async {
         let path = location.path
         let liveness = Task { @MainActor [weak self] in
@@ -52,7 +55,7 @@ final class ConversationFeed {
             }
         }
         defer { liveness.cancel() }
-        state = .loading
+        if state != .live { state = .loading }
         do {
             let head = try await client.readFileTail(path: path, from: 0, limit: 4096)
             title = TranscriptReader.title(inHead: head.bytes, format: location.format)
@@ -74,9 +77,8 @@ final class ConversationFeed {
                     state = .live
                 }
             }
-            if !Task.isCancelled { state = .unavailable("The transcript stopped updating.") }
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, state != .live else { return }
             state = .unavailable("Couldn't read this agent's transcript.")
         }
     }

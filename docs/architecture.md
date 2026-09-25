@@ -57,8 +57,18 @@ Decisions as of 2026-09-24. The evidence behind them is in
 - Sessions: `herdr session list --json`.
 - Live terminal: read-only `herdr --session <s> terminal session observe
   <pane> --cols C --rows R` at the phone's grid. It does not resize the PTY.
+  At fewer rows than the pane it sends only the pane's top rows, which hides the
+  prompt, and at fewer columns it cuts wide lines off, so the app observes at
+  least the pane's `scroll.viewport_rows` and `pane.layout` width, inside a
+  vertical `ScrollView` wrapping a horizontal one (direction-locked), anchored to
+  the bottom. The keyboard covers old output rather than changing the grid.
   `observe` ignores stdin in herdr 0.9, so it runs under a wrapper that kills
   it when stdin closes; otherwise dropped connections leak processes.
+- Scrollback: `observe` has no scroll, and `pane.scroll` would move the host's
+  own view, so earlier output comes from `pane.read --source recent --format ansi`
+  (500 lines) minus the visible screen's line count, parsed by `ANSILines` (SGR
+  only) and drawn as text above the live terminal. Reloaded on open and whenever
+  the user scrolls up from the bottom; full-screen apps have none.
 - Typing mode: `terminal session control <pane> --takeover --cols C --rows R`,
   which exits on stdin EOF. It resizes the PTY, and the new size persists
   after exit, so it is opt-in and labelled. The composer (`pane.send_input`)

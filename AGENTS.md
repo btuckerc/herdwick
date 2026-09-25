@@ -6,4 +6,6 @@
 - Never write to the user's real herdr session `main`.
 - The iOS app builds only on the Mac Mini (`ssh mini`, Xcode on `/Volumes/E0/Developer`); Linux builds the core package only.
   `scripts/mini/sync-and-build.sh` (rsync + XcodeGen + simulator build); add `testflight` with `ASC_KEY_ID`/`ASC_ISSUER_ID` to upload.
+  It prints "Uploaded build N" and exits; wait on that command itself. Never block on remote polling
+  loops (`ssh mini 'while pgrep …'`): they outlive the build and hang the session.
 - Simulator UI checks: `axe` on the Mini (coordinate taps; `--label` taps time out).

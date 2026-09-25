@@ -35,20 +35,86 @@ extension AgentStatus {
     }
 }
 
+/// The host name over its address as one control. Tap opens the host list; swipe moves to the
+/// neighbouring host, whose name peeks dimmed at each edge, like Weather's locations.
 struct HostTitle: View {
-    let name: String
+    let title: String
     let subtitle: String
+    var previous: String?
+    var next: String?
+    let open: () -> Void
+    /// Nil when swiping is off (one host, or All Hosts).
+    var switchHost: ((Int) -> Void)?
+
+    @State private var drag: CGFloat = 0
+    private let stride: CGFloat = 170
+
     var body: some View {
-        VStack(spacing: 1) {
-            HStack(spacing: 4) {
-                Text(name).font(.headline)
-                Image(systemName: "chevron.down").font(.caption2).foregroundStyle(.secondary)
+        ZStack {
+            if let previous { peek(previous, edge: .trailing).offset(x: drag - stride) }
+            VStack(spacing: 1) {
+                Text(title).font(.headline)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary).minimumScaleFactor(0.8)
             }
-            Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            .lineLimit(1)
+            .frame(width: stride - 12)
+            .offset(x: drag)
+            .opacity(1 - min(abs(drag) / stride, 1) * 0.6)
+            if let next { peek(next, edge: .leading).offset(x: drag + stride) }
         }
-        .lineLimit(1)
+        .frame(width: stride + 70, height: 44)
+        .mask {
+            LinearGradient(stops: [
+                .init(color: .clear, location: 0), .init(color: .black, location: 0.18),
+                .init(color: .black, location: 0.82), .init(color: .clear, location: 1),
+            ], startPoint: .leading, endPoint: .trailing)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: open)
+        .gesture(swipe, including: switchHost == nil ? .none : .all)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(name), \(subtitle)")
+        .accessibilityLabel(title)
+        .accessibilityValue(subtitle)
+        .accessibilityHint("Shows hosts and sessions")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { open() }
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment where next != nil: switchHost?(1)
+            case .decrement where previous != nil: switchHost?(-1)
+            default: break
+            }
+        }
+    }
+
+    /// A neighbour's name, aligned toward the centre so its nearest end shows.
+    private func peek(_ name: String, edge: HorizontalAlignment) -> some View {
+        Text(name)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(edge == .trailing ? .head : .tail)
+            .frame(width: stride - 12, alignment: Alignment(horizontal: edge, vertical: .center))
+            .accessibilityHidden(true)
+    }
+
+    private var swipe: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                let dx = value.translation.width
+                // Rubber-band past the first and last host.
+                drag = (dx < 0 ? next : previous) != nil ? dx : dx / 4
+            }
+            .onEnded { value in
+                let dx = value.predictedEndTranslation.width
+                let direction = dx < -stride / 2 ? 1 : dx > stride / 2 ? -1 : 0
+                if direction != 0, (direction > 0 ? next : previous) != nil {
+                    switchHost?(direction)
+                    // The neighbour is now the title: keep it where the finger left it, then settle.
+                    drag += CGFloat(direction) * stride
+                }
+                withAnimation(.smooth) { drag = 0 }
+            }
     }
 }
 
@@ -186,7 +252,7 @@ struct MessageComposer: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 11)
-                    .background(.fill.tertiary, in: .rect(cornerRadius: 22))
+                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
                     Button(action: onSend) {
                         Image(systemName: "arrow.up")
                             .font(.body.weight(.semibold)).frame(width: 30, height: 30)

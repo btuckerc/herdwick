@@ -8,7 +8,7 @@ One screen answers "who needs me, what do they want, answer it".
 
 | herdr | Herdwick |
 |---|---|
-| host + herdr session | the account: title menu on the inbox |
+| host + herdr session | the account: the inbox title (tap for the host list, swipe between hosts) |
 | agent (pane with a detected agent) | a conversation |
 | workspace | caption on the conversation (label, branch) |
 | tab, pane, split, layout | hidden; shells (`unknown`) sit in a collapsed "Terminals" section |
@@ -18,24 +18,32 @@ Order: blocked agents pinned in a "Needs You" section, everything else by `state
 descending (most recent change first, like a messages list).
 
 ## Screens (4)
-1. **Inbox** (`SessionView`): `List`, inline title = host name with `.toolbarTitleMenu`
-   (hosts, add host, herdr session, "Group by Workspace", edit host). Large titles don't show
-   the menu chevron, so the title is inline. Connection state is the navigation subtitle, not a
-   floating pill. One trailing toolbar button (settings). No segmented picker, no
-   `safeAreaInset` header (fixes the title-under-picker bug). Row: status glyph, conversation
-   title (terminal title minus the agent glyph prefix), "status · workspace", unread dot.
-   Agents with a transcript open the conversation; others open the terminal. No per-row
-   preview: that would need a transcript read per agent.
+1. **Inbox** (`SessionView`): `List`, inline title. The principal `HostTitle` shows host name
+   over address (or connection state) as one control, no chevron: tap opens the Hosts sheet
+   (All Hosts as an exclusive choice, hosts in the user's order with Edit/drag to reorder,
+   Add Host, the host's herdr sessions, Edit host). Swipe it to move to the previous/next
+   host (push transition); their names peek dimmed at the edges. In All Hosts the title reads
+   "All Hosts · N hosts" and doesn't swipe. `.toolbarTitleMenu` was dropped because its label
+   flies away while the menu is open. Trailing toolbar button: Settings. Bottom bar: View
+   options at the leading edge (one menu with titled View, Group and Sort sections; Group and
+   Sort only for Agents) and "+" (New Agent/Workspace) at the trailing edge. Row: status
+   glyph, conversation title (terminal title minus the agent glyph prefix),
+   "status · workspace", unread dot. Agents with a transcript open the conversation; others
+   open the terminal. No per-row preview: that would need a transcript read per agent.
 2. **Conversation**: transcript rendered as chat; pending ask as native cards above the
    composer; composer (`pane.send_input`, text + `enter`). Title = transcript title or agent,
    subtitle = status text in colour + workspace. One toolbar button: Terminal.
 3. **Terminal**: existing SwiftTerm surface pushed from the conversation or a shell row; observe
    by default, typing mode (takeover) opt-in. The fallback for anything we can't structure.
+   Reading scrolls like a document without touching the host's pane: vertically into earlier
+   output (`pane.read recent`, ANSI colours, loaded on open and each time you scroll up into
+   it) and sideways when the pane is wider than the phone (observed at its `pane.layout`
+   width). Typing mode fits the screen and doesn't scroll.
 4. **Settings / hosts** sheet; onboarding is a sheet flow.
 
 Agentless panes keep the terminal and command composer (“Run a command”); Send submits
-with Enter, with attachments (including images) pasted as shell-quoted paths. Above it,
-an accent glass-prominent Start control launches OMP, Claude or Codex in that pane.
+with Enter, with attachments (including images) pasted as shell-quoted paths. Under the
+header, an accent glass-prominent Start control launches OMP, Claude or Codex in that pane.
 The kind is remembered per host profile (`lastAgentKind.<profileID>`) and also seeds
 the New Agent picker. A foreground non-shell process triggers “Start in New Tab” /
 Cancel rather than typing into the busy program; the new tab uses the pane's workspace
@@ -84,10 +92,15 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
   padded `title` record rewritten in place, so the title comes from there); then one channel
   runs `tail -c +<offset> -F <path> & …; cat >/dev/null; kill` from the last 256 KiB (partial
   first line dropped). The remote `tail` dies when the channel closes, because the shell is
-  waiting on stdin. "Show Earlier Messages" reloads with 4× the window.
+  waiting on stdin. "Show Earlier Messages" reloads with 4× the window. A dropped channel
+  (backgrounding closes the transport) keeps the painted conversation; the view follows again
+  on the same transport after 2 s or when the reconnect bumps `liveID`. Only a first read that
+  never painted shows "Couldn't read this agent's transcript".
 - `TranscriptReader` → `TranscriptEntry` → `Conversation` (HerdwickCore `Transcript.swift`;
   omp shapes below):
-  - `message/user` → user bubble; `message/assistant` `text` → agent text (inline Markdown),
+  - `message/user` → user bubble; `message/assistant` `text` → agent text (Markdown blocks:
+    headings, lists and task lists, quotes, code, tables that scroll sideways; inline via
+    `AttributedString`),
     `thinking` and `toolCall`s → one folded "N steps · <last summary>" row; a tool call merges
     with its `toolResult` by `toolCallId` (state, first 200 output lines).
   - `custom/tool_execution_start` → running step (replaced by its call); `compaction`,

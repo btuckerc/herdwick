@@ -26,14 +26,40 @@ public struct FileSlice: Sendable, Equatable {
 }
 
 extension HerdrClient {
-    public func readPane(_ pane: String, session: String, source: PaneReadSource = .visible, lines: Int? = nil) async throws -> PaneText {
+    public func readPane(_ pane: String, session: String, source: PaneReadSource = .visible, lines: Int? = nil,
+                         ansi: Bool = false) async throws -> PaneText {
         struct Params: Encodable, Sendable {
             let pane_id: String; let source: PaneReadSource; let lines: Int?; let format: String
         }
         struct Read: Decodable { let text: String; let revision: Int?; let truncated: Bool }
         struct Result: Decodable { let read: Read }
-        let result: Result = try await request("pane.read", params: Params(pane_id: pane, source: source, lines: lines, format: "text"), session: session)
+        let params = Params(pane_id: pane, source: source, lines: lines, format: ansi ? "ansi" : "text")
+        let result: Result = try await request("pane.read", params: params, session: session)
         return PaneText(text: result.read.text, revision: result.read.revision, truncated: result.read.truncated)
+    }
+
+    /// Output that has scrolled off the top of the pane, oldest first, up to `lines` lines.
+    /// `recent` ends with the visible screen, which the live stream already shows, so the
+    /// visible rows are dropped from its tail. Full-screen apps (alternate screen) have none.
+    public func paneHistory(_ pane: String, session: String, lines: Int) async throws -> [[ANSIRun]] {
+        async let recent = readPane(pane, session: session, source: .recent, lines: lines, ansi: true)
+        async let visible = readPane(pane, session: session, source: .visible)
+        let screenRows = try await ANSILines.parse(visible.text).count
+        return Array(ANSILines.parse(try await recent.text).dropLast(screenRows))
+    }
+
+    /// The pane's size on the host in cells, from its tab layout.
+    public func paneSize(_ pane: String, session: String) async throws -> (cols: Int, rows: Int) {
+        struct Params: Encodable, Sendable { let pane_id: String }
+        struct Rect: Decodable { let width: Int; let height: Int }
+        struct Entry: Decodable { let pane_id: String; let rect: Rect }
+        struct Layout: Decodable { let panes: [Entry] }
+        struct Result: Decodable { let layout: Layout }
+        let result: Result = try await request("pane.layout", params: Params(pane_id: pane), session: session)
+        guard let rect = result.layout.panes.first(where: { $0.pane_id == pane })?.rect else {
+            throw HerdrError.malformed("pane.layout has no \(pane)")
+        }
+        return (rect.width, rect.height)
     }
 
     /// A missing file reads as empty: agents such as omp create their transcript on the first message.

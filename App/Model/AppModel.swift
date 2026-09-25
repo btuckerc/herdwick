@@ -176,6 +176,12 @@ final class AppModel {
         select(profile.id)
     }
 
+    /// The user's host order: the title swipe, menus and the all-hosts inbox follow it.
+    func moveProfiles(from source: IndexSet, to destination: Int) {
+        profiles.move(fromOffsets: source, toOffset: destination)
+        ProfileStorage.save(profiles)
+    }
+
     /// Saves edits; a changed route, user or auth reconnects with the new settings.
     func update(_ profile: HostProfile) {
         store(profile)
