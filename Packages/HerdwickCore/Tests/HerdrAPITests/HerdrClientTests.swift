@@ -151,12 +151,12 @@ struct LiveHerdrTests {
 
         // The mirror follows structure changes and re-subscribes for the new pane.
         var mirror = client.mirror(session: session).makeAsyncIterator()
-        #expect(try await mirror.next()?.panes.count == 1)
+        #expect(try await mirror.next()?.snapshot.panes.count == 1)
         struct Split: Encodable, Sendable { var direction = "right"; var target_pane_id: String }
         let _: HerdrClient.Ignored = try await client.request("pane.split", params: Split(target_pane_id: pane), session: session)
         var latest: Snapshot?
-        repeat { latest = try await mirror.next() } while latest?.panes.count != 2
+        repeat { latest = try await mirror.next()?.snapshot } while latest?.panes.count != 2
         let _: HerdrClient.Ignored = try await client.request("tab.rename", params: Rename(tab_id: tab, label: "mirrored"), session: session)
-        repeat { latest = try await mirror.next() } while latest?.tabs.first?.label != "mirrored"
+        repeat { latest = try await mirror.next()?.snapshot } while latest?.tabs.first?.label != "mirrored"
     }
 }

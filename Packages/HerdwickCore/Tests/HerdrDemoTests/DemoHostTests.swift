@@ -26,13 +26,15 @@ import HerdrAPI
         #expect(try await client.ping(session: "main").protocolVersion == 22)
 
         var snapshots = client.mirror(session: "main").makeAsyncIterator()
-        let first = try #require(try await snapshots.next())
+        guard case .preview(let preview) = try await snapshots.next() else { Issue.record("expected a preview first"); return }
+        #expect(preview.agents.map(\.agentStatus) == [.working])
+        guard case .live(let first) = try await snapshots.next() else { Issue.record("expected a live snapshot next"); return }
         #expect(first.agents.map(\.agentStatus) == [.working])
         host.startClock()
         let next = try #require(try await snapshots.next())
-        #expect(next.agents.map(\.agentStatus) == [.blocked])
+        #expect(next.snapshot.agents.map(\.agentStatus) == [.blocked])
         let refreshed = try #require(try await snapshots.next())
-        #expect(refreshed.workspaces.first?.agentStatus == .blocked, "the snapshot re-derives the roll-up")
+        #expect(refreshed.snapshot.workspaces.first?.agentStatus == .blocked, "the snapshot re-derives the roll-up")
     }
 
     @Test func sendingToAPaneRunsItsTriggerAndRepaintsTheTerminal() async throws {
@@ -63,6 +65,7 @@ import HerdrAPI
         let client = HerdrClient(runner: host)
         var snapshots = client.mirror(session: "main").makeAsyncIterator()
         _ = try await snapshots.next()
+        _ = try await snapshots.next()
         host.startClock()
         await #expect(throws: (any Error).self) { _ = try await snapshots.next() }
         await #expect(throws: CommandError.channelClosed) { _ = try await client.snapshot(session: "main") }
@@ -74,6 +77,7 @@ import HerdrAPI
         let host = DemoHost(scenario: try Fixture.scenario(timeline: "[]"), dropAfterReady: true)
         let client = HerdrClient(runner: host)
         var snapshots = client.mirror(session: "main").makeAsyncIterator()
+        _ = try await snapshots.next()
         _ = try await snapshots.next()
         await #expect(throws: (any Error).self) { _ = try await snapshots.next() }
         try await Task.sleep(for: .milliseconds(200))

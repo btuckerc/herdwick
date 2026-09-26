@@ -25,9 +25,10 @@ Decisions as of 2026-09-24. The evidence behind them is in
     Structural events arrive with underscores (`tab_renamed`) and are mapped to
     `tab.renamed`; agent status events already arrive dotted
     (`pane.agent_status_changed`) and are kept as they are.
-  - `mirror(session:)`: a live snapshot stream. Subscribe, then snapshot,
-    then a fresh snapshot per event; agent status events are per pane, so a
-    changed pane set re-subscribes.
+  - `mirror(session:)`: a snapshot stream. A `preview` snapshot first, so the
+    session shows before the subscription is up; then subscribe, snapshot
+    (`live`), and a fresh snapshot per event; agent status events are per
+    pane, so a changed pane set re-subscribes.
   - `HerdwickSSH`/`SSHConnection`: Apple swift-nio-ssh (not Citadel, which
     depends on a third-party nio-ssh fork). Ed25519 and password auth, `none`
     auth for Tailscale SSH, host-key validation hook for TOFU pinning, exec
@@ -99,7 +100,11 @@ One SSH connection per host multiplexes every channel. States: `idle`,
   "Reconnecting…" as the navigation subtitle. The terminal keeps its last frame until the
   fresh `full:true` frame arrives.
 - Resync: subscribe to events, then take a snapshot, then apply the buffered
-  events (the gap-free order from the herdr docs).
+  events (the gap-free order from the herdr docs). The link counts as live only
+  from that snapshot; the preview before it only fills the screen.
+- Setup latency: the herdr path is cached per host, and the mirror for the likely
+  session (the chosen one, else the last one opened) starts alongside
+  `session list`, which then confirms it or picks another.
 - Configuration errors (auth, host key mismatch, herdr missing) stop retrying
   and show the fix where the user is looking.
 

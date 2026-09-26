@@ -38,6 +38,8 @@ final class HostConnection {
     private var attempt: Task<Void, Never>?
     private var retry: Task<Void, Never>?
     private var generation = 0
+    /// A snapshot was on screen when this attempt began, so it is a reconnect.
+    private var resuming = false
     private let tailnet: Tailnet
     /// The scripted host behind the demo; set instead of dialling SSH.
     private let demo: DemoHost?
@@ -100,7 +102,7 @@ final class HostConnection {
         case .live, .idle, .suspended: nil
         case .failed: "Not connected"
         case .offline: "Offline"
-        case .connecting: snapshot == nil ? "Connecting…" : "Reconnecting…"
+        case .connecting: resuming ? "Reconnecting…" : "Connecting…"
         case .waiting(_, let delay):
             "Reconnecting in \(Int((Double(delay.components.seconds) + Double(delay.components.attoseconds) / 1e18).rounded(.up)))s"
         }
@@ -300,6 +302,7 @@ final class HostConnection {
     // MARK: Effects
 
     private func connect() {
+        resuming = snapshot != nil
         teardown()
         let generation = generation
         let profile = profile
@@ -321,9 +324,14 @@ final class HostConnection {
                     runner = ssh
                 }
                 let client = HerdrClient(runner: runner, herdrPath: demo == nil ? Self.cachedHerdrPath(profile) : nil)
-                let sessions = try await client.sessions()
                 let herdrPath = try await client.resolveHerdrPath()
                 if demo == nil { Self.cache(herdrPath: herdrPath, for: profile) }
+                guard generation == self.generation else { return }
+                // Subscribe to the likely session while listing sessions; the list decides
+                // whether that mirror is kept. Dropping an unused stream closes its bridge.
+                let guess = profile.session ?? self.activeSession ?? Self.lastSession(profile)
+                var speculative = guess.map { client.mirror(session: $0) }
+                let sessions = try await client.sessions()
                 guard generation == self.generation else { return }
                 self.sessions = sessions
                 let wanted = self.includesAllSessions && !sessions.contains(where: { $0.running && $0.name == profile.session })
@@ -337,19 +345,24 @@ final class HostConnection {
                 let session = try Self.pickSession(wanted, from: sessions)
                 if self.activeSession != session {
                     self.snapshot = nil
+                    self.resuming = false
                 }
                 self.activeSession = session
+                if demo == nil { Self.remember(session: session, for: profile) }
                 self.hidden = UserDefaults.standard.dictionary(forKey: self.hiddenKey) as? [String: Int] ?? [:]
                 self.loadRead()
                 self.onSessions?(self)
 
-                for try await snapshot in client.mirror(session: session) {
+                let snapshots = (session == guess ? speculative : nil) ?? client.mirror(session: session)
+                speculative = nil
+                for try await update in snapshots {
                     guard generation == self.generation else { return }
+                    let snapshot = update.snapshot
                     self.snapshot = snapshot
                     self.recordBaseline(snapshot)
                     self.reconcileHidden(snapshot)
                     self.onAttentionChange?(self)
-                    if !wentLive {
+                    if case .live = update, !wentLive {
                         wentLive = true
                         self.client = client
                         self.liveID += 1
@@ -486,6 +499,15 @@ final class HostConnection {
 
     private static func cache(herdrPath: String, for profile: HostProfile) {
         UserDefaults.standard.set(herdrPath, forKey: "herdr-path.\(profile.id.uuidString)")
+    }
+
+    /// The session last opened on this host; only a guess to subscribe early, never a choice.
+    private static func lastSession(_ profile: HostProfile) -> String? {
+        UserDefaults.standard.string(forKey: "last-session.\(profile.id.uuidString)")
+    }
+
+    private static func remember(session: String, for profile: HostProfile) {
+        UserDefaults.standard.set(session, forKey: "last-session.\(profile.id.uuidString)")
     }
 }
 

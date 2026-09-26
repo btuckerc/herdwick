@@ -99,22 +99,26 @@ final class Tailnet {
         poll?.cancel()
         poll = Task {
             var askedForLogin = false
-            for attempt in 0..<600 where !Task.isCancelled {
-                guard let status = await status() else {
-                    try? await Task.sleep(for: .seconds(1))
-                    continue
+            var waited = Duration.zero
+            while waited < .seconds(600), !Task.isCancelled {
+                if let status = await status() {
+                    apply(status)
+                    switch status.BackendState {
+                    case "Running":
+                        return
+                    case "NeedsLogin" where status.AuthURL.isEmpty && !askedForLogin && waited >= .seconds(3):
+                        askedForLogin = true
+                        await restartLogin()
+                        return
+                    default:
+                        break
+                    }
                 }
-                apply(status)
-                switch status.BackendState {
-                case "Running":
-                    return
-                case "NeedsLogin" where status.AuthURL.isEmpty && !askedForLogin && attempt > 2:
-                    askedForLogin = true
-                    await restartLogin()
-                    return
-                default:
-                    try? await Task.sleep(for: .seconds(1))
-                }
+                // Connecting waits on `Running`, so look often while the node comes up;
+                // a sign-in in the browser takes a while.
+                let interval: Duration = if case .needsLogin = state { .seconds(1) } else { .milliseconds(250) }
+                try? await Task.sleep(for: interval)
+                waited += interval
             }
         }
     }
