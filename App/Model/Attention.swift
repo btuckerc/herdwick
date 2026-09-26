@@ -6,7 +6,7 @@ import WidgetKit
 /// snapshot. Here it sees what the app sees while it is open or refreshing in the background;
 /// away from the app, push alerts (`Push`) and the notification service take over.
 @MainActor
-final class Attention: NSObject, UNUserNotificationCenterDelegate {
+final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegate {
     private let settings: Settings
     /// Every current link, across hosts and sessions.
     private let links: () -> [HostConnection]
@@ -156,18 +156,19 @@ final class Attention: NSObject, UNUserNotificationCenterDelegate {
     }
 
     // MARK: UNUserNotificationCenterDelegate
+    // Main-actor completion-handler forms: UIKit must get the handler back on the main thread.
+    // The async forms finish on a background executor, which crashed a launch from a tapped alert.
 
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification)
-        async -> UNNotificationPresentationOptions {
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         let address = Self.address(notification.request.content.userInfo)
-        return await MainActor.run {
-            address != nil && address == onScreen() ? [] : [.banner, .list, .sound]
-        }
+        completionHandler(address != nil && address == onScreen() ? [] : [.banner, .list, .sound])
     }
 
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        guard let address = Self.address(response.notification.request.content.userInfo) else { return }
-        await MainActor.run { open(address) }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if let address = Self.address(response.notification.request.content.userInfo) { open(address) }
+        completionHandler()
     }
 
     nonisolated private static func address(_ info: [AnyHashable: Any]) -> PaneAddress? {
