@@ -151,16 +151,17 @@ struct TranscriptImageThumbnail: View {
 }
 
 /// Images a message or tool result carries: thumbnails in Full detail, otherwise one label
-/// that opens them, so nothing is fetched until asked for.
+/// that shows them in place, so nothing is fetched until asked for. A thumbnail opens full screen.
 struct TranscriptImages: View {
     let images: [TranscriptImage]
     @Environment(\.inlineImages) private var inline
     @Environment(\.previewImage) private var previewImage
     /// On screen in the transcript's scroll view (the strip's own scroll view doesn't count).
     @State private var visible = false
+    @State private var expanded = false
 
     var body: some View {
-        if inline {
+        if inline || expanded {
             ScrollView(.horizontal) {
                 HStack(spacing: 6) {
                     ForEach(images.indices, id: \.self) {
@@ -172,7 +173,7 @@ struct TranscriptImages: View {
             .fixedSize(horizontal: images.count < 3, vertical: true)
             .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
         } else {
-            Button { previewImage?(.embedded(images, index: 0)) } label: {
+            Button { expanded = true } label: {
                 Label(images.count == 1 ? "Image" : "\(images.count) images", systemImage: "photo")
                     .font(.caption)
             }

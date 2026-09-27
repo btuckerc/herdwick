@@ -48,17 +48,17 @@ grouping applies it too. Cross-host order assumes the hosts' clocks agree.
    line of the newest user/assistant text, from the transcript tail the inbox already reads for
    recency (`TranscriptActivity.preview`, ≤140 chars). Agents with a transcript open the
    conversation; others open the terminal. The magnifier (or ⌘F) opens a search bar over title,
-   workspace, folder, host and (with previews on) that line; Done clears it. While anything
-   shared from another app is unsent, a "Shared · N" row tops the list (see architecture.md).
+   workspace, folder, host and (with previews on) that line; the magnifier turns into ✕, which
+   closes and clears it. While anything shared from another app is unsent, a "Shared · N" row
+   tops the list (see architecture.md).
 2. **Conversation**: transcript rendered as chat; pending ask as native cards above the
    composer; composer (`pane.send_input`, text + `enter`). Title = transcript title or agent,
    subtitle = status text in colour + workspace. Toolbar: Terminal, then (spaced apart) a More
    (`ellipsis`) menu with detail level, Find in Conversation, Retry Last Turn (omp Alt+R, only
-   after a turn ended in an error), Watch This Run, the session's
+   after a turn ended in an error), Stop Run (omp, Claude and Codex, while working; confirmed,
+   sends Esc), Show Live Activity, the session's
    model, thinking level and token/cost totals of the loaded messages, Mute Notifications (1 hour
    or until unmuted; see Attention) and "Why <status>?" (herdr's `agent.explain`, read-only).
-   The composer carries Stop between the field and Send for omp, Claude and Codex, always
-   present so the field never reflows and enabled only while working (confirmed; sends Esc).
    Find searches the loaded messages only (its field says so), steps newest-first and switches to
    Full detail when a match is folded away. While omp works the composer's + menu offers Send
    After This Run (typed into omp's editor, then Ctrl+Q queues it as a follow-up).
@@ -135,7 +135,8 @@ The composer attaches files and images, uploaded to the host and cleaned up afte
 retention (1 hour/day/week, default a day). Its + menu inserts saved snippets (Settings ›
 Messages › Snippets) into the draft; a snippet is never sent by itself. The on-screen Return adds a line unless "On-screen
 Return Sends" is on; on a hardware keyboard Return and ⌘↩ send, ⇧↩ or ⌥↩ adds a line.
-Conversation detail is Full, Folded (default) or Digest. The transcript follows its newest
+Conversation detail is Full, Folded (default) or Digest: one saved preference, set in Settings
+or any conversation's More menu (Find may show Full until its Done). The transcript follows its newest
 message through replies, the composer resizing and the keyboard until you scroll away;
 scrolling back to the end, or sending, resumes following.
 Sending clears the draft at once and keeps the field focused (disabling it resigned the
@@ -153,16 +154,17 @@ A message to or from a subagent (`agent://` peer) links to that subagent's threa
 Images: transcripts hold them by reference (`TranscriptImage`, a class compared by identity).
 omp stores them as blobs (`"data": "blob:sha256:<hex>"` at `~/.omp/agent/blobs/<hex>`, found
 beside the transcript's `sessions` folder); Claude and Codex inline base64, kept undecoded.
-User messages and tool results carry them: in Full detail as 120 pt thumbnails, otherwise one
-"Image"/"N images" label. Bytes are read from the host only when shown (`readFile`, two at a
+User messages (above the bubble, clear of its selectable text) and tool results carry them: in
+Full detail as 120 pt thumbnails, otherwise one "Image"/"N images" label that shows the
+thumbnails in place; a thumbnail opens the preview. Bytes are read from the host only when shown (`readFile`, two at a
 time, capped at 20 MB even if the file grows mid-read), decoded by ImageIO straight to the
 size needed (360 px thumbnails in a bounded cache, 3000 px in the zoomable preview). The
 transcript isn't lazy, so a thumbnail row scrolled off screen drops its bitmap and takes it
 back from the cache (or the host) on return. A code span naming an image file, or a read of
 one, opens it in the preview.
 
-Settings say only what a label can't: detail levels carry a subtitle in their menu (checkmark
-Toggles, since a Picker's tag spreads over a two-Text row), and Keep Uploads and Alerts While
+Settings say only what a label can't: detail levels are checkmark Toggles in a menu (a Picker's
+tag spreads over a two-Text row), and Keep Uploads and Alerts While
 Away each a one-line footer (when uploads are swept; what never leaves the computer), plus
 Alerts While Away's How It Works page.
 
@@ -289,13 +291,14 @@ From the councils of 2026-09-25 (`Attention`, `Push`):
   session reference, so a reused pane isn't muted; it lasts an hour or until unmuted, silences
   local alerts, and is handed to the watcher at arming (a later mute can't recall an alert
   already sent). It never changes read or blocked state.
-- Watch This Run (conversation menu) starts one Live Activity in the foreground for that agent.
+- Show Live Activity (conversation menu, while working) starts one Live Activity in the foreground for that agent.
   The app updates it while open; with Alerts While Away on, the same watcher sends that pane's
   working, needs-you and finished changes to the relay with the activity's push-to-update token
   (`kind: liveactivity`, MAC domain-separated as `v1|liveactivity|…`), which the relay sends as
   `apns-push-type: liveactivity` (update, or end on finish; four-hour stale date). Alert toggles
   and mutes don't silence an activity the user asked for. No push-to-start, one run at a time,
-  and no promise of continuous liveness: the watcher expires after 24 h.
+  and no promise of continuous liveness: the watcher expires after 24 h. A finished run's card
+  lingers as "done"; Hide Live Activity dismisses it at once.
 - Reply in App: a local Finished alert offers a text field ("Reply in App", foreground and
   authentication required). The typed text is saved as that conversation's draft and the app
   opens it for review; nothing is sent from the notification. Remote pushes don't offer it: the

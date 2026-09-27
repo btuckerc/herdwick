@@ -11,7 +11,7 @@ Decisions as of 2026-09-24. The evidence behind them is in
 - The Xcode project is generated from `project.yml` (XcodeGen), so every
   source file stays editable and reviewable from nous.
 - Extensions share the App Group `group.dev.btuckerc.herdwick`: `HerdwickNotifications`
-  (service), `HerdwickWidgets` (widgets and the Watch This Run Live Activity) and
+  (service), `HerdwickWidgets` (widgets and the pinned-run Live Activity) and
   `HerdwickShare` (share extension; `dev.btuckerc.herdwick.share`). The share extension
   previews the item and offers "Decide in Herdwick" or an agent from the `AttentionSnapshot`
   (items carry the conversation's `DraftStore` id when it has a transcript session), then

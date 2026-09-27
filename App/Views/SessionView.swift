@@ -156,7 +156,11 @@ struct SessionView: View {
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         if settings.inboxView == .agents {
             ToolbarItem(placement: .topBarLeading) {
-                Button("Search", systemImage: "magnifyingglass") { scene.searchPresented = true }
+                Button(scene.searchPresented ? "Close Search" : "Search",
+                       systemImage: scene.searchPresented ? "xmark" : "magnifyingglass") {
+                    if scene.searchPresented { query = "" }
+                    scene.searchPresented.toggle()
+                }
             }
         }
         ToolbarItem(placement: .principal) {
@@ -343,7 +347,7 @@ struct SessionView: View {
         }
     }
 
-    /// Opened from the toolbar's magnifying glass (or ⌘F); Done clears the filter.
+    /// Opened from the toolbar's magnifying glass (or ⌘F), which becomes ✕ to close and clear it.
     private var searchBar: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -352,9 +356,10 @@ struct SessionView: View {
                 .submitLabel(.search)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            Button("Done") {
-                query = ""
-                scene.searchPresented = false
+            if !query.isEmpty {
+                Button("Clear", systemImage: "xmark.circle.fill") { query = "" }
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 14)

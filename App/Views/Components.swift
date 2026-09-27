@@ -213,10 +213,6 @@ struct MessageComposer: View {
     var placeholder = "Message"
     /// Extra sends offered in the + menu (omp's "Send After This Run").
     var actions: [ComposerAction] = []
-    /// Interrupts the agent's run. Present for harnesses that support it, enabled only while working,
-    /// so the field doesn't reflow as runs start and end.
-    var onStop: (() -> Void)? = nil
-    var canStop = false
     let onSend: () -> Void
     @State private var photos: [PhotosPickerItem] = []
     @State private var showPhotos = false
@@ -285,15 +281,6 @@ struct MessageComposer: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 11)
                     .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
-                    if let onStop {
-                        Button(action: onStop) {
-                            Image(systemName: "stop.fill").frame(width: 30, height: 30)
-                        }
-                        .buttonStyle(.glass)
-                        .buttonBorderShape(.circle)
-                        .disabled(!canStop)
-                        .accessibilityLabel("Stop Run")
-                    }
                     Button(action: onSend) {
                         Image(systemName: "arrow.up")
                             .font(.body.weight(.semibold)).frame(width: 30, height: 30)

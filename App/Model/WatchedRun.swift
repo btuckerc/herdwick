@@ -58,7 +58,7 @@ final class WatchedRun {
         }
         let id = activity.id, content = content(status)
         Task {
-            if status == "done" { await stop(push: push, status: status) }
+            if status == "done" { await stop(push: push, finished: true) }
             else { await Self.live(id)?.update(content) }
         }
     }
@@ -68,13 +68,14 @@ final class WatchedRun {
         Activity<WatchedRunAttributes>.activities.first { $0.id == id }
     }
 
-    func stop(push: Push?, status: String = "done") async {
+    /// A finished run leaves its "done" card up for a while; removing it by hand clears it at once.
+    func stop(push: Push?, finished: Bool = false) async {
         let old = activity?.id
         tokenTask?.cancel(); tokenTask = nil
         stateTask?.cancel(); stateTask = nil
         activity = nil; address = nil; reference = nil
         push?.watchedRun = nil
-        if let old { await Self.live(old)?.end(content(status), dismissalPolicy: .default) }
+        if let old { await Self.live(old)?.end(content("done"), dismissalPolicy: finished ? .default : .immediate) }
     }
 
     private func content(_ status: String) -> ActivityContent<WatchedRunAttributes.ContentState> {

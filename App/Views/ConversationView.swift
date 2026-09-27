@@ -29,9 +29,11 @@ struct ConversationView: View {
     /// Messages omp is holding until the agent next takes input; the last can be unsent.
     @State private var queued: [QueuedSend] = []
     @State private var unsending = false
+    /// Find's temporary switch to Full for a folded-away match; Done or a chosen level clears it.
     @State private var detailOverride: DetailLevel?
+    /// The saved preference, shared with Settings.
     private var detailSelection: Binding<DetailLevel> {
-        Binding(get: { detailOverride ?? settings.detailLevel }, set: { detailOverride = $0 })
+        Binding(get: { settings.detailLevel }, set: { settings.detailLevel = $0; detailOverride = nil })
     }
     @State private var sentCount = 0
     @FocusState private var composerFocused: Bool
@@ -153,6 +155,11 @@ struct ConversationView: View {
     private var observed: some View {
         scroller
             .toolbar { toolbar }
+            .confirmationDialog("Stop this run?", isPresented: $confirmStop, titleVisibility: .visible) {
+                Button("Stop", role: .destructive) { Task { await press(["esc"], failure: "The agent couldn't be stopped.") } }
+            } message: {
+                Text("Sends Esc to the agent, as at the desk. Messages it was holding go back to its editor.")
+            }
             .task(id: LocateKey(liveID: connection.liveID, ref: agent?.agentSession)) {
                 await locateTranscript()
             }
@@ -240,7 +247,8 @@ struct ConversationView: View {
             followsLatest = true
             position.scrollTo(edge: .bottom)
         }
-        .defaultScrollAnchor(.bottom, for: .sizeChanges)
+        // Not mid-gesture: re-anchoring to the bottom as content streams in would drag a flick back.
+        .defaultScrollAnchor(userScrolling ? nil : .bottom, for: .sizeChanges)
         .scrollDismissesKeyboard(.interactively)
         .overlay { placeholder }
         .safeAreaInset(edge: .top) {
@@ -271,15 +279,20 @@ struct ConversationView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 DetailLevelOptions(selection: detailSelection)
-                Button("Find in Conversation", systemImage: "magnifyingglass") {
+                Button("Find in Conversation") {
                     find = (find?.query ?? "", 0)
                     findFocused = true
                 }
                 if canRetry {
                     Section {
-                        Button("Retry Last Turn", systemImage: "arrow.clockwise") {
+                        Button("Retry Last Turn") {
                             Task { await press(["alt+r"], failure: "The retry wasn't sent.") }
                         }
+                    }
+                }
+                if canStop {
+                    Section {
+                        Button("Stop Run", role: .destructive) { confirmStop = true }
                     }
                 }
                 if let agent, connection.isLive, !feed.isOfflineCopy {
@@ -287,11 +300,11 @@ struct ConversationView: View {
                     if watching || agent.agentStatus == .working {
                         Section {
                             if watching {
-                                Button("Stop Watching Run", systemImage: "eye.slash") {
+                                Button("Hide Live Activity") {
                                     Task { await model.watchedRun.stop(push: model.push) }
                                 }
                             } else {
-                                Button("Watch This Run", systemImage: "eye") {
+                                Button("Show Live Activity") {
                                     Task {
                                         await model.watchedRun.start(connection: connection, agent: agent, push: model.push)
                                         if let error = model.watchedRun.error { sendError = error }
@@ -309,9 +322,9 @@ struct ConversationView: View {
                         let address = connection.address(paneID: paneID)
                         Section {
                             if Mutes.shared.isMuted(address, reference: reference) {
-                                Button("Unmute Notifications", systemImage: "bell") { Mutes.shared.unmute(address, reference: reference) }
+                                Button("Unmute Notifications") { Mutes.shared.unmute(address, reference: reference) }
                             } else {
-                                Menu("Mute Notifications", systemImage: "bell.slash") {
+                                Menu("Mute Notifications") {
                                     Button("For 1 Hour") { Mutes.shared.set(address, reference: reference, until: .now.addingTimeInterval(3600)) }
                                     Button("Until Unmuted") { Mutes.shared.set(address, reference: reference, until: nil) }
                                 }
@@ -319,7 +332,7 @@ struct ConversationView: View {
                         }
                     }
                     Section {
-                        Button("Why “\(agent.agentStatus.label)”?", systemImage: "questionmark.circle") {
+                        Button("Why “\(agent.agentStatus.label)”?") {
                             Task { await explainStatus() }
                         }
                     }
@@ -332,13 +345,9 @@ struct ConversationView: View {
     }
 
     /// Esc interrupts a running turn in omp, Claude Code and Codex alike.
-    private var stopSupported: Bool {
-        guard let agent, !feed.isOfflineCopy else { return false }
-        return ["omp", "claude", "codex"].contains(agent.agent)
-    }
-
     private var canStop: Bool {
-        stopSupported && agent?.agentStatus == .working && connection.isLive
+        guard let agent, !feed.isOfflineCopy, connection.isLive, agent.agentStatus == .working else { return false }
+        return ["omp", "claude", "codex"].contains(agent.agent)
     }
 
     /// omp retries its last failed turn with Alt+R; offered once the turn has ended in an error.
@@ -381,7 +390,7 @@ struct ConversationView: View {
                 .labelStyle(.iconOnly).disabled(matches.isEmpty)
             Button("Later", systemImage: "chevron.down") { step(1) }
                 .labelStyle(.iconOnly).disabled(matches.isEmpty)
-            Button("Done") { find = nil; findFocused = false }
+            Button("Done") { find = nil; findFocused = false; detailOverride = nil }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -563,13 +572,7 @@ struct ConversationView: View {
                 NeedsYouBanner(paneID: paneID, terminalAddress: connection.address(paneID: paneID))
             }
             MessageComposer(draft: $draft, attachments: $attachments, sending: sending, focus: $composerFocused,
-                            actions: composerActions, onStop: stopSupported ? { confirmStop = true } : nil,
-                            canStop: canStop) { Task { await sendDraft() } }
-                .confirmationDialog("Stop this run?", isPresented: $confirmStop, titleVisibility: .visible) {
-                    Button("Stop", role: .destructive) { Task { await press(["esc"], failure: "The agent couldn't be stopped.") } }
-                } message: {
-                    Text("Sends Esc to the agent, as at the desk. Messages it was holding go back to its editor.")
-                }
+                            actions: composerActions) { Task { await sendDraft() } }
                 .disabled(!connection.isLive || agent == nil || feed.isOfflineCopy)
         }
         .padding(.horizontal, 12)
@@ -912,18 +915,20 @@ private struct UserBubble: View {
     var body: some View {
         HStack {
             Spacer(minLength: 48)
-            VStack(alignment: .trailing, spacing: 4) {
+            // Images sit above the bubble, clear of the text selection's touch area, which
+            // otherwise takes taps meant for the "Image" label.
+            VStack(alignment: .trailing, spacing: 6) {
                 if !images.isEmpty { TranscriptImages(images: images) }
                 if !shown.isEmpty {
                     ClampedText(text: shown, lines: 12)
                         .textSelection(.enabled)
                         .tint(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .foregroundStyle(.white)
+                        .background(Color.accentColor, in: .rect(cornerRadius: 20))
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .foregroundStyle(.white)
-            .background(Color.accentColor, in: .rect(cornerRadius: 20))
         }
     }
 }
@@ -1443,6 +1448,9 @@ private struct TailGeometry: Equatable {
     init(_ geometry: ScrollGeometry) {
         layout = Layout(content: geometry.contentSize.height, container: geometry.containerSize.height,
                         insets: geometry.contentInsets)
-        nearBottom = geometry.visibleRect.maxY >= geometry.contentSize.height - 80
+        // The viewport runs under the composer, ask card and keyboard insets; without taking them
+        // off, a scroll of up to that height (half the screen with the keyboard up) still counts
+        // as the bottom, and letting go snaps back to it.
+        nearBottom = geometry.visibleRect.maxY - geometry.contentInsets.bottom >= geometry.contentSize.height - 80
     }
 }

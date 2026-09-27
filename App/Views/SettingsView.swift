@@ -342,8 +342,7 @@ private struct PushDisclosure: View {
     }
 }
 
-/// The detail levels as menu items, each with a subtitle. A Picker can't carry subtitles in a
-/// menu (its tag spreads to every Text), but a Toggle's label can.
+/// The detail levels as checkmarked menu items.
 struct DetailLevelOptions: View {
     @Binding var selection: DetailLevel
 
@@ -356,15 +355,8 @@ struct DetailLevelOptions: View {
     }
 
     var body: some View {
-        option(.full, "Every step, expanded")
-        option(.folded, "Steps grouped")
-        option(.digest, "Messages and turning points")
-    }
-
-    private func option(_ level: DetailLevel, _ subtitle: String) -> some View {
-        Toggle(isOn: Binding(get: { selection == level }, set: { if $0 { selection = level } })) {
-            Text(Self.title(level))
-            Text(subtitle)
+        ForEach(DetailLevel.allCases) { level in
+            Toggle(Self.title(level), isOn: Binding(get: { selection == level }, set: { if $0 { selection = level } }))
         }
     }
 }

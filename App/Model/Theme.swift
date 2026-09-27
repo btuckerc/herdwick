@@ -114,7 +114,7 @@ final class Settings {
     var inboxSort: InboxSort { didSet { save() } }
     /// Fold idle, read agents into one "N Idle" row.
     var collapseIdle: Bool { didSet { save() } }
-    /// How much of a thread shows by default; a thread can override it for itself.
+    /// How much of a conversation shows; set in Settings or any conversation's More menu.
     var detailLevel: DetailLevel { didSet { save() } }
     /// Alerts for agents that need you (with the badge) and for finished work.
     var notifyNeedsYou: Bool { didSet { save() } }
