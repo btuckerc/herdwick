@@ -57,8 +57,12 @@ grouping applies it too. Cross-host order assumes the hosts' clocks agree.
    (`ellipsis`) menu with detail level, Find in Conversation, Retry Last Turn (omp Alt+R, only
    after a turn ended in an error), Stop Run (omp, Claude and Codex, while working; confirmed,
    sends Esc), Show Live Activity, the session's
-   model, thinking level and token/cost totals of the loaded messages, Mute Notifications (1 hour
+   model with Session Details (an alert: thinking level, tokens and estimated cost of the loaded
+   messages; omp's own estimate, Claude and Codex record none), Mute Notifications (1 hour
    or until unmuted; see Attention) and "Why <status>?" (herdr's `agent.explain`, read-only).
+   The menu is its own view compared by value and holds nothing that changes per reply: a
+   visible menu that SwiftUI rebuilds jumps back to its top, and the conversation re-renders
+   with every streamed record.
    Find searches the loaded messages only (its field says so), steps newest-first and switches to
    Full detail when a match is folded away. While omp works the composer's + menu offers Send
    After This Run (typed into omp's editor, then Ctrl+Q queues it as a follow-up).

@@ -51,6 +51,7 @@ struct ConversationView: View {
     @State private var draftID: String?
     @State private var previewing: ImagePreviewSource?
     @State private var confirmStop = false
+    @State private var showsSessionDetails = false
     @State private var explanation: String?
     /// The ended agent being resumed from the "Agent exited" state.
     @State private var resuming: EndedAgent?
@@ -86,6 +87,11 @@ struct ConversationView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(explanation ?? "")
+            }
+            .alert(sessionDetails?.title ?? "Session", isPresented: $showsSessionDetails) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(sessionDetails?.body ?? "")
             }
             .sheet(item: $resuming) { item in
                 NewAgentSheet(links: [connection], preferred: connection, resume: item) { scene.navigationPath.append($0) }
@@ -313,70 +319,41 @@ struct ConversationView: View {
         }
         ToolbarSpacer(.fixed, placement: .topBarTrailing)
         ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                DetailLevelOptions(selection: detailSelection)
-                Button("Find in Conversation") {
-                    find = (find?.query ?? "", 0)
-                    findFocused = true
+            let address = connection.address(paneID: paneID)
+            let watching = model.watchedRun.address == address
+            let offersActivity = agent != nil && connection.isLive && !feed.isOfflineCopy
+                && (watching || agent?.agentStatus == .working)
+            let details = sessionDetails
+            ConversationMenu(
+                detail: settings.detailLevel, canRetry: canRetry, canStop: canStop,
+                liveActivity: offersActivity ? (watching ? .hide : .show) : nil,
+                session: details?.title, sessionHasDetails: details?.body.isEmpty == false,
+                mute: agent?.agentSession.map { .init(address: address, reference: $0.value) },
+                status: agent?.agentStatus.label, act: menuAction
+            )
+            .equatable()
+        }
+    }
+
+    private func menuAction(_ action: ConversationMenu.Action) {
+        switch action {
+        case .sessionDetails: showsSessionDetails = true
+        case .detail(let level): detailSelection.wrappedValue = level
+        case .find:
+            find = (find?.query ?? "", 0)
+            findFocused = true
+        case .retry: Task { await press(["alt+r"], failure: "The retry wasn't sent.") }
+        case .stop: confirmStop = true
+        case .liveActivity:
+            Task {
+                if model.watchedRun.address == connection.address(paneID: paneID) {
+                    await model.watchedRun.stop(push: model.push)
+                } else if let agent {
+                    await model.watchedRun.start(connection: connection, agent: agent, push: model.push)
+                    if let error = model.watchedRun.error { sendError = error }
                 }
-                if canRetry {
-                    Section {
-                        Button("Retry Last Turn") {
-                            Task { await press(["alt+r"], failure: "The retry wasn't sent.") }
-                        }
-                    }
-                }
-                if canStop {
-                    Section {
-                        Button("Stop Run", role: .destructive) { confirmStop = true }
-                    }
-                }
-                if let agent, connection.isLive, !feed.isOfflineCopy {
-                    let watching = model.watchedRun.address == connection.address(paneID: paneID)
-                    if watching || agent.agentStatus == .working {
-                        Section {
-                            if watching {
-                                Button("Hide Live Activity") {
-                                    Task { await model.watchedRun.stop(push: model.push) }
-                                }
-                            } else {
-                                Button("Show Live Activity") {
-                                    Task {
-                                        await model.watchedRun.start(connection: connection, agent: agent, push: model.push)
-                                        if let error = model.watchedRun.error { sendError = error }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if let details = sessionDetails {
-                    Section(details.title) { Text(details.body) }
-                }
-                if let agent {
-                    if let reference = agent.agentSession?.value {
-                        let address = connection.address(paneID: paneID)
-                        Section {
-                            if Mutes.shared.isMuted(address, reference: reference) {
-                                Button("Unmute Notifications") { Mutes.shared.unmute(address, reference: reference) }
-                            } else {
-                                Menu("Mute Notifications") {
-                                    Button("For 1 Hour") { Mutes.shared.set(address, reference: reference, until: .now.addingTimeInterval(3600)) }
-                                    Button("Until Unmuted") { Mutes.shared.set(address, reference: reference, until: nil) }
-                                }
-                            }
-                        }
-                    }
-                    Section {
-                        Button("Why “\(agent.agentStatus.label)”?") {
-                            Task { await explainStatus() }
-                        }
-                    }
-                }
-            } label: {
-                Label("More", systemImage: "ellipsis")
             }
-            .accessibilityLabel("Conversation Actions")
+        case .explain: Task { await explainStatus() }
         }
     }
 
@@ -458,7 +435,7 @@ struct ConversationView: View {
         var lines = [conversation.thinkingLevel.map { "Thinking: \($0)" }].compactMap { $0 }
         if let usage = conversation.usage {
             lines.append("Tokens: \(usage.inputTokens.formatted()) in, \(usage.outputTokens.formatted()) out")
-            if let cost = usage.cost { lines.append("Cost: \(cost.formatted(.currency(code: "USD")))") }
+            if let cost = usage.cost { lines.append("Est. cost: \(cost.formatted(.currency(code: "USD")))") }
             if feed.hasEarlier { lines.append("Loaded messages only") }
         }
         guard conversation.modelID != nil || !lines.isEmpty else { return nil }
@@ -861,6 +838,82 @@ private struct SharedImportKey: Hashable {
 private struct ReadKey: Hashable {
     let sequence: Int?
     let visible: Bool
+}
+
+/// The ⋯ menu, compared by value: a menu that is rebuilt while open jumps back to its top, and
+/// the conversation re-renders with every streamed record. So nothing here changes per reply:
+/// thinking level, tokens and estimated cost open in an alert.
+struct ConversationMenu: View, Equatable {
+    struct Mute: Equatable {
+        let address: PaneAddress
+        let reference: String
+    }
+    enum LiveActivity { case show, hide }
+    enum Action { case detail(DetailLevel), find, retry, stop, liveActivity, sessionDetails, explain }
+
+    let detail: DetailLevel
+    let canRetry: Bool
+    let canStop: Bool
+    let liveActivity: LiveActivity?
+    /// The model's name (or "Session"); nil when the transcript records none of it.
+    let session: String?
+    let sessionHasDetails: Bool
+    let mute: Mute?
+    /// The agent's status label; nil without an agent.
+    let status: String?
+    let act: (Action) -> Void
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.detail == rhs.detail && lhs.canRetry == rhs.canRetry && lhs.canStop == rhs.canStop
+            && lhs.liveActivity == rhs.liveActivity && lhs.session == rhs.session
+            && lhs.sessionHasDetails == rhs.sessionHasDetails && lhs.mute == rhs.mute
+            && lhs.status == rhs.status
+    }
+
+    var body: some View {
+        Menu {
+            DetailLevelOptions(selection: Binding(get: { detail }, set: { act(.detail($0)) }))
+            Button("Find in Conversation") { act(.find) }
+            if canRetry {
+                Section { Button("Retry Last Turn") { act(.retry) } }
+            }
+            if canStop {
+                Section { Button("Stop Run", role: .destructive) { act(.stop) } }
+            }
+            if let liveActivity {
+                Section {
+                    Button(liveActivity == .hide ? "Hide Live Activity" : "Show Live Activity") { act(.liveActivity) }
+                }
+            }
+            if let session {
+                if sessionHasDetails {
+                    Section(session) { Button("Session Details") { act(.sessionDetails) } }
+                } else {
+                    Section { Text(session) }
+                }
+            }
+            if let mute {
+                Section {
+                    if Mutes.shared.isMuted(mute.address, reference: mute.reference) {
+                        Button("Unmute Notifications") { Mutes.shared.unmute(mute.address, reference: mute.reference) }
+                    } else {
+                        Menu("Mute Notifications") {
+                            Button("For 1 Hour") {
+                                Mutes.shared.set(mute.address, reference: mute.reference, until: .now.addingTimeInterval(3600))
+                            }
+                            Button("Until Unmuted") { Mutes.shared.set(mute.address, reference: mute.reference, until: nil) }
+                        }
+                    }
+                }
+            }
+            if let status {
+                Section { Button("Why “\(status)”?") { act(.explain) } }
+            }
+        } label: {
+            Label("More", systemImage: "ellipsis")
+        }
+        .accessibilityLabel("Conversation Actions")
+    }
 }
 
 // MARK: - Rows
