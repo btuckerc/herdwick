@@ -181,14 +181,15 @@ enum InboxKind: String, CaseIterable, Identifiable {
     var label: String { switch self { case .agents: "Agents"; case .machines: "Machines" } }
 }
 
-/// Section headers in the Agents view. "Needs You" is always pinned first, whatever the grouping.
+/// Section headers in the Agents view. In Priority, "Needs You" is pinned first whatever the grouping.
 enum InboxGrouping: String, CaseIterable, Identifiable {
     case none, host, workspace, status
     var id: Self { self }
     var label: String { switch self { case .none: "None"; case .host: "Host"; case .workspace: "Workspace"; case .status: "Status" } }
 }
 
-/// Order within a section. Priority: blocked, unread done, working, read done, idle, unknown; recency breaks ties.
+/// Order within a section. Recent: last message sent or received, newest first. Priority: "Needs You"
+/// pinned, then unread done, working, idle or read done, unknown; last message breaks ties.
 enum InboxSort: String, CaseIterable, Identifiable {
     case recent, priority
     var id: Self { self }

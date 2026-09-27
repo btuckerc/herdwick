@@ -12,10 +12,22 @@ One screen answers "who needs me, what do they want, answer it".
 | agent (pane with a detected agent) | a conversation |
 | workspace | caption on the conversation (label, branch) |
 | tab, pane, split, layout | hidden; shells (`unknown`) sit in a collapsed "Terminals" section |
-| `agent_status` | blocked → pinned "Needs you"; a finish not yet read here → "Done" with an unread dot; working → typing dots; idle or a read finish → "Idle" |
+| `agent_status` | blocked → "Needs you" (pinned in Priority); a finish not yet read here → "Done" with an unread dot; working → typing dots; idle or a read finish → "Idle" |
 
-Order: blocked agents pinned in a "Needs You" section, everything else by `state_change_seq`
-descending (most recent change first, like a messages list).
+Order (Recent, the default): one timeline by each conversation's last message sent or received,
+the timestamp its transcript recorded for the newest user or assistant message (not thinking,
+tool calls or results, status changes or reads). `HostConnection` reads what each transcript
+gained since the last look in one host command per round (`HerdrClient.readChunks`,
+`TranscriptActivity`): on connecting, on each snapshot, every 10 s while live, and when the
+inbox appears. It pages back from the tail when a long tool run hides the last message, and
+keeps what it knew per host, session and conversation across launches and outages. Unknown
+times sort last; ties fall back to the pane address, never the title. Priority pins blocked
+agents in "Needs You" and orders the rest by status, then last message. The inbox follows
+live order only when resting at the very top; scrolled or scrolling, it holds its order and floats
+a "New Activity" button that applies it and scrolls to the first row. It stays held until the
+list is back at the very top, because a few points down `List` keeps visible rows fixed and
+would insert the newest above them out of sight. Returning to the inbox or changing sort or
+grouping applies it too. Cross-host order assumes the hosts' clocks agree.
 
 ## Screens (4)
 1. **Inbox** (`SessionView`): `List`, inline title. The principal `HostTitle` shows host name
@@ -57,7 +69,7 @@ and a leading Start swipe action; Machines uses the same empty-workspace wording
 
 Inbox options (Settings, persisted in `UserDefaults`): Agents or Machines (herdr's host ›
 workspace › tab › pane tree, with Close Tab/Close Workspace swipes); all hosts or the current
-one; grouping None/Host/Workspace/Status, with "Needs You" always pinned first; sort Recent or
+one; grouping None/Host/Workspace/Status, with "Needs You" pinned first in Priority; sort Recent or
 Priority (blocked, unread done, working, idle, unknown); collapse idle. Rows swipe leading to
 Mark as Read/Unread (full swipe) and Hide/Unhide (local), trailing to Close (confirmed). "+"
 opens New Agent/Workspace.
@@ -162,7 +174,9 @@ From the councils of 2026-09-25 (`Attention`, `Push`):
   seq). The relay (`relay/`, a ~70-line Cloudflare Worker holding the APNs key) validates
   them, rate-limits 20 a minute per device, sends a generic `mutable-content` alert with a
   collapse id per agent, and stores and logs nothing. The notification service
-  (`HerdwickNotifications`) fills in the title and place from the snapshot, records the seq in
+  (`HerdwickNotifications`) fills in the thread's title and place from the names the snapshot
+  keeps for every agent the app has seen (hidden ones and other hosts' included), or the host's
+  name for an agent it never saw, records the seq in
   the App Group so the app never repeats the alert, moves the agent in the snapshot, sets the
   badge and reloads widgets. A user can't run their own relay for this build: that would mean
   sharing the APNs key. Self-built copies set `HerdwickPushRelay` to their own team's relay.

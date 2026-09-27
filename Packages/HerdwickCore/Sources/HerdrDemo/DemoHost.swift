@@ -133,6 +133,22 @@ private actor DemoEngine {
                 channel.send("\(script[idRange]) \(state)\n")
             }
             channel.finish()
+        } else if command.contains("for spec in"), command.contains("| base64") {
+            // `HerdrClient.readChunks`: `index|from|limit|path` per file.
+            let script = command.replacingOccurrences(of: "'\\''", with: "'")
+            let regex = try NSRegularExpression(pattern: #"'(\d+)\|(-?\d+)\|(\d+)\|([^']+)'"#)
+            for match in regex.matches(in: script, range: NSRange(script.startIndex..., in: script)) {
+                let parts = (1...4).compactMap { Range(match.range(at: $0), in: script).map { String(script[$0]) } }
+                guard parts.count == 4, let from = Int(parts[1]), let limit = Int(parts[2]) else { continue }
+                guard let data = transcripts[parts[3]] else {
+                    channel.send("\(parts[0]) -\n")
+                    continue
+                }
+                let start = from < 0 ? max(0, data.count - limit) : from
+                let bytes = start < data.count ? Data(data.dropFirst(start).prefix(limit)) : Data()
+                channel.send("\(parts[0]) \(data.count) \(start) \(bytes.base64EncodedString())\n")
+            }
+            channel.finish()
         } else {
             channel.finish(throwing: CommandError.exited(status: 127, stderr: "demo host: unsupported command"))
         }
@@ -166,7 +182,7 @@ private actor DemoEngine {
            let offset = Int(parts[0]), let limit = Int(parts[2]) {
             return (parts[1], offset, limit)
         }
-        if let parts = capture(#"^tail -c \+(\d+) -F (\S+) 2>/dev/null"#), let start = Int(parts[0]), start > 0 {
+        if let parts = capture(#"(?m)^tail -c \+(\d+) -F (\S+) 2>/dev/null"#), let start = Int(parts[0]), start > 0 {
             return (parts[1], start - 1, nil)
         }
         return nil

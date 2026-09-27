@@ -180,7 +180,7 @@ public struct Agent: Decodable, Sendable, Equatable, Identifiable {
 
 /// `agent_session` on an agent: `{"source":"herdr:omp","agent":"omp","kind":"path","value":"/…/x.jsonl"}`.
 /// `kind == "path"` means `value` is a transcript file on the host; other kinds carry only an id.
-public struct AgentSessionRef: Decodable, Sendable, Equatable, Hashable {
+public struct AgentSessionRef: Codable, Sendable, Equatable, Hashable {
     public var source: String
     public var agent: String
     public var kind: String

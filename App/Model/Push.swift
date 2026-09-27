@@ -24,6 +24,9 @@ final class Push {
     private var armed: Set<String> {
         didSet { UserDefaults.standard.set(Array(armed), forKey: "push.armed") }
     }
+    /// Reservations cover SSH requests too, before a watcher is confirmed or stopped.
+    private var pending: [String: (generation: Int, task: Task<Void, Never>)] = [:]
+    private var generation = 0
 
     init(settings: Settings) {
         self.settings = settings
@@ -41,29 +44,57 @@ final class Push {
         UserDefaults.standard.set(token.map { String(format: "%02x", $0) }.joined(), forKey: "push.token")
     }
 
+    /// Local alerts yield until the watcher has been confirmed stopped.
+    func ownsAlerts(for address: SessionAddress) -> Bool {
+        let key = Self.key(address)
+        return armed.contains(key) || pending[key] != nil
+    }
+
     /// Starts a watcher on every live link, within the few seconds iOS grants after backgrounding.
     func arm(_ links: [HostConnection]) async {
         let states = (settings.notifyNeedsYou ? ["blocked"] : []) + (settings.notifyFinished ? ["done"] : [])
         guard let relay = Self.relay, settings.pushWhileAway, !states.isEmpty,
               let token = UserDefaults.standard.string(forKey: "push.token") else { return }
-        await withTaskGroup(of: String?.self) { group in
+        await withTaskGroup(of: Void.self) { group in
             for link in links where link.isLive {
                 let config = PushWatch.Config(relay: relay, deviceToken: token, environment: Self.environment,
                                               hostID: link.profile.id, states: states)
-                let key = Self.key(link.identity)
-                group.addTask { (try? await link.watch(config)) != nil ? key : nil }
-            }
-            for await key in group {
-                if let key { armed.insert(key) }
+                // Reserve before dispatch: mirror events can arrive during the SSH request.
+                let task = watch(config, on: link)
+                group.addTask { await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() } }
             }
         }
     }
 
     /// A link came up in the foreground: its host no longer needs to watch.
     func disarm(_ link: HostConnection) async {
+        guard ownsAlerts(for: link.identity) else { return }
+        await watch(nil, on: link).value
+    }
+
+    /// Serialize each session's handoffs, including a foreground return that overtakes arming.
+    private func watch(_ config: PushWatch.Config?, on link: HostConnection) -> Task<Void, Never> {
         let key = Self.key(link.identity)
-        guard armed.contains(key), (try? await link.watch(nil)) != nil else { return }
-        armed.remove(key)
+        let previous = pending[key]?.task
+        generation += 1
+        let generation = generation
+        let task = Task { @MainActor in
+            await previous?.value
+            do {
+                try await link.watch(config)
+                if config != nil { armed.insert(key) } else { armed.remove(key) }
+            } catch {
+                // A start that failed or was cut short may still have left a watcher running:
+                // count it as armed, so the next foreground link stops it. A failed stop
+                // leaves the watcher owned.
+                if config != nil { armed.insert(key) }
+            }
+            if pending[key]?.generation == generation {
+                pending.removeValue(forKey: key)
+            }
+        }
+        pending[key] = (generation, task)
+        return task
     }
 
     private nonisolated static func key(_ address: SessionAddress) -> String {

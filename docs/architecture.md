@@ -27,14 +27,16 @@ Decisions as of 2026-09-24. The evidence behind them is in
     (`pane.agent_status_changed`) and are kept as they are.
   - `mirror(session:)`: a snapshot stream. A `preview` snapshot first, so the
     session shows before the subscription is up; then subscribe, snapshot
-    (`live`), and a fresh snapshot per event; agent status events are per
+    (`live`), and a fresh snapshot after events; events that arrive while a
+    snapshot is in flight are taken together, so a burst or a post-suspension
+    backlog costs one more snapshot, not one each. Agent status events are per
     pane, so a changed pane set re-subscribes.
   - `HerdwickSSH`/`SSHConnection`: Apple swift-nio-ssh (not Citadel, which
     depends on a third-party nio-ssh fork). Ed25519 and password auth, `none`
     auth for Tailscale SSH, host-key validation hook for TOFU pinning, exec
-    channels with streaming stdio, a handshake timeout, and a keepalive that
-    opens and closes a session channel every 15 s and drops the connection
-    on a miss. It can adopt an already-connected fd
+    channels with streaming stdio, a handshake timeout, and a keepalive that,
+    after 60 s without inbound traffic, opens and closes a session channel and
+    drops the connection on a miss. It can adopt an already-connected fd
     (`ClientBootstrap.withConnectedSocket`); tests prove this with a
     socketpair, which is what `tailscale_dial` returns.
     Closing stdin after a quick command has already exited is not an error
@@ -88,14 +90,30 @@ Decisions as of 2026-09-24. The evidence behind them is in
 
 ## Reconnect
 One SSH connection per host multiplexes every channel. States: `idle`,
-`connecting`, `live`, `reconnecting(attempt)`, `failed(actionable)`.
+`connecting`, `live`, `resuming` (a live link being checked), `waiting`
+(backoff), `offline`, `suspended`, `failed(actionable)`.
 
 - Triggers: scene becomes active, NWPathMonitor path change, a missed
   keepalive probe, or event-stream EOF.
 - Foreground backoff: 0.5, 1, 2, 4, then every 8 s. No attempts while
   backgrounded.
-- Going to the background: a background task flushes any pending send, then
-  the connection closes deliberately. iOS would kill the socket anyway.
+- Going to the background: under a UIKit background assertion, push watchers are
+  armed over the live links (10 s bound, cut short if iOS takes the time back),
+  then every link closes (`suspended`). Nothing stays open while the app is
+  suspended: it could not read what a host sends, a host would keep streaming to
+  it (herdr's writer blocks on an unread subscriber), and a link that died
+  meanwhile would stall the return. Removing a host or session closes its link
+  for good.
+- Liveness: a quiet link is probed after 60 s without inbound traffic; any
+  traffic counts, so a busy link is never probed and an idle one wakes the radio
+  once a minute.
+- Route changes: a new path strands a direct TCP connection, so it is replaced.
+  A tailnet connection rides the in-app node, which moves to the new path
+  itself, so it is only checked (`resuming`: one fresh snapshot, 10 s bound;
+  still usable meanwhile, replaced if it does not answer).
+- Redialling with a snapshot on screen: the mirror subscribes to the panes that
+  snapshot shows while it takes the preview, instead of after it; a pane set
+  that changed meanwhile falls back to the preview's panes.
 - The UI never blanks. The cached snapshot stays visible, dimmed, with
   "Reconnecting…" as the navigation subtitle. The terminal keeps its last frame until the
   fresh `full:true` frame arrives.

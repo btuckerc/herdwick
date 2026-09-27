@@ -60,7 +60,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Inbox")
                 } footer: {
-                    Text("Choose the inbox view, host scope, grouping, sort order, and whether read idle agents are folded.")
+                    Text("Recent orders agents by their last message sent or received. Priority pins what needs you, then orders by status. Rows hold still while you scroll.")
                 }
                 NotificationSettings()
                 Section("Terminal") {

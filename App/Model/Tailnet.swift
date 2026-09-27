@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import TailscaleKit
 
 /// The app's own Tailscale node (TailscaleKit / tsnet). It joins the user's tailnet as a
@@ -29,6 +30,8 @@ final class Tailnet {
     private(set) var tailnetName: String?
     private var node: TailscaleNode?
     private var handle: TailscaleHandle?
+    /// The node being created; every caller shares it, so a cold launch makes one node.
+    private var starting: Task<Void, Never>?
     private var poll: Task<Void, Never>?
 
     /// True once this device has signed in before; the node then comes up by itself.
@@ -52,6 +55,7 @@ final class Tailnet {
             refreshSoon()
             return
         }
+        guard starting == nil else { return }
         state = .starting
         let config = Configuration(
             hostName: "herdwick-\(UIDeviceName.short)",
@@ -60,15 +64,22 @@ final class Tailnet {
             controlURL: controlURL,
             ephemeral: false
         )
-        Task {
+        starting = Task {
             do {
                 let node = try await Task.detached { try TailscaleNode(config: config, logger: nil) }.value
+                guard !Task.isCancelled else {
+                    // Signed out meanwhile.
+                    try? await node.close()
+                    return
+                }
                 self.node = node
                 self.handle = await node.tailscale
                 self.refreshSoon()
             } catch {
+                guard !Task.isCancelled else { return }
                 self.state = .failed("Tailscale could not start: \(error)")
             }
+            self.starting = nil
         }
     }
 
@@ -83,6 +94,8 @@ final class Tailnet {
     /// Forgets this device's tailnet identity. The stale device stays listed in the
     /// Tailscale admin console until it expires or is removed there.
     func signOut() async {
+        starting?.cancel()
+        starting = nil
         poll?.cancel()
         try? await node?.close()
         node = nil
@@ -164,30 +177,53 @@ final class Tailnet {
     }
 
     /// Opens a TCP connection to `address:port` through the tailnet and returns a
-    /// connected socket descriptor that the caller owns.
+    /// connected socket descriptor that the caller owns. `tailscale_dial` blocks and cannot
+    /// be interrupted, so cancelling returns at once and a socket that arrives later is closed.
     nonisolated func dial(address: String, port: Int, handle: TailscaleHandle) async throws -> CInt {
-        try await Task.detached {
-            var conn: tailscale_conn = 0
-            let target = address.contains(":") ? "[\(address)]:\(port)" : "\(address):\(port)"
-            guard tailscale_dial(handle, "tcp", target, &conn) == 0 else {
-                var buffer = [CChar](repeating: 0, count: 512)
-                tailscale_errmsg(handle, &buffer, buffer.count)
-                throw TailnetError.dialFailed(String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        let pending = PendingDial()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard pending.wait(continuation) else { return }
+                Task.detached {
+                    pending.finish(Result {
+                        var conn: tailscale_conn = 0
+                        let target = address.contains(":") ? "[\(address)]:\(port)" : "\(address):\(port)"
+                        guard tailscale_dial(handle, "tcp", target, &conn) == 0 else {
+                            var buffer = [CChar](repeating: 0, count: 512)
+                            tailscale_errmsg(handle, &buffer, buffer.count)
+                            throw TailnetError.dialFailed(String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+                        }
+                        return conn
+                    })
+                }
             }
-            return conn
-        }.value
+        } onCancel: {
+            pending.cancel()
+        }
     }
 
     /// The node handle once started; dialling before that throws.
     func readyHandle() async throws -> TailscaleHandle {
         if node == nil { start() }
-        for _ in 0..<150 {
-            if let handle, state == .running { return handle }
-            if case .needsLogin = state { throw TailnetError.signedOut }
-            if case .failed(let message) = state { throw TailnetError.dialFailed(message) }
-            try await Task.sleep(for: .milliseconds(100))
+        do {
+            return try await withTimeout(.seconds(15)) { @MainActor in
+                for await state in Observations({ @MainActor in self.state }) {
+                    switch state {
+                    case .running:
+                        if let handle = self.handle { return handle }
+                    case .needsLogin:
+                        throw TailnetError.signedOut
+                    case .failed(let message):
+                        throw TailnetError.dialFailed(message)
+                    case .off, .starting:
+                        break
+                    }
+                }
+                throw TailnetError.notRunning
+            }
+        } catch is TimeoutError {
+            throw TailnetError.notRunning
         }
-        throw TailnetError.notRunning
     }
 }
 
@@ -212,5 +248,46 @@ enum UIDeviceName {
         let value = String(UUID().uuidString.prefix(4)).lowercased()
         UserDefaults.standard.set(value, forKey: key)
         return value
+    }
+}
+
+/// One `tailscale_dial` and whoever still waits for it: the caller, or no one once cancelled.
+private final class PendingDial: Sendable {
+    private struct State {
+        var waiter: CheckedContinuation<CInt, any Error>?
+        var cancelled = false
+    }
+
+    private let state = Mutex(State())
+
+    /// False when already cancelled; the continuation has then been resumed.
+    func wait(_ continuation: CheckedContinuation<CInt, any Error>) -> Bool {
+        let cancelled = state.withLock { state in
+            if !state.cancelled { state.waiter = continuation }
+            return state.cancelled
+        }
+        if cancelled { continuation.resume(throwing: CancellationError()) }
+        return !cancelled
+    }
+
+    func cancel() {
+        let waiter = state.withLock { state in
+            state.cancelled = true
+            defer { state.waiter = nil }
+            return state.waiter
+        }
+        waiter?.resume(throwing: CancellationError())
+    }
+
+    func finish(_ result: Result<CInt, any Error>) {
+        let waiter = state.withLock { state in
+            defer { state.waiter = nil }
+            return state.waiter
+        }
+        if let waiter {
+            waiter.resume(with: result)
+        } else if case .success(let fd) = result {
+            close(fd)
+        }
     }
 }

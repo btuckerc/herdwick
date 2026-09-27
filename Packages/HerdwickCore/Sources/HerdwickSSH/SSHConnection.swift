@@ -26,19 +26,26 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
     private let handler: NIOLoopBound<NIOSSHHandler>
     private let keepalive: Task<Void, Never>?
 
-    fileprivate init(channel: Channel, handler: NIOLoopBound<NIOSSHHandler>, keepaliveInterval: Duration?) {
+    fileprivate init(channel: Channel, handler: NIOLoopBound<NIOSSHHandler>, activity: InboundActivity, keepaliveInterval: Duration?) {
         self.channel = channel
         self.handler = handler
         guard let keepaliveInterval else {
             keepalive = nil
             return
         }
-        keepalive = Task { [channel, handler] in
+        keepalive = Task { [channel, handler, activity] in
+            var delay = keepaliveInterval
             while !Task.isCancelled, channel.isActive {
-                try? await Task.sleep(for: keepaliveInterval)
-                guard !Task.isCancelled else { return }
                 do {
+                    try await Task.sleep(for: delay)
+                    let idle = try await channel.eventLoop.submit { activity.idleTime }.get()
+                    if idle < keepaliveInterval {
+                        delay = keepaliveInterval - idle
+                        continue
+                    }
+                    try Task.checkCancellation()
                     try await Self.probe(channel: channel, handler: handler, timeout: .seconds(10))
+                    delay = keepaliveInterval
                 } catch {
                     // A missed probe means the path is dead; closing wakes `waitUntilClosed`.
                     channel.close(promise: nil)
@@ -51,13 +58,14 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
     deinit { keepalive?.cancel() }
 
     /// Connects by hostname or IP literal.
+    /// Probes after `keepaliveInterval` without inbound bytes (default 60 s); nil disables probes.
     public static func connect(
         host: String,
         port: Int = 22,
         username: String,
         authentication: SSHAuthentication,
         hostKeyValidator: @escaping HostKeyValidator,
-        keepaliveInterval: Duration? = .seconds(15),
+        keepaliveInterval: Duration? = .seconds(60),
         timeout: TimeAmount = .seconds(15)
     ) async throws -> SSHConnection {
         let setup = Setup(username: username, authentication: authentication, validator: hostKeyValidator)
@@ -71,12 +79,13 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
 
     /// Adopts an already-connected stream socket, e.g. one returned by `tailscale_dial`.
     /// The connection owns the descriptor from here on.
+    /// Probes after `keepaliveInterval` without inbound bytes (default 60 s); nil disables probes.
     public static func connect(
         adoptingConnectedSocket fd: CInt,
         username: String,
         authentication: SSHAuthentication,
         hostKeyValidator: @escaping HostKeyValidator,
-        keepaliveInterval: Duration? = .seconds(15),
+        keepaliveInterval: Duration? = .seconds(60),
         timeout: TimeAmount = .seconds(15)
     ) async throws -> SSHConnection {
         let setup = Setup(username: username, authentication: authentication, validator: hostKeyValidator)
@@ -88,24 +97,39 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
     }
 
     public func exec(_ command: String) async throws -> any ExecChannel {
+        try Task.checkCancellation()
+        let operation = PendingChannel(eventLoop: channel.eventLoop)
         let exec = ExecHandler(eventLoop: channel.eventLoop)
-        let opened = channel.eventLoop.makePromise(of: Channel.self)
-        channel.eventLoop.execute { [handler] in
-            handler.value.createChannel(opened, channelType: .session) { child, _ in
-                child.setOption(ChannelOptions.allowRemoteHalfClosure, value: true).flatMap {
-                    child.pipeline.addHandler(exec)
+        operation.result.futureResult.whenFailure { exec.failedToOpen($0) }
+        let child = try await withTaskCancellationHandler {
+            channel.eventLoop.execute { [handler] in
+                guard operation.isPending else { return }
+                let opened = self.channel.eventLoop.makePromise(of: Channel.self)
+                handler.value.createChannel(opened, channelType: .session) { child, _ in
+                    guard operation.attach(child) else {
+                        return child.eventLoop.makeFailedFuture(CancellationError())
+                    }
+                    return child.setOption(ChannelOptions.allowRemoteHalfClosure, value: true).flatMap {
+                        child.pipeline.addHandler(exec)
+                    }
                 }
+                opened.futureResult.flatMap { child in
+                    guard operation.isPending else {
+                        child.close(promise: nil)
+                        return child.eventLoop.makeFailedFuture(CancellationError())
+                    }
+                    return child.triggerUserOutboundEvent(
+                        SSHChannelRequestEvent.ExecRequest(command: command, wantReply: true)
+                    ).flatMap { exec.accepted.futureResult }.map { child }
+                }.whenComplete { operation.complete($0) }
             }
+            return try await operation.result.futureResult.get()
+        } onCancel: {
+            self.channel.eventLoop.execute { operation.complete(.failure(CancellationError())) }
         }
-        let child = try await opened.futureResult.get()
-        do {
-            try await child.triggerUserOutboundEvent(
-                SSHChannelRequestEvent.ExecRequest(command: command, wantReply: true)
-            ).get()
-            try await exec.accepted.futureResult.get()
-        } catch {
+        if Task.isCancelled {
             child.close(promise: nil)
-            throw error
+            throw CancellationError()
         }
         return SSHExecChannel(channel: child, handler: exec)
     }
@@ -128,16 +152,73 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
     }
 
     private static func probe(channel: Channel, handler: NIOLoopBound<NIOSSHHandler>, timeout: TimeAmount) async throws {
+        try Task.checkCancellation()
         let loop = channel.eventLoop
-        let opened = loop.makePromise(of: Channel.self)
-        loop.execute {
-            // Both callbacks run on `loop`, so exactly one of success or timeout completes `opened`.
-            let deadline = loop.scheduleTask(in: timeout) { opened.fail(SSHError.keepaliveTimeout) }
-            opened.futureResult.whenComplete { _ in deadline.cancel() }
-            handler.value.createChannel(opened, channelType: .session, nil)
+        let operation = PendingChannel(eventLoop: loop)
+        try await withTaskCancellationHandler {
+            loop.execute {
+                guard operation.isPending else { return }
+                let deadline = loop.scheduleTask(in: timeout) {
+                    operation.complete(.failure(SSHError.keepaliveTimeout))
+                }
+                operation.result.futureResult.whenComplete { _ in deadline.cancel() }
+                let opened = loop.makePromise(of: Channel.self)
+                opened.futureResult.whenComplete { operation.complete($0) }
+                handler.value.createChannel(opened, channelType: .session) { child, _ in
+                    guard operation.attach(child) else {
+                        return loop.makeFailedFuture(CancellationError())
+                    }
+                    return loop.makeSucceededVoidFuture()
+                }
+            }
+            let child = try await operation.result.futureResult.get()
+            child.close(promise: nil)
+            try Task.checkCancellation()
+        } onCancel: {
+            loop.execute { operation.complete(.failure(CancellationError())) }
         }
-        let child = try await opened.futureResult.get()
-        child.close(promise: nil)
+    }
+}
+
+/// All state and completions are confined to the transport's event loop.
+private final class PendingChannel: @unchecked Sendable {
+    let result: EventLoopPromise<Channel>
+    private(set) var isPending = true
+    private var child: Channel?
+
+    init(eventLoop: any EventLoop) { result = eventLoop.makePromise() }
+
+    func attach(_ child: Channel) -> Bool {
+        guard isPending else {
+            child.close(promise: nil)
+            return false
+        }
+        self.child = child
+        return true
+    }
+
+    func complete(_ outcome: Result<Channel, any Error>) {
+        guard isPending else {
+            if case .success(let child) = outcome { child.close(promise: nil) }
+            return
+        }
+        isPending = false
+        if case .failure = outcome { child?.close(promise: nil) }
+        child = nil
+        result.completeWith(outcome)
+    }
+}
+
+/// Raw reads, including command replies and events, share one idle deadline.
+private final class InboundActivity: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    private var lastRead = NIODeadline.now()
+
+    var idleTime: Duration { .nanoseconds((NIODeadline.now() - lastRead).nanoseconds) }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        if unwrapInboundIn(data).readableBytes > 0 { lastRead = .now() }
+        context.fireChannelRead(data)
     }
 }
 
@@ -148,6 +229,7 @@ private final class Setup: @unchecked Sendable {
     let validator: HostKeyValidator
     private var handler: NIOLoopBound<NIOSSHHandler>?
     private var watcher: AuthWatcher?
+    private let activity = InboundActivity()
 
     init(username: String, authentication: SSHAuthentication, validator: @escaping HostKeyValidator) {
         self.username = username
@@ -171,7 +253,7 @@ private final class Setup: @unchecked Sendable {
         // NIOSSHHandler swallows channelInactive, so a pre-auth close is caught here.
         channel.closeFuture.whenComplete { _ in watcher.complete(SSHError.connectionClosed) }
         do {
-            try channel.pipeline.syncOperations.addHandlers(handler, watcher)
+            try channel.pipeline.syncOperations.addHandlers(activity, handler, watcher)
             return channel.eventLoop.makeSucceededVoidFuture()
         } catch {
             return channel.eventLoop.makeFailedFuture(error)
@@ -192,7 +274,7 @@ private final class Setup: @unchecked Sendable {
             channel.close(promise: nil)
             throw error
         }
-        return SSHConnection(channel: channel, handler: handler, keepaliveInterval: keepaliveInterval)
+        return SSHConnection(channel: channel, handler: handler, activity: activity, keepaliveInterval: keepaliveInterval)
     }
 }
 
@@ -298,6 +380,16 @@ private final class ExecHandler: ChannelInboundHandler, @unchecked Sendable {
         (output, continuation) = AsyncThrowingStream.makeStream()
     }
 
+    func handlerAdded(context: ChannelHandlerContext) {
+        let channel = context.channel
+        continuation.onTermination = { _ in channel.close(promise: nil) }
+    }
+
+    func failedToOpen(_ error: any Error) {
+        settle(error)
+        continuation.finish(throwing: error)
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let message = unwrapInboundIn(data)
         guard case .byteBuffer(let buffer) = message.data else { return }
@@ -357,20 +449,39 @@ private final class SSHExecChannel: ExecChannel, @unchecked Sendable {
     }
 
     func write(_ bytes: [UInt8]) async throws {
+        try Task.checkCancellation()
         let buffer = channel.allocator.buffer(bytes: bytes)
-        try await channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(buffer))).get()
+        try await waitForWrite(channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(buffer))))
     }
 
     func closeInput() async throws {
+        try Task.checkCancellation()
         do {
-            try await channel.close(mode: .output).get()
+            try await waitForWrite(channel.close(mode: .output))
         } catch ChannelError.alreadyClosed {
             // The command already exited and the peer closed the channel: EOF is moot, and
             // its output and exit status are already buffered in `output`.
         }
     }
 
+    private func waitForWrite(_ future: EventLoopFuture<Void>) async throws {
+        let operation = PendingChannel(eventLoop: channel.eventLoop)
+        try await withTaskCancellationHandler {
+            channel.eventLoop.execute {
+                guard operation.attach(self.channel) else { return }
+                future.whenComplete { outcome in
+                    operation.complete(outcome.map { self.channel })
+                }
+            }
+            _ = try await operation.result.futureResult.get()
+            try Task.checkCancellation()
+        } onCancel: {
+            self.channel.eventLoop.execute { operation.complete(.failure(CancellationError())) }
+        }
+    }
+
     func close() async {
-        try? await channel.close().get()
+        // SSH close acknowledgement can wait forever on a blackholed peer.
+        channel.close(promise: nil)
     }
 }

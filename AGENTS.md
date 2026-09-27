@@ -5,7 +5,8 @@
   `herdwick-test-*` sessions) and `HERDWICK_SSH_LIVE=1` (private unprivileged sshd on 127.0.0.1).
 - Never write to the user's real herdr session `main`.
 - The iOS app builds only on the Mac Mini (`ssh mini`, Xcode on `/Volumes/E0/Developer`); Linux builds the core package only.
-  `scripts/mini/sync-and-build.sh` (rsync + XcodeGen + simulator build); add `testflight` with `ASC_KEY_ID`/`ASC_ISSUER_ID` to upload.
+  `scripts/mini/sync-and-build.sh` (rsync + XcodeGen + simulator build); add `testflight` to upload
+  (App Store Connect key IDs come from the Mini's `~/.herdwick-signing/asc.env` unless `ASC_KEY_ID`/`ASC_ISSUER_ID` are set).
   It prints "Uploaded build N" and exits; wait on that command itself. Never block on remote polling
   loops (`ssh mini 'while pgrep …'`): they outlive the build and hang the session.
 - Simulator UI checks: `axe` on the Mini (coordinate taps; `--label` taps time out).

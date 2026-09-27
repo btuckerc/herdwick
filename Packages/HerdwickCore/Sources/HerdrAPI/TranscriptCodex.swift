@@ -14,7 +14,7 @@ enum CodexTranscript {
         switch type {
         case "response_item":
             switch payload["type"] as? String {
-            case "message": return message(payload, id: id)
+            case "message": return message(payload, id: id, timestamp: TranscriptMessage.date(record["timestamp"]))
             case "reasoning": return reasoning(payload, id: id)
             case "function_call": return call(payload, id: id, arguments: normalized(payload["arguments"] as? String))
             case "custom_tool_call": return call(payload, id: id, arguments: json(["input": payload["input"] as? String ?? ""]))
@@ -39,15 +39,15 @@ enum CodexTranscript {
         }
     }
 
-    private static func message(_ payload: [String: Any], id: String) -> [TranscriptEntry] {
+    private static func message(_ payload: [String: Any], id: String, timestamp: Date?) -> [TranscriptEntry] {
         let blocks = payload["content"] as? [[String: Any]] ?? []
         let text = blocks.compactMap { $0["text"] as? String }.joined(separator: "\n\n")
         let images = blocks.filter { ($0["type"] as? String)?.contains("image") == true }.count
         switch payload["role"] as? String {
         case "user" where !isHarness(text):
-            return [.message(TranscriptMessage(id: id, role: .user, text: text, imageCount: images))]
+            return [.message(TranscriptMessage(id: id, role: .user, text: text, imageCount: images, timestamp: timestamp))]
         case "assistant":
-            return [.message(TranscriptMessage(id: id, role: .assistant, text: text))]
+            return [.message(TranscriptMessage(id: id, role: .assistant, text: text, timestamp: timestamp))]
         default:
             return [.metadata(type: "message")]
         }

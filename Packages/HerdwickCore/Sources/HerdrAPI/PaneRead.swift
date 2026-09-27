@@ -76,15 +76,15 @@ extension HerdrClient {
     }
 
     /// The file's bytes from `offset` on, then whatever is appended, on one channel for as
-    /// long as the stream is consumed. The remote `tail` dies when the channel closes: it
-    /// runs in the background while the shell waits for stdin to reach EOF.
+    /// long as the stream is consumed. The remote `tail` and stdin watcher are reaped
+    /// when either exits, or when the channel closes.
     nonisolated public func followFile(path: String, from offset: Int) -> AsyncThrowingStream<[UInt8], any Error> {
-        let script = "tail -c +\(offset + 1) -F \(shellQuote(path)) 2>/dev/null & t=$!; cat >/dev/null; kill $t 2>/dev/null"
+        let command = Self.untilInputCloses("tail -c +\(offset + 1) -F \(shellQuote(path)) 2>/dev/null")
         let runner = runner
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let channel = try await runner.exec(Self.posix(script))
+                    let channel = try await runner.exec(command)
                     await withTaskCancellationHandler {
                         do {
                             for try await chunk in channel.output { continuation.yield(chunk) }
@@ -95,6 +95,7 @@ extension HerdrClient {
                     } onCancel: {
                         Task { await channel.close() }
                     }
+                    await channel.close()
                 } catch {
                     continuation.finish(throwing: error)
                 }

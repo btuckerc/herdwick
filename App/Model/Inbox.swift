@@ -23,6 +23,26 @@ struct Thread: Identifiable {
 }
 
 
+/// What a thread sorts by. The inbox can hold these still while the user browses.
+struct InboxRank: Equatable {
+    /// Needs you, unread finish, working, idle or read finish, unknown.
+    var priority: Int
+    /// The conversation's last message sent or received; nil while unknown.
+    var lastMessageAt: Date?
+}
+
+@MainActor
+func inboxRank(_ thread: Thread) -> InboxRank {
+    let priority = switch thread.connection.presentedStatus(thread.agent) {
+    case .blocked: 0
+    case .done: 1
+    case .working: 2
+    case .idle: 3
+    case .unknown: 4
+    }
+    return InboxRank(priority: priority, lastMessageAt: thread.connection.lastMessageAt(thread.agent))
+}
+
 struct InboxSection: Identifiable {
     let id: String
     let title: String
@@ -30,6 +50,9 @@ struct InboxSection: Identifiable {
     let idle: [Thread]
 }
 
+/// Recent is one timeline by last message. Priority pins what needs you, then orders by
+/// status, then by last message. Unknown times sort last; ties fall back to the address,
+/// never the title, so a rename cannot move a row.
 @MainActor
 func inboxSections(
     _ threads: [Thread],
@@ -37,29 +60,23 @@ func inboxSections(
     sort: InboxSort,
     collapseIdle: Bool,
     allHosts: Bool,
-    lastChange: [PaneAddress: Date],
+    rank: (Thread) -> InboxRank,
     hidden: (Thread) -> Bool
 ) -> (needsYou: [Thread], sections: [InboxSection], hidden: [Thread]) {
+    let ranks = Dictionary(threads.map { ($0.address, rank($0)) }) { first, _ in first }
     let visible = threads.filter { !hidden($0) }
-    let urgent = visible.filter { $0.agent.agentStatus == .blocked }
-    let rest = visible.filter { $0.agent.agentStatus != .blocked }
-    @MainActor func priority(_ thread: Thread) -> Int {
-        let status = thread.connection.presentedStatus(thread.agent)
-        if status == .blocked { return 0 }
-        if status == .done { return 1 }
-        if status == .working { return 2 }
-        if status == .idle { return 3 }
-        return 4
-    }
-    @MainActor func precedes(_ lhs: Thread, _ rhs: Thread) -> Bool {
-        if sort == .priority, priority(lhs) != priority(rhs) {
-            return priority(lhs) < priority(rhs)
+    let pins = sort == .priority
+    let urgent = pins ? visible.filter { $0.agent.agentStatus == .blocked } : []
+    let rest = pins ? visible.filter { $0.agent.agentStatus != .blocked } : visible
+    func precedes(_ lhs: Thread, _ rhs: Thread) -> Bool {
+        let left = ranks[lhs.address]!, right = ranks[rhs.address]!
+        if sort == .priority, left.priority != right.priority { return left.priority < right.priority }
+        switch (left.lastMessageAt, right.lastMessageAt) {
+        case let (l?, r?) where l != r: return l > r
+        case (.some, nil): return true
+        case (nil, .some): return false
+        default: break
         }
-        let left = lastChange[lhs.address] ?? .distantPast
-        let right = lastChange[rhs.address] ?? .distantPast
-        if left != right { return left > right }
-        let titleOrder = lhs.agent.conversationTitle.localizedCaseInsensitiveCompare(rhs.agent.conversationTitle)
-        if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
         if lhs.address.hostID != rhs.address.hostID { return lhs.address.hostID.uuidString < rhs.address.hostID.uuidString }
         if lhs.address.session != rhs.address.session { return lhs.address.session < rhs.address.session }
         return lhs.address.paneID < rhs.address.paneID
@@ -77,8 +94,8 @@ func inboxSections(
             return (label, label)
         }
     }
-    // In priority mode the most urgent member determines a group's position.
-    // In recent mode the most recently changed member does.
+    // A group sits where its first member would: the most urgent in Priority, the latest
+    // message in Recent. Folded idle members count, so expanding them never moves sections.
     let ordered = rest.sorted(by: precedes)
     var keys: [String] = []
     var groups: [String: [Thread]] = [:]

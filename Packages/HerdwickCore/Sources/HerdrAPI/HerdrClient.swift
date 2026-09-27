@@ -221,7 +221,7 @@ public actor HerdrClient {
         if !control {
             // herdr 0.9 `observe` ignores stdin and only exits when a later frame hits a closed
             // pipe, so an idle pane would leak the process. A watcher kills it on EOF instead.
-            line = Self.posix("exec 3<&0; \(line) <&- & p=$!; (cat <&3 >/dev/null; kill $p) >/dev/null 2>&1 & exec 3<&-; wait $p")
+            line = Self.untilInputCloses(line)
         }
         return TerminalSession(channel: try await runner.exec(line))
     }
@@ -246,6 +246,20 @@ public actor HerdrClient {
     /// Runs `script` under `/bin/sh` whatever the user's login shell is (fish, nushell, ...).
     static func posix(_ script: String) -> String {
         "/bin/sh -c " + shellQuote(script)
+    }
+
+    /// Reaps both the command and its stdin watcher, whichever ends first.
+    static func untilInputCloses(_ command: String) -> String {
+        posix("""
+        exec 3<&0
+        \(command) <&- 3<&- & p=$!
+        (while IFS= read -r line; do :; done <&3; kill "$p" 2>/dev/null) >/dev/null 2>&1 & w=$!
+        exec 3<&-
+        trap 'kill "$p" "$w" 2>/dev/null; wait "$p" "$w" 2>/dev/null' 0
+        trap 'exit 1' HUP INT TERM
+        wait "$p"; status=$?
+        exit "$status"
+        """)
     }
 
     // MARK: Wire helpers
@@ -296,10 +310,22 @@ public actor HerdrClient {
     }
 
     static func collect(_ channel: any ExecChannel) async throws -> [UInt8] {
-        try await channel.closeInput()
-        var data: [UInt8] = []
-        for try await chunk in channel.output { data += chunk }
-        return data
+        try await withTaskCancellationHandler {
+            do {
+                try Task.checkCancellation()
+                try await channel.closeInput()
+                var data: [UInt8] = []
+                for try await chunk in channel.output { data += chunk }
+                try Task.checkCancellation()
+                await channel.close()
+                return data
+            } catch {
+                await channel.close()
+                throw error
+            }
+        } onCancel: {
+            Task { await channel.close() }
+        }
     }
 }
 
@@ -343,11 +369,19 @@ public struct TerminalSession: Sendable {
         try await channel.write(Array(try JSONEncoder().encode(command)) + [0x0A])
     }
 
-    /// Releases input ownership and ends the stream.
+    /// Gives release/EOF 250 ms, then tears down locally even if the peer stopped reading.
     public func close() async {
-        try? await send(.release)
-        try? await channel.closeInput()
-        await channel.close()
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try? await send(.release)
+                try? await channel.closeInput()
+            }
+            group.addTask { try? await Task.sleep(for: .milliseconds(250)) }
+            await group.next()
+            // Tear down before joining; cancellation releases pending write/EOF waits.
+            await channel.close()
+            group.cancelAll()
+        }
     }
 
     static func decode(_ line: [UInt8]) throws -> TerminalMessage {

@@ -46,6 +46,15 @@ private let authRejected = ConnectionFailure("key rejected", retryable: false)
         #expect(s.phase == .connecting(attempt: 1))
     }
 
+    @Test func stopClosesForGood() {
+        var s = ConnectionSupervisor()
+        _ = s.handle(.start)
+        _ = s.handle(.connected)
+        #expect(s.handle(.stop) == [.cancelRetry, .disconnect])
+        #expect(s.phase == .idle)
+        #expect(s.handle(.dropped(transient)) == [])
+    }
+
     @Test func foregroundCutsAPendingBackoffShort() {
         var s = ConnectionSupervisor()
         _ = s.handle(.start)
@@ -64,6 +73,24 @@ private let authRejected = ConnectionFailure("key rejected", retryable: false)
         _ = s.handle(.start)
         _ = s.handle(.connected)
         #expect(s.handle(.pathChanged(satisfied: true)) == [.disconnect, .cancelRetry, .connect])
+    }
+
+    @Test func tailnetConnectionIsCheckedNotReplacedOnNetworkChange() {
+        var s = ConnectionSupervisor(migratesAcrossRoutes: true)
+        _ = s.handle(.start)
+        _ = s.handle(.connected)
+        #expect(s.handle(.pathChanged(satisfied: true)) == [.verify])
+        #expect(s.phase == .resuming)
+        #expect(s.handle(.pathChanged(satisfied: true)) == [])
+        _ = s.handle(.connected)
+        // A check that fails replaces the connection at once; backgrounding mid-check closes it.
+        _ = s.handle(.pathChanged(satisfied: true))
+        #expect(s.handle(.dropped(transient)) == [.disconnect, .cancelRetry, .connect])
+        _ = s.handle(.connected)
+        _ = s.handle(.pathChanged(satisfied: true))
+        #expect(s.handle(.backgrounded) == [.cancelRetry, .disconnect])
+        #expect(s.handle(.connected) == [])
+        #expect(s.phase == .suspended)
     }
 
     @Test func offlineWaitsForNetwork() {

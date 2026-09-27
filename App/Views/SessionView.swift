@@ -13,16 +13,16 @@ struct SessionView: View {
     @State private var showsTerminals = false
     @State private var closing: Thread?
     @State private var closeError: String?
-    @State private var lastChange: [PaneAddress: Date] = [:]
+    /// Ranks the inbox holds while the user scrolls or reads below the top, so rows don't move
+    /// under them; nil while it follows live activity.
+    @State private var heldRanks: [PaneAddress: InboxRank]?
+    @State private var atTop = true
+    @State private var scrollIdle = true
+    /// Set by New Activity: scroll to the first row once the new order has been laid out.
+    @State private var scrollToFirst = false
     @State private var hostSelection = 0
     @State private var startFlow = AgentStartFlow()
     @State private var pushEdge: Edge = .trailing
-
-    private struct AgentChange: Equatable {
-        let address: PaneAddress
-        let status: String
-        let sequence: Int?
-    }
 
     /// Retained for scripted demo navigation.
     enum Mode: String, CaseIterable, Identifiable {
@@ -83,12 +83,11 @@ struct SessionView: View {
             .modifier(AgentStartFeedback(flow: startFlow, onStarted: didStart))
             .sensoryFeedback(.warning, trigger: blockedCount) { old, new in settings.haptics && new > old }
             .sensoryFeedback(.selection, trigger: hostSelection) { _, _ in settings.haptics }
-            .onChange(of: agentChanges, initial: true) { old, new in
-                let previous = Dictionary(uniqueKeysWithValues: old.map { ($0.address, $0) })
-                let now = Date()
-                for change in new where previous[change.address] != change {
-                    lastChange[change.address] = now
-                }
+            .onChange(of: settings.inboxSort) { settleOrder() }
+            .onChange(of: settings.inboxGrouping) { settleOrder() }
+            .onAppear {
+                settleOrder()
+                for link in links { link.refreshActivity() }
             }
             .confirmationDialog("Close \(closing?.agent.conversationTitle ?? "agent")?", isPresented: .init(
                 get: { closing != nil }, set: { if !$0 { closing = nil } }
@@ -133,8 +132,31 @@ struct SessionView: View {
     private var threads: [Thread] {
         allHosts ? model.threads : model.threads.filter { $0.connection === connection }
     }
-    private var agentChanges: [AgentChange] {
-        model.threads.map { AgentChange(address: $0.address, status: $0.agent.agentStatus.label, sequence: $0.agent.stateChangeSeq) }
+    private var liveRanks: [PaneAddress: InboxRank] {
+        Dictionary(threads.map { ($0.address, inboxRank($0)) }) { first, _ in first }
+    }
+
+    /// Follows live activity at the top of a resting list; anywhere else holds the order it has.
+    private func holdIfBrowsing() {
+        if atTop && scrollIdle { heldRanks = nil } else if heldRanks == nil { heldRanks = liveRanks }
+    }
+
+    /// Shows the current order: on return to the inbox, a sort or grouping change, or on request.
+    private func settleOrder() {
+        heldRanks = atTop && scrollIdle ? nil : liveRanks
+    }
+
+    private func sections(held: Bool) -> (needsYou: [Thread], sections: [InboxSection], hidden: [Thread]) {
+        let ranks = held ? heldRanks : nil
+        return inboxSections(threads, grouping: settings.inboxGrouping, sort: settings.inboxSort,
+                             collapseIdle: settings.collapseIdle, allHosts: allHosts,
+                             rank: { ranks?[$0.address] ?? inboxRank($0) }) {
+            $0.connection.hidden[$0.agent.paneID] != nil
+        }
+    }
+
+    private static func order(_ result: (needsYou: [Thread], sections: [InboxSection], hidden: [Thread])) -> [PaneAddress] {
+        (result.needsYou + result.sections.flatMap { $0.threads + $0.idle } + result.hidden).map(\.address)
     }
     private var canSwitchHosts: Bool { !allHosts && model.profiles.count >= 2 }
     private var hostIndex: Int? { model.profiles.firstIndex { $0.id == connection.profile.id } }
@@ -192,6 +214,23 @@ struct SessionView: View {
             }
             .refreshable { await model.refresh() }
         } else if allHosts || connection.snapshot != nil {
+            inboxList
+        } else {
+            ContentUnavailableView {
+                ProgressView()
+            } description: {
+                Text("Connecting to \(connection.profile.address)…")
+            }
+        }
+    }
+
+    // MARK: Inbox
+
+    private var inboxList: some View {
+        let shown = sections(held: heldRanks != nil)
+        let order = Self.order(shown)
+        let newActivity = heldRanks != nil && Self.order(sections(held: false)) != order
+        return ScrollViewReader { proxy in
             List {
                 ForEach(links, id: \.identity) { link in
                     if case .failed(let failure) = link.phase {
@@ -206,29 +245,51 @@ struct SessionView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                inbox
+                inbox(shown)
             }
             .listStyle(.insetGrouped)
             .refreshable { await model.refresh() }
             .opacity(allHosts || connection.isLive ? 1 : 0.6)
             .animation(.smooth, value: blockedCount)
-        } else {
-            ContentUnavailableView {
-                ProgressView()
-            } description: {
-                Text("Connecting to \(connection.profile.address)…")
+            .animation(.smooth, value: order)
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                // Strict: a few points down, the list keeps visible rows fixed and inserts above them unseen.
+                geometry.contentOffset.y <= -geometry.contentInsets.top + 8
+            } action: { _, top in
+                atTop = top
+                holdIfBrowsing()
             }
+            .onScrollPhaseChange { _, phase in
+                scrollIdle = phase == .idle
+                holdIfBrowsing()
+            }
+            .onChange(of: order) { _, order in
+                // Scrolling in the same update as the reorder would target the old layout.
+                guard scrollToFirst, let first = order.first else { return }
+                scrollToFirst = false
+                withAnimation { proxy.scrollTo(first, anchor: .top) }
+            }
+            .overlay(alignment: .top) {
+                if newActivity {
+                    // Floats over the list rather than inserting a row, so nothing shifts.
+                    Button("New Activity", systemImage: "arrow.up") {
+                        // Shows the new order but stays held: scrollTo stops at the first row with the
+                        // header under the bar, short of the top where live reordering is visible.
+                        heldRanks = liveRanks
+                        scrollToFirst = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.smooth, value: newActivity)
         }
     }
 
-    // MARK: Inbox
-
     @ViewBuilder
-    private var inbox: some View {
-            let result = inboxSections(threads, grouping: settings.inboxGrouping, sort: settings.inboxSort,
-                                       collapseIdle: settings.collapseIdle, allHosts: allHosts, lastChange: lastChange) {
-                $0.connection.hidden[$0.agent.paneID] != nil
-            }
+    private func inbox(_ result: (needsYou: [Thread], sections: [InboxSection], hidden: [Thread])) -> some View {
             if !result.needsYou.isEmpty { Section("Needs You") { rows(result.needsYou) } }
             ForEach(result.sections) { section in
                 Section(section.title) {

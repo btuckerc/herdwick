@@ -14,9 +14,9 @@ Everything App Store Connect asks for that isn't a text file in `en-US/`.
 | Primary / secondary category | Developer Tools / Utilities |
 | Price | Free |
 | Age rating | Answer Apple's questionnaire; 4+ is the expected result. Unrestricted web access: No (links open outside the app; the only in-app web view is Tailscale sign-in). In the review notes, say agent transcripts are private to the user's machine, not user-to-user chat or shared content |
-| Marketing / support / privacy URL | `https://herdwick.app`, `/support`, `/privacy`. The domain must be registered and the pages live before submission |
+| Privacy policy URL | `https://btuckerc.dev/privacy/herdwick` (live; source in `btuckerc/site`, `src/pages/HerdwickPrivacy.jsx`) |
+| Marketing / support URL | `https://herdwick.app`, `/support`. The domain must be registered and the pages live before submission |
 | Copyright | `2026 Tucker Craig` |
-| Price | Free (USD 0.00, all countries). See Pricing below |
 
 ## App privacy
 
@@ -51,17 +51,18 @@ Keychain.
 If log upload is later disabled (an exported libtailscale call to
 `envknob.SetNoLogsNoSupport()` before the node starts), drop Diagnostics.
 
-The privacy policy at `/privacy` must say the same. It must name Tailscale as the
-third party for the optional Tailscale connection: node identity, device and connection
-metadata, and diagnostic logs, under Tailscale's own privacy policy. It must also say
-that nothing else leaves the device except the user's SSH connection to their own machine.
+The privacy policy (`btuckerc.dev/privacy/herdwick`) matches this: it names Tailscale as
+the third party for the optional connection (device keys and name, OS and device model,
+network addresses, diagnostic logs) and says nothing else leaves the device except the
+user's SSH connection. Update both together if log upload is turned off.
 
 Notifications are opt-in. Local alerts are posted while the app is open or during background
 refresh (`App/Model/Attention.swift`). Alerts While Away, a second opt-in, has the user's own
 machine send the device's push token and opaque ids (host UUID, session, pane, state) to the
 push relay (`relay/`, a Cloudflare Worker), which forwards them to APNs in real time and stores
 and logs nothing. Apple's definition excludes data processed only in real time and not
-retained, so there is nothing to declare for it. The privacy policy must still describe it.
+retained, so there is nothing to declare for it. The privacy policy describes it under
+"Alerts while away (optional)".
 
 ## Pricing
 

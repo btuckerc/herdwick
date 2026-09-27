@@ -101,6 +101,116 @@ final class SSHConnectionLiveTests {
         #expect(!ssh.isActive)
     }
 
+    /// With the only session slot occupied, an unnecessary probe would drop the transport.
+    @Test(.timeLimit(.minutes(1))) func inboundTrafficDefersKeepalive() async throws {
+        let server = try LocalSSHD(authorizedKey: SSHKeys.publicKeyLine(for: clientKey, comment: "herdwick-test"), maxSessions: 1)
+        defer { server.stop() }
+        let ssh = try await SSHConnection.connect(
+            host: "localhost", port: server.port, username: NSUserName(),
+            authentication: .ed25519(clientKey), hostKeyValidator: { _ in true },
+            keepaliveInterval: .milliseconds(500)
+        )
+        let exec = try await ssh.exec("cat")
+        var output = exec.output.makeAsyncIterator()
+        for _ in 0..<30 {
+            try await exec.write([120])
+            #expect(try await output.next() == [120])
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(ssh.isActive)
+        // Once traffic stops, the idle probe hits MaxSessions and closes the transport.
+        try await Task.sleep(for: .seconds(1))
+        #expect(!ssh.isActive)
+        await exec.close()
+        await ssh.close()
+    }
+
+    /// Freeze the peer after auth, then cancel opens before it can acknowledge them.
+    @Test(.timeLimit(.minutes(1))) func cancelledOpensAndTimedOutProbesReleaseLateChannels() async throws {
+        let ssh = try await SSHConnection.connect(
+            host: "localhost", port: server.port, username: NSUserName(),
+            authentication: .ed25519(clientKey), hostKeyValidator: { _ in true },
+            keepaliveInterval: nil
+        )
+        let identify = try await ssh.exec("printf '%s' \"$PPID\"")
+        var bytes: [UInt8] = []
+        for try await chunk in identify.output { bytes += chunk }
+        let pid = try #require(pid_t(String(decoding: bytes, as: UTF8.self)))
+        let blocked = try await ssh.exec("cat")
+        #expect(kill(pid, SIGSTOP) == 0)
+        defer { kill(pid, SIGCONT) }
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("herdwick-test-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let write = Task { try await blocked.write(Array(repeating: 120, count: 8 * 1024 * 1024)) }
+        try await Task.sleep(for: .milliseconds(50))
+        let eof = Task { try await blocked.closeInput() }
+        try await Task.sleep(for: .milliseconds(20))
+        let start = ContinuousClock.now
+        await blocked.close()
+        write.cancel()
+        eof.cancel()
+        await #expect(throws: CancellationError.self) { try await write.value }
+        await #expect(throws: CancellationError.self) { try await eof.value }
+        #expect(ContinuousClock.now - start < .seconds(1))
+        for _ in 0..<12 {
+            let pending = Task { try await ssh.exec("touch '\(marker.path)'") }
+            try await Task.sleep(for: .milliseconds(30))
+            let start = ContinuousClock.now
+            pending.cancel()
+            await #expect(throws: CancellationError.self) { _ = try await pending.value }
+            #expect(ContinuousClock.now - start < .seconds(1))
+            await #expect(throws: SSHError.keepaliveTimeout) {
+                try await ssh.ping(timeout: .milliseconds(20))
+            }
+        }
+        #expect(kill(pid, SIGCONT) == 0)
+        // Drain late open replies and their closes before proving all session slots are free.
+        var drained = false
+        for _ in 0..<50 {
+            do {
+                try await ssh.ping()
+                drained = true
+                break
+            } catch {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        #expect(drained)
+        let exec = try await ssh.exec("printf recovered")
+        var recovered: [UInt8] = []
+        for try await chunk in exec.output { recovered += chunk }
+        #expect(String(decoding: recovered, as: UTF8.self) == "recovered")
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+        await ssh.close()
+    }
+
+    @Test(.timeLimit(.minutes(1))) func cancellingOutputConsumerClosesRemoteCommand() async throws {
+        let ssh = try await connect()
+        let exec = try await ssh.exec("echo $$; exec cat")
+        let (pids, continuation) = AsyncStream<pid_t>.makeStream()
+        let consumer = Task {
+            var bytes: [UInt8] = []
+            for try await chunk in exec.output {
+                bytes += chunk
+                if let newline = bytes.firstIndex(of: 10),
+                   let pid = pid_t(String(decoding: bytes[..<newline], as: UTF8.self)) {
+                    continuation.yield(pid)
+                    continuation.finish()
+                }
+            }
+        }
+        var iterator = pids.makeAsyncIterator()
+        let pid = try #require(await iterator.next())
+        #expect(kill(pid, 0) == 0)
+        consumer.cancel()
+        _ = await consumer.result
+        for _ in 0..<100 where kill(pid, 0) == 0 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(kill(pid, 0) == -1 && errno == ESRCH)
+        await ssh.close()
+    }
+
     /// The production path end to end: herdr's bridge over SSH, read-only against `main`.
     @Test func herdrPingOverSSH() async throws {
         let client = HerdrClient(runner: try await connect())
@@ -164,7 +274,7 @@ final class LocalSSHD: @unchecked Sendable {
     private let dir: URL
     private var pid: pid_t = 0
 
-    init(authorizedKey: String) throws {
+    init(authorizedKey: String, maxSessions: Int = 10) throws {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("herdwick-sshd-\(UUID())")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let hostKey = dir.appendingPathComponent("host_ed25519").path
@@ -181,6 +291,7 @@ final class LocalSSHD: @unchecked Sendable {
             KbdInteractiveAuthentication no
             UsePAM no
             StrictModes no
+            MaxSessions \(maxSessions)
             """
         let configPath = dir.appendingPathComponent("sshd_config").path
         try config.write(toFile: configPath, atomically: true, encoding: .utf8)

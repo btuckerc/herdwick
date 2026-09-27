@@ -44,6 +44,9 @@ final class AppModel {
     private var isForeground = true
     @ObservationIgnored private var attention: Attention?
     @ObservationIgnored private var push: Push?
+    /// Arming push watchers after leaving the foreground, under a UIKit background assertion.
+    @ObservationIgnored private var handoff: (id: Int, task: Task<Void, Never>, assertion: UIBackgroundTaskIdentifier)?
+    @ObservationIgnored private var handoffCount = 0
     static let refreshTask = "dev.btuckerc.herdwick.refresh"
 
     init() {
@@ -54,6 +57,8 @@ final class AppModel {
         }
         profiles = ProfileStorage.load()
         attention = Attention(settings: settings, links: { [weak self] in self?.connections ?? [] },
+                              profiles: { [weak self] in self?.profiles ?? [] },
+                              pushOwns: { [weak self] in self?.push?.ownsAlerts(for: $0) ?? false },
                               onScreen: { [weak self] in self?.onScreen },
                               open: { [weak self] in self?.open($0) })
         push = Push(settings: settings)
@@ -290,8 +295,8 @@ final class AppModel {
         return address
     }
 
-    /// iOS wakes the app now and then: reconnect long enough for one snapshot per link,
-    /// which raises any alerts and refreshes the widgets, then let go again.
+    /// iOS wakes the app now and then: bring each link up long enough for one fresh snapshot,
+    /// which raises any alerts and refreshes the widgets, then close them again.
     func backgroundRefresh() async {
         scheduleRefresh()
         guard demo == nil, !isForeground else { return }
@@ -304,7 +309,8 @@ final class AppModel {
             return link.phase == .offline || link.liveID != id
         }
         while ContinuousClock.now < deadline, !isForeground, !zip(links, before).allSatisfy(settled) {
-            try? await Task.sleep(for: .milliseconds(500))
+            // Out of time (iOS cancelled the task): stop waiting.
+            guard (try? await Task.sleep(for: .milliseconds(500))) != nil else { break }
         }
         guard !isForeground else { return }
         for link in links { link.handle(.backgrounded) }
@@ -327,24 +333,45 @@ final class AppModel {
             Task { await refresh() }
         case .background:
             isForeground = false
-            let links = connections
             guard demo == nil, let push else {
-                for link in links { link.handle(.backgrounded) }
+                for link in connections { link.handle(.backgrounded) }
                 return
             }
             scheduleRefresh()
-            // Hand each host its push watcher before the links close.
-            let task = UIApplication.shared.beginBackgroundTask(withName: "push-arm")
-            Task {
-                await push.arm(links)
-                if !isForeground {
-                    for link in links { link.handle(.backgrounded) }
+            // One already in flight closes the links when it ends.
+            guard handoff == nil else { return }
+            // Hand each host its push watcher over its live link, then close every link. Arming
+            // is bounded well inside the time iOS grants, and stops early if that runs out.
+            handoffCount += 1
+            let id = handoffCount
+            let links = connections
+            let assertion = UIApplication.shared.beginBackgroundTask(withName: "push-arm") { [weak self] in
+                // Out of time: stop arming and close up now.
+                MainActor.assumeIsolated {
+                    guard let self, self.handoff?.id == id else { return }
+                    self.handoff?.task.cancel()
+                    self.finishHandoff(id)
                 }
-                UIApplication.shared.endBackgroundTask(task)
             }
+            let task = Task {
+                _ = try? await withTimeout(.seconds(10)) { @MainActor in await push.arm(links) }
+                let back = isForeground
+                finishHandoff(id)
+                // Back before the watchers were up: the app watches for itself again.
+                if back { for link in links where link.isLive { await push.disarm(link) } }
+            }
+            handoff = (id, task, assertion)
         default:
             break
         }
+    }
+
+    /// Ends handoff `id`: closes every link unless the app is back, and lets iOS suspend it.
+    private func finishHandoff(_ id: Int) {
+        guard let handoff, handoff.id == id else { return }
+        self.handoff = nil
+        if !isForeground { for link in connections { link.handle(.backgrounded) } }
+        UIApplication.shared.endBackgroundTask(handoff.assertion)
     }
 
     /// Back in the foreground, the app watches for itself.

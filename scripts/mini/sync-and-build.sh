@@ -2,7 +2,8 @@
 # From nous: copy the working tree to the Mini, generate the project and build.
 #   scripts/mini/sync-and-build.sh            # simulator build (compile check)
 #   scripts/mini/sync-and-build.sh testflight # archive and upload to TestFlight
-# TestFlight needs ASC_KEY_ID and ASC_ISSUER_ID; the key lives on the Mini at
+# TestFlight needs ASC_KEY_ID and ASC_ISSUER_ID: from the environment, else from the Mini's
+# ~/.herdwick-signing/asc.env (mode 600). The key lives on the Mini at
 # ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8. Release signs manually with the
 # Apple Distribution identity in the Mini's herdwick-build keychain (key and CSR in
 # ~/.herdwick-signing/dist; the keychain stays in the user search list, login stays default;
@@ -28,6 +29,9 @@ KCP=$(< ~/.herdwick-signing/keychain-pass)
 security unlock-keychain -p "$KCP" "$KC"
 allow_codesign() { security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCP" "$KC" >/dev/null 2>&1 || true; }
 allow_codesign
+if [ -z "$ASC_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ]; then
+  source ~/.herdwick-signing/asc.env
+fi
 AUTH=(-authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
       -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8")
 BUILD=$(date +%Y%m%d%H%M)

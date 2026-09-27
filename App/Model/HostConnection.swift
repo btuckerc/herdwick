@@ -33,9 +33,10 @@ final class HostConnection {
     /// Called each time a fresh transport goes live.
     var onLive: ((HostConnection) -> Void)?
 
-    private var supervisor = ConnectionSupervisor()
+    private var supervisor: ConnectionSupervisor
     private var ssh: SSHConnection?
     private var attempt: Task<Void, Never>?
+    private var verification: Task<Void, Never>?
     private var retry: Task<Void, Never>?
     private var generation = 0
     /// A snapshot was on screen when this attempt began, so it is a reconnect.
@@ -62,9 +63,11 @@ final class HostConnection {
         self.demo = demo
         self.onProfileChange = onProfileChange
         self.onSessions = onSessions
+        supervisor = ConnectionSupervisor(migratesAcrossRoutes: profile.isTailnet)
     }
 
-    var isLive: Bool { phase == .live }
+    /// Usable: live, or live and being checked after its route moved.
+    var isLive: Bool { phase == .live || phase == .resuming }
 
     var identity: SessionAddress {
         SessionAddress(hostID: profile.id, session: activeSession ?? profile.session ?? "")
@@ -99,7 +102,7 @@ final class HostConnection {
     /// What the link is doing, for a navigation subtitle; nil while live or idle.
     var statusText: String? {
         switch phase {
-        case .live, .idle, .suspended: nil
+        case .live, .resuming, .idle, .suspended: nil
         case .failed: "Not connected"
         case .offline: "Offline"
         case .connecting: resuming ? "Reconnecting…" : "Connecting…"
@@ -175,6 +178,98 @@ final class HostConnection {
         }
     }
 
+    // MARK: Message activity
+
+    /// Pane id → how far its conversation's transcript has been read and when it last had a
+    /// message; see `TranscriptActivity`. Kept per host and session across launches.
+    private(set) var activity: [String: PaneActivity] = [:]
+    private var activityRead: Task<Void, Never>?
+    private var activityPending = false
+    private var activityTimer: Task<Void, Never>?
+
+    struct PaneActivity: Codable, Equatable, Sendable {
+        /// The conversation this belongs to; a pane that starts another one starts over.
+        var ref: AgentSessionRef
+        /// Nil until the transcript file is found.
+        var transcript: TranscriptActivity?
+    }
+
+    /// When `agent`'s conversation last had a message sent or received, by the transcript's
+    /// own clock; nil while unknown.
+    func lastMessageAt(_ agent: Agent) -> Date? {
+        guard let entry = activity[agent.paneID], entry.ref == agent.agentSession else { return nil }
+        return entry.transcript?.lastMessageAt
+    }
+
+    private var activityKey: String { "activity.\(profile.id.uuidString).\(activeSession ?? "")" }
+
+    private func loadActivity() {
+        activity = UserDefaults.standard.data(forKey: activityKey)
+            .flatMap { try? JSONDecoder().decode([String: PaneActivity].self, from: $0) } ?? [:]
+    }
+
+    /// Reads what each agent's transcript gained since the last look: one host command per
+    /// round, parsed off the main actor. A request while one runs is folded into one more.
+    func refreshActivity() {
+        guard activityRead == nil else {
+            activityPending = true
+            return
+        }
+        guard let client, let session = activeSession, let agents = snapshot?.agents else { return }
+        let generation = generation
+        let current = activity
+        activityRead = Task { [weak self] in
+            let updated = await Self.readActivity(current, agents: agents, client: client, session: session)
+            guard let self else { return }
+            self.activityRead = nil
+            if generation == self.generation, session == self.activeSession, updated != self.activity {
+                self.activity = updated
+                UserDefaults.standard.set(try? JSONEncoder().encode(updated), forKey: self.activityKey)
+            }
+            if self.activityPending {
+                self.activityPending = false
+                self.refreshActivity()
+            }
+        }
+    }
+
+    /// A failed read keeps what was known; the snapshot is authoritative for which panes remain.
+    nonisolated private static func readActivity(_ current: [String: PaneActivity], agents: [Agent],
+                                                 client: HerdrClient, session: String) async -> [String: PaneActivity] {
+        var next: [String: PaneActivity] = [:]
+        for agent in agents {
+            guard let ref = agent.agentSession, TranscriptFormat(agent: ref.agent) != nil else { continue }
+            var entry = current[agent.paneID].flatMap { $0.ref == ref ? $0 : nil } ?? PaneActivity(ref: ref)
+            if entry.transcript == nil, let location = try? await client.locateTranscript(ref, pane: agent.paneID, session: session) {
+                entry.transcript = TranscriptActivity(path: location.path, format: location.format)
+            }
+            next[agent.paneID] = entry
+        }
+        var panes = Set(next.keys)
+        for _ in 0..<12 {
+            let reads = next.filter { panes.contains($0.key) }.compactMapValues { entry in entry.transcript.map { ($0.path, $0.nextRead) } }
+            guard !Task.isCancelled, !reads.isEmpty, let chunks = try? await client.readChunks(reads) else { break }
+            for (pane, chunk) in chunks {
+                next[pane]?.transcript?.absorb(size: chunk.size, from: chunk.from, bytes: chunk.bytes)
+            }
+            panes = panes.filter { next[$0]?.transcript?.needsMore == true }
+            if panes.isEmpty { break }
+        }
+        return next
+    }
+
+    /// Messages can arrive without any status change, so a live link also looks on a timer.
+    private func startActivityTimer() {
+        activityTimer?.cancel()
+        activityTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled else { return }
+                self?.refreshActivity()
+            }
+        }
+    }
+
     // MARK: Inputs
 
     func handle(_ input: ConnectionSupervisor.Input) {
@@ -184,6 +279,8 @@ final class HostConnection {
             switch effect {
             case .connect:
                 connect()
+            case .verify:
+                verify()
             case .disconnect:
                 teardown()
             case .scheduleRetry(let delay):
@@ -200,8 +297,9 @@ final class HostConnection {
         }
     }
 
+    /// Closes the link for good: its host or session was removed or replaced.
     func stop() {
-        handle(.backgrounded)
+        handle(.stop)
     }
 
     /// Pins the key the host now presents and reconnects.
@@ -330,7 +428,7 @@ final class HostConnection {
                 // Subscribe to the likely session while listing sessions; the list decides
                 // whether that mirror is kept. Dropping an unused stream closes its bridge.
                 let guess = profile.session ?? self.activeSession ?? Self.lastSession(profile)
-                var speculative = guess.map { client.mirror(session: $0) }
+                var speculative = guess.map { client.mirror(session: $0, panes: self.knownPanes(in: $0)) }
                 let sessions = try await client.sessions()
                 guard generation == self.generation else { return }
                 self.sessions = sessions
@@ -351,23 +449,22 @@ final class HostConnection {
                 if demo == nil { Self.remember(session: session, for: profile) }
                 self.hidden = UserDefaults.standard.dictionary(forKey: self.hiddenKey) as? [String: Int] ?? [:]
                 self.loadRead()
+                self.loadActivity()
                 self.onSessions?(self)
 
-                let snapshots = (session == guess ? speculative : nil) ?? client.mirror(session: session)
+                let snapshots = (session == guess ? speculative : nil) ?? client.mirror(session: session, panes: self.knownPanes(in: session))
                 speculative = nil
                 for try await update in snapshots {
                     guard generation == self.generation else { return }
-                    let snapshot = update.snapshot
-                    self.snapshot = snapshot
-                    self.recordBaseline(snapshot)
-                    self.reconcileHidden(snapshot)
-                    self.onAttentionChange?(self)
+                    self.apply(update.snapshot)
                     if case .live = update, !wentLive {
                         wentLive = true
                         self.client = client
                         self.liveID += 1
                         self.handle(.connected)
                         self.onLive?(self)
+                        self.startActivityTimer()
+                        self.refreshActivity()
                     }
                 }
                 guard generation == self.generation, !Task.isCancelled else { return }
@@ -380,10 +477,54 @@ final class HostConnection {
         }
     }
 
+    /// The tailnet moved the link to a new route by itself: one fresh snapshot shows that
+    /// SSH and herdr still answer, and catches up on anything lost while the route moved.
+    /// Streams carry on meanwhile; a link that does not answer is replaced.
+    private func verify() {
+        guard let client, let session = activeSession else {
+            handle(.dropped(ConnectionFailure("Connection closed", retryable: true)))
+            return
+        }
+        let generation = generation
+        verification?.cancel()
+        verification = Task { [weak self] in
+            do {
+                let snapshot = try await withTimeout(.seconds(10)) { try await client.snapshot(session: session) }
+                guard let self, generation == self.generation, !Task.isCancelled else { return }
+                self.apply(snapshot)
+                self.handle(.connected)
+            } catch {
+                guard let self, generation == self.generation, !Task.isCancelled else { return }
+                self.handle(.dropped(self.failure(for: error)))
+            }
+        }
+    }
+
+    /// The panes of the snapshot on screen, if it shows `session`; a redial subscribes to
+    /// them while it takes the preview.
+    private func knownPanes(in session: String) -> Set<String>? {
+        guard session == activeSession, let snapshot else { return nil }
+        return Set(snapshot.panes.map(\.id))
+    }
+
+    private func apply(_ snapshot: Snapshot) {
+        self.snapshot = snapshot
+        recordBaseline(snapshot)
+        reconcileHidden(snapshot)
+        onAttentionChange?(self)
+        // A status change usually comes with a message; look now rather than at the next tick.
+        refreshActivity()
+    }
+
     private func teardown() {
         generation += 1
         attempt?.cancel()
         attempt = nil
+        verification?.cancel()
+        verification = nil
+        activityTimer?.cancel()
+        activityTimer = nil
+        activityRead?.cancel()
         client = nil
         if let ssh {
             self.ssh = nil

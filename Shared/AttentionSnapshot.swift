@@ -40,6 +40,16 @@ struct AttentionSnapshot: Codable, Equatable {
     /// Every host answered this time. When false, an empty list is not "all clear".
     var complete: Bool
     var updated: Date
+    /// Pane key → the name of every agent the app last saw, hidden ones and ones on hosts not
+    /// shown now included, so a pushed alert can say which thread. Stays on this phone.
+    var names: [String: Name] = [:]
+    /// Host id → its name here, for an alert about an agent this phone never saw.
+    var hosts: [String: String] = [:]
+
+    struct Name: Codable, Equatable {
+        let title: String
+        let place: String
+    }
 
     func count(_ state: Item.State) -> Int { items.count { $0.state == state } }
     var blocked: Int { count(.blocked) }
@@ -78,6 +88,20 @@ struct AttentionSnapshot: Codable, Equatable {
     func save() {
         guard let url = Self.url, let data = try? JSONEncoder().encode(self) else { return }
         try? data.write(to: url, options: .atomic)
+    }
+}
+
+extension AttentionSnapshot {
+    private enum CodingKeys: String, CodingKey { case items, complete, updated, names, hosts }
+
+    /// A snapshot saved before `names` and `hosts` existed still loads until the app rewrites it.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        items = try c.decode([Item].self, forKey: .items)
+        complete = try c.decode(Bool.self, forKey: .complete)
+        updated = try c.decode(Date.self, forKey: .updated)
+        names = try c.decodeIfPresent([String: Name].self, forKey: .names) ?? [:]
+        hosts = try c.decodeIfPresent([String: String].self, forKey: .hosts) ?? [:]
     }
 }
 

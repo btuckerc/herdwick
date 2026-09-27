@@ -22,6 +22,8 @@ public struct ConnectionSupervisor: Sendable, Equatable {
         /// No usable network path; resumes on the next path change.
         case offline
         case connecting(attempt: Int)
+        /// Checking that a live connection still answers after the route under it moved.
+        case resuming
         case live
         case waiting(attempt: Int, delay: Duration)
         case failed(ConnectionFailure)
@@ -31,10 +33,14 @@ public struct ConnectionSupervisor: Sendable, Equatable {
         case start
         case foregrounded
         case backgrounded
+        /// The link is removed or replaced; close it for good.
+        case stop
         case pathChanged(satisfied: Bool)
+        /// A fresh connection went live, or a checked one answered.
         case connected
         case connectFailed(ConnectionFailure)
-        /// A live connection died (keepalive miss, stream EOF, socket error).
+        /// A live connection died (keepalive miss, stream EOF, socket error), or a
+        /// checked one did not answer.
         case dropped(ConnectionFailure)
         case retryTimerFired
         /// The user tapped Retry, or changed the settings a failure asked them to fix.
@@ -43,6 +49,8 @@ public struct ConnectionSupervisor: Sendable, Equatable {
 
     public enum Effect: Equatable, Sendable {
         case connect
+        /// Check that the live connection still answers; report `.connected` or `.dropped`.
+        case verify
         case disconnect
         case scheduleRetry(Duration)
         case cancelRetry
@@ -53,20 +61,31 @@ public struct ConnectionSupervisor: Sendable, Equatable {
 
     public private(set) var phase: Phase = .idle
     private var networkAvailable = true
+    /// The transport rides a route of its own (the in-app tailnet), which moves to a new
+    /// physical path by itself; such a connection is checked on a route change, not replaced.
+    private let migratesAcrossRoutes: Bool
 
-    public init() {}
+    public init(migratesAcrossRoutes: Bool = false) {
+        self.migratesAcrossRoutes = migratesAcrossRoutes
+    }
 
     public mutating func handle(_ input: Input) -> [Effect] {
         switch (input, phase) {
+        case (.stop, _):
+            phase = .idle
+            return [.cancelRetry, .disconnect]
+
         case (.backgrounded, .suspended):
             return []
         case (.backgrounded, _):
+            // Nothing stays open while suspended: the app could not read what a host sends,
+            // and a host would keep streaming to it.
             phase = .suspended
             return [.cancelRetry, .disconnect]
 
         case (.foregrounded, .failed(let failure)) where !failure.retryable:
             return []
-        case (.foregrounded, .live), (.foregrounded, .connecting):
+        case (.foregrounded, .live), (.foregrounded, .connecting), (.foregrounded, .resuming):
             return []
         case (.foregrounded, _), (.start, _), (.userRetry, _):
             return connectNow()
@@ -84,13 +103,18 @@ public struct ConnectionSupervisor: Sendable, Equatable {
                 if case .live = phase { return [] }
                 phase = .offline
                 return [.cancelRetry, .disconnect]
+            case .live where migratesAcrossRoutes:
+                phase = .resuming
+                return [.verify]
+            case .resuming where migratesAcrossRoutes:
+                return []
             default:
                 // A new route (Wi-Fi <-> cellular, VPN up/down) strands the
                 // old TCP connection; replace it instead of waiting for a timeout.
                 return [.disconnect] + connectNow()
             }
 
-        case (.connected, .connecting):
+        case (.connected, .connecting), (.connected, .resuming):
             phase = .live
             return []
 
@@ -101,7 +125,7 @@ public struct ConnectionSupervisor: Sendable, Equatable {
             }
             return retryLater(after: attempt)
 
-        case (.dropped(let failure), .live):
+        case (.dropped(let failure), .live), (.dropped(let failure), .resuming):
             if !failure.retryable {
                 phase = .failed(failure)
                 return [.disconnect]

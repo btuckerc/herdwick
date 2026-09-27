@@ -7,7 +7,7 @@ import Foundation
 // `title` record rewritten in place; everything after it is append-only. Records we
 // don't understand are kept as raw rows so a newer omp never silently loses content.
 
-public enum TranscriptFormat: String, Sendable {
+public enum TranscriptFormat: String, Sendable, Codable {
     case omp, claude, codex
     public init?(agent: String) {
         switch agent.lowercased() {

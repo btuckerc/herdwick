@@ -28,7 +28,7 @@ internal enum ClaudeTranscript {
         if let content = message["content"] as? String {
             if r["isMeta"] as? Bool == true || isHarness(content) { return [.metadata(type: type)] }
             if content.hasPrefix("[Request interrupted by user") { return [.notice(content)] }
-            return [.message(.init(id: id, role: .user, text: content))]
+            return [.message(.init(id: id, role: .user, text: content, timestamp: TranscriptMessage.date(r["timestamp"])))]
         }
         var result: [TranscriptEntry] = [], texts = [String](), images = 0
         for b in message["content"] as? [[String: Any]] ?? [] { switch b["type"] as? String {
@@ -42,7 +42,7 @@ internal enum ClaudeTranscript {
         }
         let typed = texts.joined(separator: "\n\n")
         if typed.hasPrefix("[Request interrupted by user") { result.insert(.notice(typed), at: 0) }
-        else if !texts.isEmpty || images > 0 { result.insert(.message(.init(id: id, role: .user, text: typed, imageCount: images)), at: 0) }
+        else if !texts.isEmpty || images > 0 { result.insert(.message(.init(id: id, role: .user, text: typed, imageCount: images, timestamp: TranscriptMessage.date(r["timestamp"]))), at: 0) }
         return result.isEmpty ? [.metadata(type: type)] : result
     }
     private static func isHarness(_ s: String) -> Bool { ["<command-name>", "<command-message>", "<local-command-stdout>", "<system-reminder>", "Caveat:"].contains(where: s.hasPrefix) }

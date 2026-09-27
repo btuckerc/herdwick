@@ -10,6 +10,10 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     private let settings: Settings
     /// Every current link, across hosts and sessions.
     private let links: () -> [HostConnection]
+    /// Every saved host, linked now or not.
+    private let profiles: () -> [HostProfile]
+    /// A watcher owns alerts while starting, running, or stopping.
+    private let pushOwns: (SessionAddress) -> Bool
     /// The conversation on screen, whose own alerts would be noise.
     private let onScreen: () -> PaneAddress?
     private let open: (PaneAddress) -> Void
@@ -35,10 +39,13 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         let date: Date?
     }
 
-    init(settings: Settings, links: @escaping () -> [HostConnection], onScreen: @escaping () -> PaneAddress?,
-         open: @escaping (PaneAddress) -> Void) {
+    init(settings: Settings, links: @escaping () -> [HostConnection], profiles: @escaping () -> [HostProfile],
+         pushOwns: @escaping (SessionAddress) -> Bool,
+         onScreen: @escaping () -> PaneAddress?, open: @escaping (PaneAddress) -> Void) {
         self.settings = settings
         self.links = links
+        self.profiles = profiles
+        self.pushOwns = pushOwns
         self.onScreen = onScreen
         self.open = open
         stamps = UserDefaults.standard.data(forKey: "attention.stamps")
@@ -69,7 +76,7 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
                 continue
             }
             if link.isUnread(agent) {
-                guard seq > last else { continue }
+                guard seq > last, !pushOwns(link.identity) else { continue }
                 alerted[key] = seq
                 post(agent, address: address, link: link)
             } else {
@@ -110,13 +117,25 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
 
     private func publish() {
         let all = links()
+        let hosts = profiles()
         var stamps = stamps
         var present: Set<String> = []
         var items: [AttentionSnapshot.Item] = []
+        // A link that answered speaks for its session: its agents replace the names kept for it.
+        // Other sessions keep theirs until their link answers or their host is removed.
+        let answered = all.filter(\.isLive).map { "\($0.identity.hostID.uuidString)/\($0.identity.session)/" }
+        let saved = Set(hosts.map(\.id.uuidString))
+        var names = (published?.names ?? [:]).filter { key, _ in
+            saved.contains(String(key.prefix { $0 != "/" })) && !answered.contains { key.hasPrefix($0) }
+        }
         for link in all {
-            for agent in link.snapshot?.agents ?? [] where link.hidden[agent.paneID] == nil {
+            for agent in link.snapshot?.agents ?? [] {
                 let address = link.address(paneID: agent.paneID)
                 let key = Self.key(address)
+                let place = [link.profile.name, agent.cwd.map { ($0 as NSString).lastPathComponent }]
+                    .compactMap { $0 }.joined(separator: " · ")
+                names[key] = AttentionSnapshot.Name(title: agent.conversationTitle, place: place)
+                guard link.hidden[agent.paneID] == nil else { continue }
                 let seq = agent.stateChangeSeq ?? 0
                 present.insert(key)
                 if let stamp = stamps[key] {
@@ -132,8 +151,6 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
                 case .idle: state = .idle
                 case .unknown: continue
                 }
-                let place = [link.profile.name, agent.cwd.map { ($0 as NSString).lastPathComponent }]
-                    .compactMap { $0 }.joined(separator: " · ")
                 items.append(AttentionSnapshot.Item(
                     id: key, title: agent.conversationTitle, place: place, state: state, since: stamps[key]?.date,
                     url: AttentionLink.url(host: address.hostID, session: address.session, pane: address.paneID)
@@ -145,7 +162,8 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         if complete { stamps = stamps.filter { present.contains($0.key) } }
         if stamps != self.stamps { self.stamps = stamps }
 
-        var snapshot = AttentionSnapshot(items: items, complete: complete, updated: .now)
+        var snapshot = AttentionSnapshot(items: items, complete: complete, updated: .now, names: names,
+                                         hosts: Dictionary(hosts.map { ($0.id.uuidString, $0.name) }) { first, _ in first })
         snapshot.sort()
         snapshot.save()
         // Only a change in content costs a widget reload; the time alone is kept for staleness.
