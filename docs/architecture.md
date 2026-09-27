@@ -158,8 +158,9 @@ One SSH connection per host multiplexes every channel. States: `idle`,
 
 ## Local privacy
 - Settings › Privacy enables app lock (device-owner authentication, including passcode)
-  on launch and after more than 30 seconds in the background. Every inactive scene has an
-  opaque window-level cover, including over sheets, even with app lock disabled.
+  on launch and after more than 30 seconds in the background. With it on, every inactive
+  scene has an opaque window-level cover, including over sheets (the app switcher shows
+  it); with it off there is no cover, so launch and return never flash a lock screen.
 - Drafts migrate from `composerDrafts` only after an atomic complete-protection file write
   succeeds. An unreadable store is never overwritten. Private files are excluded from backup.
 - Opt-in offline transcripts keep complete raw records in protected Application Support

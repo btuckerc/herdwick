@@ -154,7 +154,7 @@ private struct PrivacySettings: View {
         } header: {
             Text("Privacy")
         } footer: {
-            Text("App Lock requires Face ID or your passcode at launch and after 30 seconds away. Offline copies keep up to 20 conversations, at most 4 MB each, protected while your device is locked. Turning this off deletes the copies.")
+            Text("App Lock requires Face ID or your passcode at launch and after 30 seconds away, and hides Herdwick in the app switcher. Offline copies keep up to 20 conversations, at most 4 MB each, protected while your device is locked. Turning this off deletes the copies.")
         }
         .confirmationDialog("Delete all offline copies?", isPresented: $deletingCopies, titleVisibility: .visible) {
             Button("Delete Copies", role: .destructive) {

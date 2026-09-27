@@ -46,7 +46,8 @@ final class AppLock {
     }
 }
 
-/// Apply once to each scene root. The window-level shield also covers presented sheets.
+/// Apply once to each scene root. With App Lock on, a window-level shield (over sheets too)
+/// hides the app while it isn't active or unlocked; with it off, nothing covers the app.
 struct AppPrivacyModifier: ViewModifier {
     @Environment(Settings.self) private var settings
     @Environment(\.scenePhase) private var phase
@@ -54,7 +55,7 @@ struct AppPrivacyModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(PrivacyWindowShield(covered: phase != .active || (settings.appLock && !lock.unlocked),
+            .background(PrivacyWindowShield(covered: settings.appLock && (phase != .active || !lock.unlocked),
                                             active: phase == .active, lock: lock))
             .onChange(of: phase, initial: true) { _, value in lock.phaseChanged(value, enabled: settings.appLock) }
             .onChange(of: settings.appLock) { _, value in lock.settingChanged(enabled: value) }
