@@ -15,8 +15,8 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     /// A watcher owns alerts while starting, running, or stopping.
     private let pushOwns: (SessionAddress) -> Bool
     /// The conversation on screen, whose own alerts would be noise.
-    private let onScreen: () -> PaneAddress?
-    private let open: (PaneAddress) -> Void
+    private let onScreen: () -> Set<PaneAddress>
+    private let open: (PaneAddress, String?) -> Void
 
     private let center = UNUserNotificationCenter.current()
     /// Pane key → the `state_change_seq` last alerted, so a reconnect, a background refresh or
@@ -41,7 +41,7 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
 
     init(settings: Settings, links: @escaping () -> [HostConnection], profiles: @escaping () -> [HostProfile],
          pushOwns: @escaping (SessionAddress) -> Bool,
-         onScreen: @escaping () -> PaneAddress?, open: @escaping (PaneAddress) -> Void) {
+         onScreen: @escaping () -> Set<PaneAddress>, open: @escaping (PaneAddress, String?) -> Void) {
         self.settings = settings
         self.links = links
         self.profiles = profiles
@@ -53,6 +53,11 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         published = AttentionSnapshot.load()
         super.init()
         center.delegate = self
+        let reply = UNTextInputNotificationAction(identifier: "reply-in-app", title: "Reply in App",
+                                                  options: [.foreground, .authenticationRequired],
+                                                  textInputButtonTitle: "Review in App", textInputPlaceholder: "Draft reply")
+        center.setNotificationCategories([UNNotificationCategory(identifier: "finished-reply", actions: [reply],
+                                                                 intentIdentifiers: [], options: [])])
     }
 
     /// Asks once; false when the user declined now or before.
@@ -64,6 +69,18 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
 
     func changed(_ link: HostConnection) {
         guard let snapshot = link.snapshot else { return }
+        // A reset counter is conservatively ignored until it passes the known watermark.
+        if link.isLive {
+            var sequences = AttentionSnapshot.shared?.dictionary(forKey: AttentionSnapshot.sequencesKey) as? [String: Int] ?? [:]
+            var references = AttentionSnapshot.shared?.dictionary(forKey: AttentionSnapshot.referencesKey) as? [String: String] ?? [:]
+            for agent in snapshot.agents {
+                let key = Self.key(link.address(paneID: agent.paneID))
+                sequences[key] = max(sequences[key] ?? -1, agent.stateChangeSeq ?? 0)
+                references[key] = agent.agentSession?.value
+            }
+            AttentionSnapshot.shared?.set(sequences, forKey: AttentionSnapshot.sequencesKey)
+            AttentionSnapshot.shared?.set(references, forKey: AttentionSnapshot.referencesKey)
+        }
         var settled: [String] = []
         var alerted = alerted
         defer { if alerted != self.alerted { self.alerted = alerted } }
@@ -90,6 +107,7 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     }
 
     private func post(_ agent: Agent, address: PaneAddress, link: HostConnection) {
+        guard !Mutes.shared.isMuted(address, reference: agent.agentSession?.value) else { return }
         let blocked = agent.agentStatus == .blocked
         guard blocked ? settings.notifyNeedsYou : settings.notifyFinished else { return }
         let content = UNMutableNotificationContent()
@@ -100,6 +118,11 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         content.sound = blocked ? .default : nil
         content.threadIdentifier = "\(address.hostID.uuidString)/\(address.session)"
         content.userInfo = ["host": address.hostID.uuidString, "session": address.session, "pane": address.paneID]
+        if !blocked, let id = DraftStore.id(host: link.identity, agent: agent), agent.agentSession != nil {
+            content.categoryIdentifier = "finished-reply"
+            content.userInfo["draftID"] = id
+            content.userInfo["reference"] = agent.agentSession?.value
+        }
         center.add(UNNotificationRequest(identifier: Self.key(address), content: content, trigger: nil))
     }
 
@@ -153,7 +176,8 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
                 }
                 items.append(AttentionSnapshot.Item(
                     id: key, title: agent.conversationTitle, place: place, state: state, since: stamps[key]?.date,
-                    url: AttentionLink.url(host: address.hostID, session: address.session, pane: address.paneID)
+                    url: AttentionLink.url(host: address.hostID, session: address.session, pane: address.paneID),
+                    draftID: agent.agentSession == nil ? nil : DraftStore.id(host: link.identity, agent: agent)
                 ))
             }
         }
@@ -180,12 +204,26 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         let address = Self.address(notification.request.content.userInfo)
-        completionHandler(address != nil && address == onScreen() ? [] : [.banner, .list, .sound])
+        let muted = address.map { address in
+            let link = links().first { $0.identity.hostID == address.hostID && $0.identity.session == address.session }
+            let reference = link?.snapshot?.agents.first { $0.paneID == address.paneID }?.agentSession?.value
+            return Mutes.shared.isMuted(address, reference: reference)
+        } ?? false
+        completionHandler(muted || address.map { onScreen().contains($0) } == true ? [] : [.banner, .list, .sound])
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
-        if let address = Self.address(response.notification.request.content.userInfo) { open(address) }
+        let info = response.notification.request.content.userInfo
+        if let reply = response as? UNTextInputNotificationResponse, response.actionIdentifier == "reply-in-app",
+           let id = info["draftID"] as? String, response.notification.request.trigger == nil {
+            // Only app-issued local alerts carry a trusted draft identity. Never send here.
+            let old = DraftStore.load(id) ?? ""
+            DraftStore.save(old.isEmpty ? reply.userText : old + "\n" + reply.userText, for: id)
+        }
+        if let address = Self.address(info) {
+            open(address, response.notification.request.trigger == nil ? info["draftID"] as? String : nil)
+        }
         completionHandler()
     }
 

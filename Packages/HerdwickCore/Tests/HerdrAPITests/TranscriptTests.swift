@@ -100,6 +100,24 @@ struct AgentTranscriptTests {
         #expect(reader.consumedBytes == bytes.count + 1)
     }
 
+    /// omp images are blob references resolved beside `sessions`; tool results carry theirs.
+    @Test func imagesStayReferencesAndToolResultsKeepThem() throws {
+        let hash = String(repeating: "ab", count: 32)
+        let conversation = conversation([
+            #"{"type":"message","id":"u1","message":{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","data":"blob:sha256:\#(hash)","mimeType":"image/webp"}]}}"#,
+            #"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"shot.png"}}]}}"#,
+            #"{"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"c1","content":[{"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"},{"type":"image","data":"blob:sha256:short"}]}}"#,
+        ])
+        guard case .user(_, _, let images) = try #require(conversation.items.first) else { Issue.record("no user row"); return }
+        let image = try #require(images.first)
+        #expect(image.source == .blob(hash) && image.mimeType == "image/webp" && image.inlineData == nil)
+        #expect(image.blobPath(transcript: "/home/u/.omp/agent/sessions/--repo--/2026.jsonl") == "/home/u/.omp/agent/blobs/" + hash)
+        #expect(image.blobPath(transcript: "/home/u/.omp/agent/sessions/--repo--/2026/Child.jsonl") == "/home/u/.omp/agent/blobs/" + hash)
+        guard case .tool(let tool) = conversation.items.last else { Issue.record("no tool row"); return }
+        #expect(tool.images.count == 1)
+        #expect(tool.images.first?.inlineData == Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
+    }
+
     @Test func midFileReadSkipsTheCutLineAndKeepsGoingPastGarbage() {
         var reader = TranscriptReader(startsMidFile: true)
         let entries = reader.append(Array("ed\":1}\nnot json\n\(Line.model)\n".utf8))

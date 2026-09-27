@@ -10,6 +10,7 @@ final class KeySetup {
         case idle
         case connecting
         case confirming(Confirmation)
+        case signingIn
         case installing
         case finished
         case failed(String)
@@ -18,6 +19,8 @@ final class KeySetup {
     struct Confirmation {
         let fingerprint: String
         let address: String
+        /// The key matched one the tailnet advertises for this peer.
+        let advertised: Bool
     }
 
     private(set) var state: State = .idle
@@ -33,8 +36,10 @@ final class KeySetup {
         return true
     }
     var isInstalling: Bool {
-        if case .installing = state { return true }
-        return false
+        switch state {
+        case .signingIn, .installing: true
+        default: false
+        }
     }
 
     func begin(profile: HostProfile, password: String, tailnet: Tailnet) {
@@ -46,21 +51,37 @@ final class KeySetup {
         Task { [weak self] in await self?.connectForSetup() }
     }
 
+    /// Signs in with the password against the confirmed host key, then keeps the password.
     func keepPassword() {
-        guard let profile else { return }
-        Keychain.set(password, for: profile.passwordAccount)
-        if let key = presented?.value { Keychain.set(key.publicKey, for: profile.hostKeyAccount) }
-        result = profile
-        state = .finished
-        password = ""
-        closeSSH()
-    }
-    func install() {
-        guard let profile, let ssh, let hostKey = presented?.value?.publicKey else { return }
-        state = .installing
+        guard let profile, let hostKey = presented?.value?.publicKey else { return }
+        state = .signingIn
         Task { [weak self] in
             guard let self else { return }
             do {
+                let ssh = try await self.dial(profile: profile, authentication: .password(self.password), expected: hostKey)
+                await ssh.close()
+                Keychain.set(self.password, for: profile.passwordAccount)
+                Keychain.set(hostKey, for: profile.hostKeyAccount)
+                self.result = profile
+                self.password = ""
+                self.state = .finished
+            } catch {
+                self.state = .failed(Self.message(for: error))
+            }
+        }
+    }
+
+    /// Signs in with the password against the confirmed host key, installs this device's key,
+    /// then proves a key login before dropping the password.
+    func install() {
+        guard let profile, let hostKey = presented?.value?.publicKey else { return }
+        state = .signingIn
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let ssh = try await self.dial(profile: profile, authentication: .password(self.password), expected: hostKey)
+                self.ssh = ssh
+                self.state = .installing
                 _ = try await AuthorizedKeyInstall.install(line: DeviceKey.authorizedKeysLine, client: HerdrClient(runner: ssh))
                 self.closeSSH()
                 let verified: SSHConnection
@@ -77,15 +98,15 @@ final class KeySetup {
                 self.password = ""
                 self.state = .finished
             } catch {
+                self.closeSSH()
                 self.state = .failed(Self.message(for: error))
             }
         }
     }
 
     func retry() {
-        guard let profile else { return }
-        if ssh != nil, presented != nil { install() }
-        else { begin(profile: profile, password: password, tailnet: tailnet!) }
+        guard let profile, let tailnet else { return }
+        begin(profile: profile, password: password, tailnet: tailnet)
     }
 
     func dismiss() {
@@ -94,32 +115,44 @@ final class KeySetup {
         result = nil
     }
 
+    /// Learns the host key without authenticating: the validator records the key and refuses it,
+    /// so the handshake stops before user auth and the password never leaves the device unconfirmed.
     private func connectForSetup() async {
         guard let profile else { return }
+        let capture = CapturedHostKey()
+        presented = capture
+        let advertised = advertisedKeys(for: profile)
         do {
-            let capture = CapturedHostKey()
-            presented = capture
-            let ssh = try await dial(profile: profile, authentication: .password(password), expected: nil, capture: capture)
-            self.ssh = ssh
-            guard let key = capture.value else { throw SetupError.noHostKey }
-            state = .confirming(Confirmation(fingerprint: key.fingerprint, address: "\(profile.username)@\(profile.address)"))
+            let ssh = try await dial(profile: profile, authentication: .none, expected: nil, capture: capture)
+            await ssh.close()
+            throw SetupError.noHostKey
         } catch {
-            state = .failed(Self.message(for: error))
+            guard let key = capture.value, case SSHError.hostKeyRejected = error else {
+                state = .failed(Self.message(for: error))
+                return
+            }
+            if !advertised.isEmpty, !advertised.contains(Self.identity(key.publicKey)) {
+                state = .failed(SetupError.advertisedMismatch.localizedDescription)
+                return
+            }
+            state = .confirming(Confirmation(fingerprint: key.fingerprint, address: "\(profile.username)@\(profile.address)", advertised: !advertised.isEmpty))
         }
     }
 
+    private func advertisedKeys(for profile: HostProfile) -> Set<String> {
+        guard case .tailnet(let nodeID, _, _) = profile.route else { return [] }
+        return Set((tailnet?.peer(id: nodeID)?.sshHostKeys ?? []).map(Self.identity))
+    }
+
+    /// With `capture`, records the presented key and refuses it (discovery); otherwise accepts only `expected`.
     private func dial(profile: HostProfile, authentication: SSHAuthentication, expected: String?, capture: CapturedHostKey? = nil) async throws -> SSHConnection {
-        let knownKeys: Set<String>
-        switch profile.route {
-        case .direct:
-            knownKeys = []
-        case .tailnet(let nodeID, _, _):
-            knownKeys = Set((tailnet?.peer(id: nodeID)?.sshHostKeys ?? []).map(Self.identity))
-        }
         let validator: HostKeyValidator = { key in
-            if let expected { return Self.identity(expected) == Self.identity(key.publicKey) }
-            capture?.set(key)
-            return knownKeys.isEmpty || knownKeys.contains(Self.identity(key.publicKey))
+            if let capture {
+                capture.set(key)
+                return false
+            }
+            guard let expected else { return false }
+            return Self.identity(expected) == Self.identity(key.publicKey)
         }
         switch profile.route {
         case .direct(let host, let port):
@@ -149,11 +182,12 @@ final class KeySetup {
     }
 
     private enum SetupError: LocalizedError {
-        case noHostKey, keyRefused
+        case noHostKey, keyRefused, advertisedMismatch
         var errorDescription: String? {
             switch self {
             case .noHostKey: "The server did not present a host key."
             case .keyRefused: "The key was added, but the server still refuses key logins. Check that sshd allows PubkeyAuthentication, or keep using the password."
+            case .advertisedMismatch: "This server's host key does not match the one your tailnet advertises for it. Nothing was sent."
             }
         }
     }

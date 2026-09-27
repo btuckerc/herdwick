@@ -27,8 +27,8 @@ struct Thread: Identifiable {
 struct InboxRank: Equatable {
     /// Needs you, unread finish, working, idle or read finish, unknown.
     var priority: Int
-    /// The conversation's last message sent or received; nil while unknown.
-    var lastMessageAt: Date?
+    /// When the user last sent a message or the agent last finished a turn; nil while unknown.
+    var lastTurnAt: Date?
 }
 
 @MainActor
@@ -40,7 +40,7 @@ func inboxRank(_ thread: Thread) -> InboxRank {
     case .idle: 3
     case .unknown: 4
     }
-    return InboxRank(priority: priority, lastMessageAt: thread.connection.lastMessageAt(thread.agent))
+    return InboxRank(priority: priority, lastTurnAt: thread.connection.lastTurnAt(thread.agent))
 }
 
 struct InboxSection: Identifiable {
@@ -50,9 +50,9 @@ struct InboxSection: Identifiable {
     let idle: [Thread]
 }
 
-/// Recent is one timeline by last message. Priority pins what needs you, then orders by
-/// status, then by last message. Unknown times sort last; ties fall back to the address,
-/// never the title, so a rename cannot move a row.
+/// Recent is one timeline by last turn (a user message or a finished reply). Priority pins
+/// what needs you, then orders by status, then by last turn. Unknown times sort last; ties
+/// fall back to the address, never the title, so a rename cannot move a row.
 @MainActor
 func inboxSections(
     _ threads: [Thread],
@@ -71,7 +71,7 @@ func inboxSections(
     func precedes(_ lhs: Thread, _ rhs: Thread) -> Bool {
         let left = ranks[lhs.address]!, right = ranks[rhs.address]!
         if sort == .priority, left.priority != right.priority { return left.priority < right.priority }
-        switch (left.lastMessageAt, right.lastMessageAt) {
+        switch (left.lastTurnAt, right.lastTurnAt) {
         case let (l?, r?) where l != r: return l > r
         case (.some, nil): return true
         case (nil, .some): return false

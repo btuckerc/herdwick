@@ -11,6 +11,7 @@ const targets = {
   "dev.btuckerc.herdwick": "Herdwick App Store",
   "dev.btuckerc.herdwick.widgets": "Herdwick Widgets App Store",
   "dev.btuckerc.herdwick.notifications": "Herdwick Notifications App Store",
+  "dev.btuckerc.herdwick.share": "Herdwick Share App Store",
 };
 
 const { ASC_KEY_ID: kid, ASC_ISSUER_ID: iss } = process.env;

@@ -151,4 +151,38 @@ extension HerdrClient {
         let result: Result = try await request("pane.process_info", params: Params(pane_id: pane), session: session)
         return result.process_info.foreground_processes?.first?.pid
     }
+
+    /// herdr's own account of how it arrived at an agent's status (`agent.explain`), as
+    /// label/value lines for display. Read-only: it never changes the status.
+    public func explainAgent(pane: String, session: String) async throws -> [(label: String, value: String)] {
+        struct Params: Encodable, Sendable { let target: String }
+        struct Explain: Decodable {
+            let agent: String?
+            let state: String?
+            let screen_detection_skipped: Bool?
+            let screen_detection_skip_reason: String?
+            let fallback_reason: String?
+            let skipped_update_reason: String?
+            let warning: String?
+            let visible_blocker: Bool?
+            let visible_working: Bool?
+            let visible_idle: Bool?
+        }
+        struct Result: Decodable { let explain: Explain }
+        let e = try await (request("agent.explain", params: Params(target: pane), session: session) as Result).explain
+        let screen = [e.visible_blocker == true ? "prompt" : nil, e.visible_working == true ? "working" : nil,
+                      e.visible_idle == true ? "idle" : nil].compactMap { $0 }
+        let lines: [(String, String?)] = [
+            ("Agent", e.agent),
+            ("Status", e.state),
+            ("Status source", e.screen_detection_skipped == true
+                ? "the agent reports it" + (e.screen_detection_skip_reason.map { " (\($0.replacingOccurrences(of: "_", with: " ")))" } ?? "")
+                : "herdr reads the screen"),
+            ("Screen shows", e.screen_detection_skipped == true ? nil : (screen.isEmpty ? "nothing recognised" : screen.joined(separator: ", "))),
+            ("Fallback", e.fallback_reason),
+            ("Update skipped", e.skipped_update_reason),
+            ("Warning", e.warning),
+        ]
+        return lines.compactMap { label, value in value.map { (label, $0) } }
+    }
 }

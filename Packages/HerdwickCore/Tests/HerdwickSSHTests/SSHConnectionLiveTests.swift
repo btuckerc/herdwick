@@ -63,6 +63,23 @@ final class SSHConnectionLiveTests {
         await ssh.close()
     }
 
+    /// Setup learns a host key by refusing it: the handshake must stop before any credential
+    /// (or even a `none` probe) reaches the server.
+    @Test func refusedHostKeySendsNoUserAuth() async throws {
+        await #expect(throws: SSHError.hostKeyRejected(fingerprint: server.hostKeyFingerprint)) {
+            _ = try await SSHConnection.connect(
+                host: "localhost", port: server.port, username: NSUserName(),
+                authentication: .password("must-not-leave"), hostKeyValidator: { _ in false }
+            )
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(!server.log.contains("userauth-request"), "\(server.log)")
+        let ssh = try await connect()
+        await ssh.close()
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(server.log.contains("userauth-request"))
+    }
+
     /// A photo is megabytes: far past the SSH channel window, so writes must wait for window adjusts.
     @Test func uploadsMultiMegabyteAttachment() async throws {
         let ssh = try await connect()
@@ -292,6 +309,7 @@ final class LocalSSHD: @unchecked Sendable {
             UsePAM no
             StrictModes no
             MaxSessions \(maxSessions)
+            LogLevel DEBUG1
             """
         let configPath = dir.appendingPathComponent("sshd_config").path
         try config.write(toFile: configPath, atomically: true, encoding: .utf8)
@@ -299,7 +317,7 @@ final class LocalSSHD: @unchecked Sendable {
         // holds no pipe of ours open.
         let launcher = Process()
         launcher.executableURL = URL(fileURLWithPath: "/usr/sbin/sshd")
-        launcher.arguments = ["-f", configPath]
+        launcher.arguments = ["-f", configPath, "-E", dir.path + "/sshd.log"]
         launcher.standardInput = FileHandle.nullDevice
         launcher.standardOutput = FileHandle.nullDevice
         launcher.standardError = FileHandle.nullDevice
@@ -316,6 +334,9 @@ final class LocalSSHD: @unchecked Sendable {
         stop()
         throw SSHError.connectionClosed
     }
+
+    /// The daemon's DEBUG1 log so far.
+    var log: String { (try? String(contentsOfFile: dir.path + "/sshd.log", encoding: .utf8)) ?? "" }
 
     func stop() {
         if pid > 0 { kill(pid, SIGTERM) }

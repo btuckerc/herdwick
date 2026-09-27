@@ -52,6 +52,7 @@ cat > build/ExportOptions.plist <<PLIST
     <key>dev.btuckerc.herdwick</key><string>Herdwick App Store</string>
     <key>dev.btuckerc.herdwick.widgets</key><string>Herdwick Widgets App Store</string>
     <key>dev.btuckerc.herdwick.notifications</key><string>Herdwick Notifications App Store</string>
+    <key>dev.btuckerc.herdwick.share</key><string>Herdwick Share App Store</string>
   </dict>
 </dict></plist>
 PLIST

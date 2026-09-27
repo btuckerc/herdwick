@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Every visible agent across every host, as last seen. The app writes it to the shared App
 /// Group container; the notification service updates the agent a push is about; widgets read.
@@ -33,6 +34,9 @@ struct AttentionSnapshot: Codable, Equatable {
         /// When the app saw this state begin; nil when it was already so at first sight.
         let since: Date?
         let url: URL
+        /// The conversation's `DraftStore` id when it has a transcript session: what the share
+        /// sheet offers as a destination. Nil for terminal-only agents.
+        var draftID: String? = nil
     }
 
     /// Needs you, unread completions, working, idle; the newest change first within each.
@@ -74,6 +78,41 @@ struct AttentionSnapshot: Codable, Equatable {
     /// Shared with the notification service: pane key → the change last alerted.
     static var shared: UserDefaults? { UserDefaults(suiteName: appGroup) }
     static let alertedKey = "attention.alerted"
+    static let secretKey = "push.secret"
+    static let installationKey = "push.installation"
+    /// Last live observation or authenticated push. An unsigned event never advances it.
+    static let sequencesKey = "push.sequences"
+    static let referencesKey = "attention.references"
+    static let mutesKey = "attention.mutes"
+    static func muteKey(_ paneKey: String, reference: String) -> String {
+        paneKey + "/" + Data(reference.utf8).base64EncodedString()
+    }
+
+    struct Mute: Codable {
+        let reference: String
+        let expires: Date?
+        func active(reference: String, now: Date = .now) -> Bool {
+            self.reference == reference && (expires.map { $0 > now } ?? true)
+        }
+    }
+
+    static var mutes: [String: Mute] {
+        get {
+            shared?.data(forKey: mutesKey)
+                .flatMap { try? JSONDecoder().decode([String: Mute].self, from: $0) } ?? [:]
+        }
+        set { shared?.set(try? JSONEncoder().encode(newValue), forKey: mutesKey) }
+    }
+
+    static func authentic(host: String, session: String, pane: String, state: String, seq: Int, mac: String?) -> Bool {
+        guard let secret = shared?.string(forKey: secretKey), let mac, mac.count == 64,
+              [host, session, pane, state].allSatisfy({ !$0.contains("|") }),
+              seq >= 0 else { return false }
+        let message = Data("v1|\(host)|\(session)|\(pane)|\(state)|\(seq)".utf8)
+        let signature = HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: Data(secret.utf8)))
+        let expected = signature.map { String(format: "%02x", $0) }.joined()
+        return zip(expected.utf8, mac.utf8).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) } == 0
+    }
 
     private static var url: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?

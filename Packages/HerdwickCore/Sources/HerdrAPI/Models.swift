@@ -82,12 +82,45 @@ public struct Workspace: Decodable, Sendable, Equatable, Identifiable {
     public var label: String
     public var focused: Bool
     public var agentStatus: AgentStatus
+    public var worktree: WorkspaceWorktreeInfo?
+
+    public var displayLabel: String {
+        guard let worktree else { return label }
+        return "\(label) · \(worktree.isLinkedWorktree ? "Worktree" : worktree.repoName)"
+    }
 
     enum CodingKeys: String, CodingKey {
-        case number, label, focused
+        case number, label, focused, worktree
         case id = "workspace_id"
         case agentStatus = "agent_status"
     }
+}
+
+/// Snapshot metadata has no branch field; don't infer one from the checkout directory.
+public struct WorkspaceWorktreeInfo: Decodable, Sendable, Equatable {
+    public var repoKey: String
+    public var repoName: String
+    public var repoRoot: String
+    public var checkoutPath: String
+    public var isLinkedWorktree: Bool
+    enum CodingKeys: String, CodingKey {
+        case repoKey = "repo_key", repoName = "repo_name", repoRoot = "repo_root"
+        case checkoutPath = "checkout_path", isLinkedWorktree = "is_linked_worktree"
+    }
+}
+
+public struct IntegrationList: Decodable, Sendable {
+    public var integrations: [IntegrationInfo]
+}
+
+public struct IntegrationInfo: Decodable, Sendable, Identifiable {
+    public var target: String
+    public var label: String
+    public var command: String
+    public var available: Bool
+    /// Kept as a string so a newer server's state doesn't break connection.
+    public var state: String
+    public var id: String { target }
 }
 
 public struct Tab: Decodable, Sendable, Equatable, Identifiable {

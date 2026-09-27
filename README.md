@@ -12,7 +12,7 @@ conversations, or drop into the live terminal.
   subagents, tool steps, plans and diffs.
 - Answer questions and permission prompts with native controls.
 - Live terminal (SwiftTerm), a key bar and an opt-in typing mode.
-- Start agents in empty panes, create workspaces, attach files.
+- Start an agent in two taps in any workspace or folder on the host, or in an empty pane; attach files.
 - Plain SSH (device key or password) or an embedded Tailscale node.
 - No account, no analytics, nothing installed on your machine.
 

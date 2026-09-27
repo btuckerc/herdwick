@@ -4,6 +4,8 @@ import SwiftUI
 extension EnvironmentValues {
     /// Pushes a subagent's read-only transcript; nil where drill-in isn't available.
     @Entry var openSubagent: (@MainActor (SubagentActivity) -> Void)? = nil
+    /// This conversation's subagent with the given id (an `agent://` peer), if any.
+    @Entry var subagentNamed: (@MainActor (String) -> SubagentActivity?)? = nil
 }
 
 /// A compact, material tray for workers that have not reached a terminal state.
@@ -142,6 +144,7 @@ struct SubagentConversationView: View {
     let format: TranscriptFormat
     let title: String
     @State private var feed = ConversationFeed()
+    @State private var previewing: ImagePreviewSource?
 
     var body: some View {
         ScrollView {
@@ -150,6 +153,9 @@ struct SubagentConversationView: View {
                                              subagents: { feed.conversation.subagents(spawnedBy: $0) })) { row in row.view }
             }.padding(16)
         }
+        .environment(\.previewImage) { previewing = $0 }
+        .environment(\.imageLoader, ImageLoader(connection: connection, transcript: path))
+        .sheet(item: $previewing) { ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: path), cwd: nil) }
         .defaultScrollAnchor(.bottom)
         .overlay {
             switch feed.state {
@@ -157,7 +163,7 @@ struct SubagentConversationView: View {
             // A finished child's file can stop streaming after it loaded; keep what we have.
             case .unavailable where feed.conversation.items.isEmpty:
                 ContentUnavailableView("Transcript Not Available", systemImage: "text.document",
-                                       description: Text("The subagent finished or was stopped, and its transcript is gone."))
+                                       description: Text("The agent finished or was stopped, and its transcript is gone."))
             case .unavailable, .live: EmptyView()
             }
         }

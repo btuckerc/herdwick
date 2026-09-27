@@ -15,7 +15,7 @@ import Foundation
 
 public struct ScreenPrompt: Sendable, Equatable {
     public enum Style: Sendable, Equatable { case ompAsk, claudeAsk, choice }
-    public enum Phase: Sendable, Equatable { case question, review, customInput }
+    public enum Phase: Sendable, Equatable { case question, review, customInput, noteInput }
 
     public struct Option: Sendable, Equatable {
         public var label: String
@@ -41,20 +41,23 @@ public struct ScreenPrompt: Sendable, Equatable {
     public var title: String
     /// What the prompt is about: the command, the file, the reason. Choice prompts only.
     public var context: [String]
+    /// Only the visible viewport was captured; the underlying document may be longer.
+    public var contextMayBeTruncated: Bool
     public var options: [Option]
     public var cursor: Int?
     /// Question tabs (omp ids, Claude headers) when the prompt pages through several.
     public var tabs: [String]
 
     public init(style: Style, phase: Phase = .question, title: String, context: [String] = [],
-                options: [Option], cursor: Int?, tabs: [String] = []) {
+                options: [Option], cursor: Int?, tabs: [String] = [], contextMayBeTruncated: Bool = false) {
         self.style = style; self.phase = phase; self.title = title; self.context = context
         self.options = options; self.cursor = cursor; self.tabs = tabs
+        self.contextMayBeTruncated = contextMayBeTruncated
     }
 
     public static func parse(_ visibleText: String) -> ScreenPrompt? {
         let lines = visibleText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        return omp(lines) ?? claudeAsk(lines) ?? choice(lines)
+        return ompChoice(lines) ?? omp(lines) ?? claudeAsk(lines) ?? choice(lines)
     }
 }
 
@@ -66,7 +69,48 @@ private let ompBox: Character = "\u{F096}"
 private let ompChecked: Character = "\u{F14A}"
 
 extension ScreenPrompt {
+    static func ompChoice(_ lines: [String]) -> ScreenPrompt? {
+        guard let top = lines.lastIndex(where: { $0.hasPrefix("╭─ Allow tool: ") || $0.hasPrefix("╭─ Plan Review ") }),
+              let end = lines[(top + 1)...].firstIndex(where: { $0.hasPrefix("╰") }) else { return nil }
+        let plan = lines[top].hasPrefix("╭─ Plan Review ")
+        let body = Array(lines[(top + 1)..<end])
+        var context: [String] = []
+        var options: [Option] = []
+        var cursor: Int?
+        var actions = !plan
+        for line in body {
+            let content = boxed(line)
+            if line.hasPrefix("├") { continue }
+            if plan && content == "Plan mode - next step" { actions = true; continue }
+            if content.isEmpty { continue }
+            if !actions { context.append(content); continue }
+            if content.hasPrefix("continue with") || content.hasPrefix("↳") { continue }
+            if content.contains("esc cancel") { break }
+            let selected = content.first == ompCursor
+            let label = (selected ? String(content.dropFirst()) : content).trimmingCharacters(in: .whitespaces)
+            if plan || label == "Approve" || label == "Deny" {
+                if selected { cursor = options.count }
+                options.append(Option(label: label))
+            } else { context.append(content) }
+        }
+        guard !options.isEmpty, cursor != nil else { return nil }
+        let title: String
+        if plan { title = "Plan Review" } else {
+            let tool = lines[top].dropFirst("╭─ Allow tool: ".count).prefix(while: { $0 != "─" })
+                .trimmingCharacters(in: .whitespaces)
+            title = "Allow \(tool)?"
+        }
+        return ScreenPrompt(style: .choice, title: title, context: context, options: options,
+                            cursor: cursor, contextMayBeTruncated: plan)
+    }
+
     static func omp(_ lines: [String]) -> ScreenPrompt? {
+        if let top = lines.lastIndex(where: { $0.hasPrefix("╭─ Note for ") }),
+           !lines[(top + 1)...].contains(where: { $0.contains("─ Ask ") }) {
+            let title = lines[top].dropFirst("╭─ Note for ".count)
+                .trimmingCharacters(in: CharacterSet(charactersIn: " ─╮"))
+            return ScreenPrompt(style: .ompAsk, phase: .noteInput, title: title, options: [], cursor: nil)
+        }
         if let top = lines.lastIndex(where: { $0.contains("─ Custom answer:") }),
            !lines[(top + 1)...].contains(where: { $0.contains("─ Ask ") }) {
             let header = lines[top]
@@ -114,6 +158,7 @@ extension ScreenPrompt {
             }
             var label = String(content[content.index(after: mark)...]).trimmingCharacters(in: .whitespaces)
             label = label.replacingOccurrences(of: " (Recommended)", with: "")
+            if let note = label.range(of: "  ✎ note") { label = String(label[..<note.lowerBound]) }
             let glyph = content[mark]
             if content[..<mark].contains(ompCursor) { cursor = options.count }
             options.append(Option(label: label, checked: glyph == ompRadio ? nil : glyph == ompChecked,
@@ -123,11 +168,17 @@ extension ScreenPrompt {
         return ScreenPrompt(style: .ompAsk, title: title, options: options, cursor: cursor, tabs: tabs)
     }
 
-    /// The text inside a `│ … │` box row.
+    /// The text inside a `│ … │` box row, without the scrollbar omp draws in the last
+    /// column (`█` thumb, `│` track) when the options don't fit the pane.
     private static func boxed(_ line: String) -> String {
         var s = Substring(line)
         if let i = s.firstIndex(of: "│") { s = s[s.index(after: i)...] }
         if let i = s.lastIndex(of: "│") { s = s[..<i] }
+        s = s.drop(while: \.isWhitespace)
+        while s.last?.isWhitespace == true { s = s.dropLast() }
+        if let last = s.last, last == "█" || last == "│", s.dropLast().last?.isWhitespace != false {
+            s = s.dropLast()
+        }
         return s.trimmingCharacters(in: .whitespaces)
     }
 }

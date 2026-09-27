@@ -1,0 +1,41 @@
+╭─ Plan Review ───────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  Approach                                                                                                           │
+│                                                                                                                     │
+│  1. Read a.txt (unverified — confirm first) in the working directory; if missing, create it during execution.       │
+│  2. Append bye on its own line, preserving existing content; add a separating newline only if needed, and end bye   │
+│     with a newline.                                                                                                 │
+│  3. Read a.txt to verify its final line is exactly bye and prior content is unchanged.                              │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Plan mode - next step                                                                                               │
+│ continue with  ◂   default   fable  task  ▸                                                                      │
+│   ↳ Claude Haiku 4.5                                                                                                │
+│  Approve and execute                                                                                               │
+│   Approve and compact context                                                                                       │
+│   Approve and keep context (~10k / 200k)                                                                            │
+│   Refine plan                                                                                                       │
+│   Save and quit                                                                                                     │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ↑↓ select · ⏎ confirm · ◂▸ model · c copy · tab regions · Ctrl+G editor · esc cancel                                │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+

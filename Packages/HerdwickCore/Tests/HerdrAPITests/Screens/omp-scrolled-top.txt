@@ -1,0 +1,24 @@
+ sentences about choosing a retry policy for a flaky SSH reconnect, 4 options
+ each with a 4-8 word label and a one-sentence description, mark option 2
+ recommended. Do nothing else.
+
+
+  󱊷 Working…
+
+╭─ Ask ──────────────────────────────────────────────────────────────────────────╮
+│ Reconnects to one host keep failing a few times in a row before succeeding,    │
+│ and the current backoff of 0.5, 1, 2, 4, then 8 seconds makes the inbox sit on │
+│ "Reconnecting…" for a long time. I can change how quickly and how often the    │
+│ supervisor retries, but faster retries cost battery and can hammer a host tha… │
+├────────────────────────────────────────────────────────────────────────────────┤
+│    Keep current exponential backoff unchanged                               █ │
+│       No behaviour change; the flaky host keeps recovering slowly.           █ │
+│   Exponential backoff with jitter, 4-second cap (Recommended)              █ │
+│       Randomised delays capped at 4 seconds recover faster without retrying  █ │
+│       in lockstep.                                                           │ │
+│    Fixed one-second retries, then back off                                  │ │
+│       The first five attempts run a second apart, then fall back to the      │ │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ Enter select · n note · ↑/↓ move · ↓ scroll · Esc cancel · Ctrl+O expand       │
+╰────────────────────────────────────────────────────────────────────────────────╯
+herdwick

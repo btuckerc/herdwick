@@ -32,6 +32,45 @@ final class HostConnection {
     var onAttentionChange: ((HostConnection) -> Void)?
     /// Called each time a fresh transport goes live.
     var onLive: ((HostConnection) -> Void)?
+    private(set) var missingIntegrations: [IntegrationInfo] = []
+    /// Host clock minus this device's, sampled once per connection; nil unless it is off by
+    /// more than a minute beyond the round trip. Only warned about: times in the app come from the host.
+    private(set) var clockSkew: TimeInterval?
+
+    func checkIntegrations() async {
+        guard demo == nil, let client, let session = activeSession else { return }
+        let generation = generation
+        guard let integrations = try? await client.integrations(session: session),
+              generation == self.generation, session == activeSession else { return }
+        missingIntegrations = integrations.filter {
+            ["omp", "claude", "codex"].contains($0.target) && $0.available && $0.state == "not_installed"
+        }
+    }
+
+    private func sampleClock(_ runner: any CommandRunner) async {
+        let generation = generation
+        let sent = Date()
+        guard let channel = try? await runner.exec("date +%s") else { return }
+        var bytes: [UInt8] = []
+        do {
+            for try await chunk in channel.output { bytes += chunk }
+        } catch {
+            await channel.close()
+            return
+        }
+        await channel.close()
+        let rtt = Date().timeIntervalSince(sent)
+        guard generation == self.generation,
+              let host = TimeInterval(String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+        let offset = host - (sent.timeIntervalSince1970 + rtt / 2)
+        clockSkew = abs(offset) - rtt > 60 ? offset : nil
+    }
+
+    func installIntegration(_ target: String) async throws {
+        guard isLive, let client, let session = activeSession else { throw HerdrError.noResponse }
+        try await client.installIntegration(target, session: session)
+        await checkIntegrations()
+    }
 
     private var supervisor: ConnectionSupervisor
     private var ssh: SSHConnection?
@@ -194,16 +233,25 @@ final class HostConnection {
         var transcript: TranscriptActivity?
     }
 
-    /// When `agent`'s conversation last had a message sent or received, by the transcript's
-    /// own clock; nil while unknown.
-    func lastMessageAt(_ agent: Agent) -> Date? {
+    /// When the user last messaged `agent` or it last finished a turn, by the transcript's own
+    /// clock; nil while unknown.
+    func lastTurnAt(_ agent: Agent) -> Date? {
         guard let entry = activity[agent.paneID], entry.ref == agent.agentSession else { return nil }
-        return entry.transcript?.lastMessageAt
+        return entry.transcript?.lastTurnAt
     }
 
-    private var activityKey: String { "activity.\(profile.id.uuidString).\(activeSession ?? "")" }
+    /// A line of the newest message in `agent`'s transcript, for its inbox row; nil while unknown.
+    func preview(_ agent: Agent) -> String? {
+        guard let entry = activity[agent.paneID], entry.ref == agent.agentSession else { return nil }
+        return entry.transcript?.preview
+    }
+
+    private var activityKey: String { "turns.\(profile.id.uuidString).\(activeSession ?? "")" }
 
     private func loadActivity() {
+        // "activity.…" held times from any message, mid-turn narration included; its read
+        // offsets would keep those, so it's dropped and the transcripts read afresh.
+        UserDefaults.standard.removeObject(forKey: "activity.\(profile.id.uuidString).\(activeSession ?? "")")
         activity = UserDefaults.standard.data(forKey: activityKey)
             .flatMap { try? JSONDecoder().decode([String: PaneActivity].self, from: $0) } ?? [:]
     }
@@ -333,7 +381,9 @@ final class HostConnection {
         case started(Agent, PaneAddress)
     }
 
-    func startAgent(kind: String, paneID: String, inNewTab: Bool = false) async throws -> StartOutcome {
+    /// `freshPane`: the caller just created `paneID`, so its shell can't hold user work but may
+    /// still be running startup files.
+    func startAgent(kind: String, arguments: [String] = [], paneID: String, inNewTab: Bool = false, freshPane: Bool = false) async throws -> StartOutcome {
         guard let client, let session = activeSession, isLive else { throw HerdrError.noResponse }
         lastAgentKind = kind
         var target = paneID
@@ -341,9 +391,10 @@ final class HostConnection {
             guard let pane = snapshot?.panes.first(where: { $0.id == paneID }) else { throw HerdrError.noResponse }
             target = try await client.createTab(workspaceID: pane.workspaceID, label: nil, cwd: pane.cwd, session: session).rootPane.id
         }
+        let fresh = inNewTab || freshPane
         // A fresh tab can't be busy with user work, but its shell may still be running startup
         // helpers (e.g. mise); the retry below waits those out instead.
-        if demo == nil, !inNewTab, let info = try? await client.processInfo(paneID: target, session: session),
+        if demo == nil, !fresh, let info = try? await client.processInfo(paneID: target, session: session),
            let process = info.foregroundProcesses?.first(where: { !$0.isShell }) {
             return .busy(process.command)
         }
@@ -353,20 +404,34 @@ final class HostConnection {
         var attempts = 0
         while true {
             do {
-                agent = try await client.startAgent(name: name, kind: kind, paneID: target, session: session).agent
+                agent = try await client.startAgent(name: name, kind: kind, paneID: target,
+                                                    args: arguments.isEmpty ? nil : arguments, session: session).agent
                 break
-            } catch HerdrError.api(code: "agent_pane_busy", _) where inNewTab && attempts < 20 {
+            } catch HerdrError.api(code: "agent_pane_busy", _) where fresh && attempts < 20 {
                 // A new tab's shell is still running its startup files.
                 attempts += 1
                 try await Task.sleep(for: .milliseconds(250))
             }
         }
-        // herdr answers while the launch is pending; the transcript appears once the agent is up.
-        for _ in 0..<20 where !agent.hasTranscript {
+        // Waits for the mirror to show the agent, so the conversation doesn't open on "Agent
+        // exited". Agents herdr has no integration for never report a transcript: don't wait for one.
+        for _ in 0..<20 {
+            if let live = snapshot?.agents.first(where: { $0.paneID == target }) {
+                if live.hasTranscript || !agent.hasTranscript { agent = live }
+                break
+            }
             try? await Task.sleep(for: .milliseconds(500))
-            if let live = snapshot?.agents.first(where: { $0.paneID == target }) { agent = live }
         }
+        if !agent.hasTranscript { await checkIntegrations() }
         return .started(agent, PaneAddress(hostID: profile.id, session: session, paneID: target))
+    }
+
+    /// Waits (bounded) until the mirror shows `paneID`, so a view opened on it has its pane.
+    func awaitPane(_ paneID: String) async {
+        for _ in 0..<20 {
+            if snapshot?.panes.contains(where: { $0.id == paneID }) == true { return }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
     }
 
     func sendText(_ text: String, pane: String, submit: Bool) async throws {
@@ -393,7 +458,7 @@ final class HostConnection {
             guard let herdrPath = Self.cachedHerdrPath(profile) else { throw HerdrError.noResponse }
             try await PushWatch.arm(config, session: activeSession, herdrPath: herdrPath, runner: ssh)
         } else {
-            try await PushWatch.disarm(session: activeSession, runner: ssh)
+            try await PushWatch.disarm(installationID: Push.installationID, hostID: profile.id, session: activeSession, runner: ssh)
         }
     }
 
@@ -456,7 +521,7 @@ final class HostConnection {
                 speculative = nil
                 for try await update in snapshots {
                     guard generation == self.generation else { return }
-                    self.apply(update.snapshot)
+                    self.apply(update.snapshot, authoritative: { if case .live = update { true } else { false } }())
                     if case .live = update, !wentLive {
                         wentLive = true
                         self.client = client
@@ -465,6 +530,8 @@ final class HostConnection {
                         self.onLive?(self)
                         self.startActivityTimer()
                         self.refreshActivity()
+                        Task { await self.checkIntegrations() }
+                        if demo == nil { Task { await self.sampleClock(runner) } }
                     }
                 }
                 guard generation == self.generation, !Task.isCancelled else { return }
@@ -491,7 +558,7 @@ final class HostConnection {
             do {
                 let snapshot = try await withTimeout(.seconds(10)) { try await client.snapshot(session: session) }
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
-                self.apply(snapshot)
+                self.apply(snapshot, authoritative: true)
                 self.handle(.connected)
             } catch {
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
@@ -507,7 +574,13 @@ final class HostConnection {
         return Set(snapshot.panes.map(\.id))
     }
 
-    private func apply(_ snapshot: Snapshot) {
+    private func apply(_ snapshot: Snapshot, authoritative: Bool) {
+        if authoritative, demo == nil, let session = activeSession {
+            let paths = activity.filter { pane, value in
+                snapshot.agents.contains { $0.paneID == pane && $0.agentSession == value.ref }
+            }.compactMapValues { $0.transcript?.path }
+            EndedAgents.shared.observe(snapshot, hostID: profile.id, session: session, paths: paths)
+        }
         self.snapshot = snapshot
         recordBaseline(snapshot)
         reconcileHidden(snapshot)
@@ -534,7 +607,7 @@ final class HostConnection {
 
     private func dial(_ profile: HostProfile) async throws -> SSHConnection {
         let authentication: SSHAuthentication = switch profile.auth {
-        case .deviceKey: .ed25519(DeviceKey.load())
+        case .deviceKey: .ed25519(DeviceKey.load(hostID: profile.id))
         case .password: .password(Keychain.string(for: profile.passwordAccount) ?? "")
         case .tailscaleSSH: .none
         }

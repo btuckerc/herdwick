@@ -2,10 +2,10 @@ import Foundation
 
 /// Codex rollout files (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`), checked
 /// against Codex 0.157: `response_item` carries messages, reasoning, `function_call` /
-/// `custom_tool_call` and their outputs; `event_msg` carries errors; the rest is bookkeeping.
+/// `custom_tool_call` and their outputs; `event_msg` carries errors and turn ends; the rest is bookkeeping.
 enum CodexTranscript {
-    static func entries(_ line: ArraySlice<UInt8>) -> [TranscriptEntry] {
-        guard let record = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+    static func entries(_ line: ArraySlice<UInt8>, parsed: [String: Any]? = nil) -> [TranscriptEntry] {
+        guard let record = parsed ?? (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
               let type = record["type"] as? String else {
             return [.malformed(String(decoding: line.prefix(2048), as: UTF8.self))]
         }
@@ -28,8 +28,9 @@ enum CodexTranscript {
             case "error":
                 return [.notice(payload["message"] as? String ?? "Codex reported an error.")]
             case "task_complete":
-                guard let error = payload["error"] as? [String: Any], let text = error["message"] as? String else { break }
-                return [.notice(text)]
+                let ended = TranscriptEntry.turnEnded(at: TranscriptMessage.date(record["timestamp"]))
+                guard let error = payload["error"] as? [String: Any], let text = error["message"] as? String else { return [ended] }
+                return [.notice(text), ended]
             default:
                 break
             }
@@ -42,10 +43,12 @@ enum CodexTranscript {
     private static func message(_ payload: [String: Any], id: String, timestamp: Date?) -> [TranscriptEntry] {
         let blocks = payload["content"] as? [[String: Any]] ?? []
         let text = blocks.compactMap { $0["text"] as? String }.joined(separator: "\n\n")
-        let images = blocks.filter { ($0["type"] as? String)?.contains("image") == true }.count
+        let images = blocks.compactMap { block in
+            block["type"] as? String == "input_image" ? (block["image_url"] as? String).flatMap(TranscriptImage.dataURL) : nil
+        }
         switch payload["role"] as? String {
         case "user" where !isHarness(text):
-            return [.message(TranscriptMessage(id: id, role: .user, text: text, imageCount: images, timestamp: timestamp))]
+            return [.message(TranscriptMessage(id: id, role: .user, text: text, images: images, timestamp: timestamp))]
         case "assistant":
             return [.message(TranscriptMessage(id: id, role: .assistant, text: text, timestamp: timestamp))]
         default:

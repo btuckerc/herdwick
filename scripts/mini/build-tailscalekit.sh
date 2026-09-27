@@ -10,8 +10,16 @@ if [ ! -d "$SRC" ]; then
   git -C "$SRC" checkout "$COMMIT"
 fi
 cd "$SRC/swift"
-GOTOOLCHAIN=go1.25.5 make ios-fat
+GOTOOLCHAIN=go1.25.5 make ios ios-sim
+# Packaged here rather than by libtailscale's ios-fat, which omits the dSYMs (so archives
+# carry them and App Store Connect symbolicates TailscaleKit) and fails if its output exists.
+PRODUCTS=$PWD/build/Build/Products
 rm -rf "$REPO/Frameworks/TailscaleKit.xcframework"
 mkdir -p "$REPO/Frameworks"
-cp -R build/Build/Products/Release-iphonefat/TailscaleKit.xcframework "$REPO/Frameworks/"
+xcodebuild -create-xcframework \
+  -framework "$PRODUCTS/Release-iphoneos/TailscaleKit.framework" \
+  -debug-symbols "$PRODUCTS/Release-iphoneos/TailscaleKit.framework.dSYM" \
+  -framework "$PRODUCTS/Release-iphonesimulator/TailscaleKit.framework" \
+  -debug-symbols "$PRODUCTS/Release-iphonesimulator/TailscaleKit.framework.dSYM" \
+  -output "$REPO/Frameworks/TailscaleKit.xcframework"
 echo "TailscaleKit.xcframework -> $REPO/Frameworks"

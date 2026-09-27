@@ -6,6 +6,7 @@ import SwiftUI
 struct PaneView: View {
     @Environment(Settings.self) private var settings
     @Environment(AppModel.self) private var model
+    @Environment(SceneState.self) private var scene
     @Environment(\.colorScheme) private var colorScheme
     @Environment(DemoDirector.self) private var demo: DemoDirector?
     let connection: HostConnection
@@ -27,6 +28,7 @@ struct PaneView: View {
     /// scrolls up into it.
     @State private var history: [[ANSIRun]] = []
     @State private var readingBack = false
+    @State private var showsText = false
 
     private var pane: Pane? { connection.snapshot?.panes.first { $0.id == paneID } }
     private var agent: Agent? { connection.snapshot?.agents.first { $0.paneID == paneID } }
@@ -108,6 +110,18 @@ struct PaneView: View {
         .navigationSubtitle(subtitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(theme.backgroundColor, for: .navigationBar)
+        .toolbar {
+            if let harness = agent?.agent, !connection.missingIntegrations.filter({ $0.target == harness }).isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    IntegrationOffer(connection: connection, harness: harness, compact: true)
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Read as Text", systemImage: "text.alignleft") { showsText = true }
+                    .disabled(!connection.isLive || pane == nil)
+            }
+        }
+        .sheet(isPresented: $showsText) { TerminalText(connection: connection, paneID: paneID, cwd: pane?.cwd) }
         .onAppear { terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
         .onChange(of: theme) { _, theme in terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
         .onChange(of: settings.font) { terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
@@ -203,11 +217,11 @@ struct PaneView: View {
 
     private func didStart(_ agent: Agent, _ address: PaneAddress) {
         let source = Route.terminal(connection.address(paneID: paneID))
-        guard model.navigationPath.last == source else { return }
+        guard scene.navigationPath.last == source else { return }
         if agent.hasTranscript {
-            model.navigationPath[model.navigationPath.count - 1] = .conversation(address)
+            scene.navigationPath[scene.navigationPath.count - 1] = .conversation(address)
         } else if address.paneID != paneID {
-            model.navigationPath[model.navigationPath.count - 1] = .terminal(address)
+            scene.navigationPath[scene.navigationPath.count - 1] = .terminal(address)
         }
     }
 
@@ -217,15 +231,17 @@ struct PaneView: View {
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
         sending = true
         defer { sending = false }
+        // Cleared before delivery so the keyboard stays up and anything typed meanwhile is kept.
+        draft = ""
         do {
             try await deliverDraft(text, attachments: attachments, connection: connection, pane: paneID,
                                    agent: agent != nil, retention: settings.attachmentRetention) { updated in
                 attachments = updated
             }
-            draft = ""
             attachments = []
             sentCount += 1
         } catch {
+            draft = restoringDraft(text, before: draft)
             sendError = "The message wasn't delivered completely. Your draft and attachments are still here. \(error.localizedDescription)"
         }
     }

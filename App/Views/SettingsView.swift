@@ -31,21 +31,24 @@ struct SettingsView: View {
                     }
                 }
 
-                Section {
-                    Picker("Detail", selection: $settings.detailLevel) {
-                        Text("Full").tag(DetailLevel.full)
-                        Text("Folded").tag(DetailLevel.folded)
-                        Text("Digest").tag(DetailLevel.digest)
+                Section("Conversations") {
+                    LabeledContent("Detail") {
+                        Menu {
+                            DetailLevelOptions(selection: $settings.detailLevel)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(DetailLevelOptions.title(settings.detailLevel))
+                                Image(systemName: "chevron.up.chevron.down").imageScale(.small)
+                            }
+                            .foregroundStyle(.secondary)
+                        }
+                        .tint(.secondary)
                     }
                     Toggle("Show Working Subagents", isOn: $settings.showWorkingSubagents)
-                } header: {
-                    Text("Conversations")
-                } footer: {
-                    Text("Full expands every step. Folded groups steps. Digest keeps messages and turning points. Show Working Subagents pins subagents that are still running above the conversation; finished ones move into it.")
+                    NavigationLink("Launch Presets") { PresetsEditor() }
                 }
 
-
-                Section {
+                Section("Inbox") {
                     Picker("View", selection: $settings.inboxView) {
                         ForEach(InboxKind.allCases) { Text($0.label).tag($0) }
                     }
@@ -57,12 +60,10 @@ struct SettingsView: View {
                         ForEach(InboxSort.allCases) { Text($0.label).tag($0) }
                     }
                     Toggle("Collapse Idle Agents", isOn: $settings.collapseIdle)
-                } header: {
-                    Text("Inbox")
-                } footer: {
-                    Text("Recent orders agents by their last message sent or received. Priority pins what needs you, then orders by status. Rows hold still while you scroll.")
+                    Toggle("Message Previews", isOn: $settings.inboxPreviews)
                 }
                 NotificationSettings()
+                PrivacySettings()
                 Section("Terminal") {
                     Picker("Font", selection: $settings.font) {
                         ForEach(TerminalFont.allCases) { Text($0.label).tag($0) }
@@ -76,23 +77,21 @@ struct SettingsView: View {
 
                 Section {
                     Toggle("Haptics", isOn: $settings.haptics)
-                } footer: {
-                    Text("A tap when a message is delivered and a warning when an agent needs you.")
                 }
 
                 Section {
-                    Toggle("Autocorrect Messages", isOn: $settings.composerAutocorrect)
+                    Toggle("Autocorrect", isOn: $settings.composerAutocorrect)
                     Toggle("On-screen Return Sends", isOn: $settings.returnKeySends)
-                } footer: {
-                    Text("Autocorrect is off by default to keep commands exactly as typed. With a hardware keyboard, Return and ⌘Return always send; ⇧Return or ⌥Return adds a line.")
-                }
-                Section {
                     Picker("Keep Uploads", selection: $settings.attachmentRetention) {
                         ForEach(AttachmentRetention.allCases) { Text($0.label).tag($0) }
                     }
+                    NavigationLink("Snippets") { SnippetsEditor() }
+                } header: {
+                    Text("Messages")
                 } footer: {
-                    Text("Uploads go to the host's temporary folder. omp, Claude Code and Codex copy images into their own history when sent, so these are swept after this long.")
+                    Text("Expired uploads are removed from the host at your next upload.")
                 }
+
                 Section {
                     ForEach(model.profiles) { profile in
                         NavigationLink {
@@ -105,8 +104,6 @@ struct SettingsView: View {
                     Button("Add Host…", systemImage: "plus") { addingHost = true }
                 } header: {
                     Text("Hosts")
-                } footer: {
-                    if model.profiles.count > 1 { Text("Touch and hold a host to drag it into a new order. Swipe the title to move between them.") }
                 }
 
                 AuthorizedKeySection()
@@ -140,6 +137,128 @@ struct SettingsView: View {
     }
 }
 
+private struct PrivacySettings: View {
+    @Environment(Settings.self) private var settings
+    @State private var deletingCopies = false
+    @State private var failure: String?
+
+    var body: some View {
+        @Bindable var settings = settings
+        Section {
+            Toggle("App Lock", isOn: $settings.appLock)
+            Toggle("Keep Offline Copies", isOn: Binding(get: { settings.offlineTranscripts }, set: { on in
+                if on { settings.offlineTranscripts = true }
+                else { deletingCopies = true }
+            }))
+            NavigationLink("Replace This Device's Key…") { DeviceKeyReplacement() }
+        } header: {
+            Text("Privacy")
+        } footer: {
+            Text("App Lock requires Face ID or your passcode at launch and after 30 seconds away. Offline copies keep up to 20 conversations, at most 4 MB each, protected while your device is locked. Turning this off deletes the copies.")
+        }
+        .confirmationDialog("Delete all offline copies?", isPresented: $deletingCopies, titleVisibility: .visible) {
+            Button("Delete Copies", role: .destructive) {
+                do {
+                    try TranscriptCache.removeAll()
+                    settings.offlineTranscripts = false
+                } catch { failure = error.localizedDescription }
+            }
+        }
+        .alert("Couldn't Delete Copies", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK") { failure = nil }
+        } message: { Text(failure ?? "") }
+    }
+}
+
+private struct DeviceKeyReplacement: View {
+    @Environment(AppModel.self) private var model
+    @State private var pending = DeviceKey.rotation()
+    @State private var confirmingRemoval = false
+    @State private var failure: String?
+    @State private var completed = false
+
+    var body: some View {
+        Form {
+            if let pending {
+                Section("New Public Key") {
+                    Text(pending.publicKeyLine).font(.caption.monospaced()).textSelection(.enabled)
+                    ShareLink("Share Public Key", item: pending.publicKeyLine)
+                }
+                Section {
+                    ForEach(pending.hosts.keys.sorted { $0.uuidString < $1.uuidString }, id: \.self) { id in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(pending.hosts[id] ?? "Host")
+                            if pending.confirmed.contains(id) {
+                                Label("Confirmed by you", systemImage: "checkmark")
+                            } else if pending.testing.contains(id) {
+                                Text("New key selected for the next connection. Close and reopen Herdwick, connect to this host, then confirm here.").font(.caption)
+                                Button("I Connected Successfully with the New Key") {
+                                    update { $0.confirmed.insert(id) }
+                                }
+                            } else {
+                                Button("Use New Key on Next Connection") { update { $0.testing.insert(id) } }
+                            }
+                            if pending.testing.contains(id) || pending.confirmed.contains(id) {
+                                Button("Use Old Key Again") {
+                                    update { $0.testing.remove(id); $0.confirmed.remove(id) }
+                                }
+                            }
+                        }
+                    }
+                } header: { Text("Host Progress") } footer: {
+                    Text("Append the new public key to authorized_keys on every host first; keep the old line. Confirmation is your verification, not an automatic connection test. Unreachable hosts must stay pending.")
+                }
+                Section {
+                    Button("Remove Old Key…", role: .destructive) { confirmingRemoval = true }
+                        .disabled(!Set(pending.hosts.keys).isSubset(of: pending.confirmed))
+                } footer: {
+                    Text("Removes the old private key from this device only. Afterward, remove its public-key line from each host yourself.")
+                }
+            } else {
+                Section {
+                    Text(completed ? "The new device key is now active." : "Generate a replacement, install its public key on each host, and confirm every host before removing the old key.")
+                    Button("Generate Replacement Key") {
+                        do { pending = try DeviceKey.beginRotation(profiles: model.profiles) }
+                        catch { failure = error.localizedDescription }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Replace Device Key")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { includeNewHosts() }
+        .onChange(of: model.profiles) { includeNewHosts() }
+        .confirmationDialog("Permanently remove the old private key?", isPresented: $confirmingRemoval, titleVisibility: .visible) {
+            Button("Remove Old Key", role: .destructive) {
+                guard let pending else { return }
+                do {
+                    try DeviceKey.finishRotation(pending, profiles: model.profiles)
+                    self.pending = nil
+                    completed = true
+                } catch { failure = error.localizedDescription }
+            }
+        }
+        .alert("Key Replacement Failed", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK") { failure = nil }
+        } message: { Text(failure ?? "") }
+    }
+
+    private func update(_ change: (inout DeviceKey.Rotation) -> Void) {
+        guard var next = pending else { return }
+        change(&next)
+        do { try DeviceKey.saveRotation(next); pending = next }
+        catch { failure = error.localizedDescription }
+    }
+
+    private func includeNewHosts() {
+        update { next in
+            for profile in model.profiles where profile.auth == .deviceKey {
+                next.hosts[profile.id] = profile.name
+            }
+        }
+    }
+}
+
 /// Local alerts come while Herdwick is open or refreshing in the background, which iOS
 /// schedules as it sees fit; alerts while away are the opt-in push path.
 private struct NotificationSettings: View {
@@ -156,8 +275,6 @@ private struct NotificationSettings: View {
             }
         } header: {
             Text("Notifications")
-        } footer: {
-            Text("Alerts come while Herdwick is open, or when iOS lets it check in the background, which can be late. Needs You also badges the app icon. Opening a finished agent, at its latest message, marks it read.")
         }
         if Push.relay != nil {
             Section {
@@ -169,8 +286,23 @@ private struct NotificationSettings: View {
                 })
                 .disabled(!settings.notifyNeedsYou && !settings.notifyFinished)
                 NavigationLink("How It Works") { PushDisclosure() }
+                if settings.pushWhileAway, let push = model.push {
+                    ForEach(push.coverage.values.sorted { $0.id < $1.id }) { row in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(model.profiles.first { $0.id == row.hostID }?.name ?? "Host") · \(row.session)")
+                            Group {
+                                if row.message == "Last armed", let date = row.lastArmed {
+                                    Text("Last armed \(date.formatted(date: .abbreviated, time: .shortened))")
+                                } else {
+                                    Text(row.message)
+                                }
+                            }
+                            .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
             } footer: {
-                Text("While Herdwick is closed, your computers send these alerts on time through Herdwick's push relay. Nothing but ids leaves them.")
+                Text("No names, paths or conversation content are sent. Last armed is when a watcher was handed off, not proof of delivery; watchers expire after 24 hours, and hosts that weren't connected aren't covered.")
             }
         }
     }
@@ -207,6 +339,33 @@ private struct PushDisclosure: View {
         }
         .navigationTitle("Alerts While Away")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// The detail levels as menu items, each with a subtitle. A Picker can't carry subtitles in a
+/// menu (its tag spreads to every Text), but a Toggle's label can.
+struct DetailLevelOptions: View {
+    @Binding var selection: DetailLevel
+
+    static func title(_ level: DetailLevel) -> String {
+        switch level {
+        case .full: "Full"
+        case .folded: "Folded"
+        case .digest: "Digest"
+        }
+    }
+
+    var body: some View {
+        option(.full, "Every step, expanded")
+        option(.folded, "Steps grouped")
+        option(.digest, "Messages and turning points")
+    }
+
+    private func option(_ level: DetailLevel, _ subtitle: String) -> some View {
+        Toggle(isOn: Binding(get: { selection == level }, set: { if $0 { selection = level } })) {
+            Text(Self.title(level))
+            Text(subtitle)
+        }
     }
 }
 
@@ -292,6 +451,7 @@ struct HostEditor: View {
     @State private var address = ""
     @State private var password = ""
     @State private var confirmDelete = false
+    @State private var confirmForgetKey = false
 
     var body: some View {
         Form {
@@ -318,8 +478,22 @@ struct HostEditor: View {
                     SecureField("New password (leave empty to keep)", text: $password)
                 }
             }
+            if let link = model.connections.first(where: { $0.profile.id == profile.id }), !link.missingIntegrations.isEmpty {
+                Section {
+                    IntegrationOffer(connection: link)
+                } header: {
+                    Text("Integrations")
+                } footer: {
+                    Text("Lets Herdwick open these agents' conversations and see when they're working, waiting for you or idle. Agents you don't use don't need one.")
+                }
+            }
             Section {
-                Button("Forget Pinned Host Key") { Keychain.delete(profile.hostKeyAccount) }
+                Button("Forget Pinned Host Key…", role: .destructive) { confirmForgetKey = true }
+                    .confirmationDialog("Forget the pinned host key?", isPresented: $confirmForgetKey, titleVisibility: .visible) {
+                        Button("Forget Key", role: .destructive) { Keychain.delete(profile.hostKeyAccount) }
+                    } message: {
+                        Text("The next connection trusts whatever key the host presents, including an impostor's.")
+                    }
             } footer: {
                 Text("The next connection trusts whatever key the host presents.")
             }
@@ -353,5 +527,70 @@ struct HostEditor: View {
         }
         model.update(profile)
         dismiss()
+    }
+}
+
+/// Text the composer's + menu inserts. Nothing here is sent until you send it.
+private struct SnippetsEditor: View {
+    @Environment(Settings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        Form {
+            Section {
+                ForEach($settings.snippets) { $snippet in
+                    VStack(alignment: .leading) {
+                        TextField("Title", text: $snippet.title).font(.headline)
+                        TextField("Text", text: $snippet.text, axis: .vertical).lineLimit(1...6)
+                    }
+                }
+                .onDelete { settings.snippets.remove(atOffsets: $0) }
+                .onMove { settings.snippets.move(fromOffsets: $0, toOffset: $1) }
+                Button("Add Snippet", systemImage: "plus") { settings.snippets.append(Snippet(title: "", text: "")) }
+            } footer: {
+                Text("Inserted from the + menu next to the message field.")
+            }
+        }
+        .navigationTitle("Snippets")
+        .toolbar { EditButton() }
+    }
+}
+
+/// A named agent start: its kind plus arguments passed exactly as written, one per line.
+private struct PresetsEditor: View {
+    @Environment(Settings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        Form {
+            Section {
+                ForEach($settings.launchPresets) { $preset in
+                    VStack(alignment: .leading) {
+                        TextField("Name", text: $preset.name).font(.headline)
+                        Picker("Agent", selection: $preset.kind) {
+                            ForEach(["omp", "claude", "codex"], id: \.self) { Text(agentKindLabel($0)).tag($0) }
+                        }
+                        TextField("Arguments, one per line", text: Binding {
+                            preset.arguments.joined(separator: "\n")
+                        } set: {
+                            preset.arguments = $0.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                        }, axis: .vertical)
+                        .lineLimit(1...6)
+                        .font(.body.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    }
+                }
+                .onDelete { settings.launchPresets.remove(atOffsets: $0) }
+                .onMove { settings.launchPresets.move(fromOffsets: $0, toOffset: $1) }
+                Button("Add Preset", systemImage: "plus") {
+                    settings.launchPresets.append(LaunchPreset(name: "", kind: "omp", arguments: []))
+                }
+            } footer: {
+                Text("Arguments go to the agent exactly as written, one per line, with no shell in between: no quoting, variables or globs. Blank lines are ignored.")
+            }
+        }
+        .navigationTitle("Launch Presets")
+        .toolbar { EditButton() }
     }
 }

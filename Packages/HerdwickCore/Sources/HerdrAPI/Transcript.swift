@@ -41,6 +41,8 @@ public enum TranscriptEntry: Sendable, Equatable {
     case subagentEvent(SubagentActivity)
     case peerMessage(id: String, peer: String, text: String, outbound: Bool)
     case metadata(type: String)
+    /// The agent finished its turn (answered, stopped or failed) and waits for the user.
+    case turnEnded(at: Date?)
     case unknown(type: String, raw: String)
     case malformed(String)
 }
@@ -62,7 +64,7 @@ public struct TranscriptMessage: Sendable, Equatable {
     public let role: Role
     public let text: String
     public let thinking: String
-    public let imageCount: Int
+    public let images: [TranscriptImage]
     public let toolCalls: [ToolCall]
     public let toolCallId: String?
     public let isError: Bool
@@ -72,11 +74,11 @@ public struct TranscriptMessage: Sendable, Equatable {
     /// When the record was written; omp and Claude stamp every line.
     public let timestamp: Date?
 
-    public init(id: String, role: Role, text: String, thinking: String = "", imageCount: Int = 0,
+    public init(id: String, role: Role, text: String, thinking: String = "", images: [TranscriptImage] = [],
                 toolCalls: [ToolCall] = [], toolCallId: String? = nil, isError: Bool = false,
                 errorMessage: String? = nil, details: String? = nil, timestamp: Date? = nil) {
         self.id = id; self.role = role; self.text = text; self.thinking = thinking
-        self.imageCount = imageCount; self.toolCalls = toolCalls; self.toolCallId = toolCallId
+        self.images = images; self.toolCalls = toolCalls; self.toolCallId = toolCallId
         self.isError = isError; self.errorMessage = errorMessage; self.details = details
         self.timestamp = timestamp
     }
@@ -86,6 +88,68 @@ public struct TranscriptMessage: Sendable, Equatable {
         guard let string = value as? String else { return nil }
         return (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(string))
             ?? (try? Date.ISO8601FormatStyle().parse(string))
+    }
+}
+
+/// Usage observed in loaded records, not a provider balance or lifetime estimate.
+public struct TranscriptUsage: Sendable, Equatable {
+    public var inputTokens: Int
+    public var outputTokens: Int
+    public var cost: Double?
+}
+
+/// A complete log line. Keep ancestry outside decoded entries: one line can emit several.
+public struct TranscriptRecord: Sendable, Equatable {
+    public let id: String?
+    public let parentId: String?
+    public let entries: [TranscriptEntry]
+    public let format: TranscriptFormat
+    public let isBranchBearing: Bool
+    public let modelID: String?
+    public let thinkingLevel: String?
+    public let usage: TranscriptUsage?
+    let usageID: String?
+
+    static func decode(_ line: ArraySlice<UInt8>, format: TranscriptFormat) -> Self {
+        let r = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any] ?? [:]
+        let type = r["type"] as? String ?? ""
+        let message = r["message"] as? [String: Any] ?? [:]
+        var model: String?, thinking: String?, usage: TranscriptUsage?, usageID: String?
+        if format == .omp {
+            model = message["model"] as? String ?? (type == "model_change" ? r["modelId"] as? String : nil)
+            thinking = type == "thinking_level_change" ? r["thinkingLevel"] as? String : nil
+            if message["role"] as? String == "assistant", let u = message["usage"] as? [String: Any] {
+                usage = .init(inputTokens: (u["input"] as? Int ?? 0) + (u["cacheRead"] as? Int ?? 0) + (u["cacheWrite"] as? Int ?? 0),
+                              outputTokens: u["output"] as? Int ?? 0, cost: (u["cost"] as? [String: Any])?["total"] as? Double)
+                usageID = r["id"] as? String
+            }
+        } else if format == .claude {
+            model = message["model"] as? String
+            if type == "assistant", let u = message["usage"] as? [String: Any] {
+                usage = .init(inputTokens: (u["input_tokens"] as? Int ?? 0) + (u["cache_read_input_tokens"] as? Int ?? 0) + (u["cache_creation_input_tokens"] as? Int ?? 0),
+                              outputTokens: u["output_tokens"] as? Int ?? 0, cost: nil)
+                // Claude emits multiple content blocks with the same API message id.
+                usageID = message["id"] as? String ?? r["uuid"] as? String
+            }
+        } else {
+            let p = r["payload"] as? [String: Any] ?? [:]
+            if type == "turn_context" {
+                model = p["model"] as? String
+                thinking = p["effort"] as? String
+            }
+            // Use only per-turn deltas. Cumulative totals include unloaded history.
+            if type == "event_msg", p["type"] as? String == "token_count",
+               let info = p["info"] as? [String: Any], let u = info["last_token_usage"] as? [String: Any],
+               let total = info["total_token_usage"], let data = try? JSONSerialization.data(withJSONObject: total, options: [.sortedKeys]) {
+                usage = .init(inputTokens: u["input_tokens"] as? Int ?? 0, outputTokens: u["output_tokens"] as? Int ?? 0, cost: nil)
+                usageID = String(decoding: data, as: UTF8.self)
+            }
+        }
+        return .init(id: format == .omp ? r["id"] as? String : r["uuid"] as? String,
+                     parentId: format == .omp ? r["parentId"] as? String : nil,
+                     entries: TranscriptReader.entries(line, format: format, parsed: r), format: format,
+                     isBranchBearing: format == .omp && ["message", "custom_message", "branch_summary", "compaction"].contains(type),
+                     modelID: model, thinkingLevel: thinking, usage: usage, usageID: usageID)
     }
 }
 
@@ -104,19 +168,25 @@ public struct TranscriptReader: Sendable {
     }
 
     public mutating func append(_ bytes: [UInt8]) -> [TranscriptEntry] {
+        appendRecords(bytes).flatMap(\.entries)
+    }
+
+    public mutating func appendRecords(_ bytes: [UInt8]) -> [TranscriptRecord] {
         pending.append(contentsOf: bytes)
-        var entries: [TranscriptEntry] = []
+        var records: [TranscriptRecord] = []
         var start = 0
         while let newline = pending[start...].firstIndex(of: 0x0A) {
             let line = pending[start..<newline]
             start = newline + 1
             if skipsPartialLine { skipsPartialLine = false; continue }
             if line.allSatisfy({ $0 == 0x20 || $0 == 0x0D }) { continue }
-            entries.append(contentsOf: Self.entries(line, format: format))
+            records.append(.decode(line, format: format))
         }
-        pending.removeFirst(start)
+        // A fresh array, not removeFirst: that keeps the capacity of the largest read (a
+        // multi-megabyte head) alive for the whole conversation.
+        if start > 0 { pending = Array(pending[start...]) }
         consumedBytes += start
-        return entries
+        return records
     }
 
     /// The title from the file's first line, which omp rewrites in place and a tail read never sees.
@@ -127,24 +197,30 @@ public struct TranscriptReader: Sendable {
         return title
     }
 
-    static func entries(_ line: ArraySlice<UInt8>, format: TranscriptFormat) -> [TranscriptEntry] {
+    static func entries(_ line: ArraySlice<UInt8>, format: TranscriptFormat, parsed: [String: Any]? = nil) -> [TranscriptEntry] {
         switch format {
         case .omp:
-            if let record = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
-               record["type"] as? String == "custom_message",
-               record["customType"] as? String == "async-result" {
+            guard let record = parsed ?? (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any] else {
+                return [.malformed(String(decoding: line.prefix(2048), as: UTF8.self))]
+            }
+            if record["type"] as? String == "custom_message", record["customType"] as? String == "async-result" {
                 let activities = asyncActivities(record)
                 if !activities.isEmpty { return activities.map(TranscriptEntry.subagentEvent) }
             }
-            return [entry(line)]
-        case .claude: return ClaudeTranscript.entries(line)
-        case .codex: return CodexTranscript.entries(line)
+            let entry = entry(record, line: line)
+            // Every stop but a tool call ends the turn: `stop`, `aborted`, `error`, `length`.
+            if case .message(let message) = entry, message.role == .assistant,
+               let stop = (record["message"] as? [String: Any])?["stopReason"] as? String, stop != "toolUse" {
+                return [entry, .turnEnded(at: message.timestamp)]
+            }
+            return [entry]
+        case .claude: return ClaudeTranscript.entries(line, parsed: parsed)
+        case .codex: return CodexTranscript.entries(line, parsed: parsed)
         }
     }
 
-    static func entry(_ line: ArraySlice<UInt8>) -> TranscriptEntry {
-        guard let record = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
-              let type = record["type"] as? String else {
+    static func entry(_ record: [String: Any], line: ArraySlice<UInt8>) -> TranscriptEntry {
+        guard let type = record["type"] as? String else {
             return .malformed(String(decoding: line.prefix(2048), as: UTF8.self))
         }
         switch type {
@@ -162,7 +238,7 @@ public struct TranscriptReader: Sendable {
                 return .unknown(type: type, raw: raw(line))
             }
             return .toolStarted(id: id, name: data["toolName"] as? String ?? "tool")
-        case "compaction":
+        case "branch_summary", "compaction":
             return .compaction(summary: record["shortSummary"] as? String ?? record["summary"] as? String ?? "")
         case "custom_message":
             guard record["display"] as? Bool == true else { return .metadata(type: type) }
@@ -195,7 +271,7 @@ public struct TranscriptReader: Sendable {
             role: role,
             text: content.text,
             thinking: content.thinking,
-            imageCount: content.images,
+            images: content.images,
             toolCalls: calls,
             toolCallId: body["toolCallId"] as? String,
             isError: body["isError"] as? Bool ?? false,
@@ -206,14 +282,14 @@ public struct TranscriptReader: Sendable {
     }
 
     /// omp content is a plain string or a list of text/thinking/toolCall/image blocks.
-    private static func text(_ content: Any?) -> (text: String, thinking: String, images: Int) {
-        if let string = content as? String { return (string, "", 0) }
-        var text: [String] = [], thinking: [String] = [], images = 0
+    private static func text(_ content: Any?) -> (text: String, thinking: String, images: [TranscriptImage]) {
+        if let string = content as? String { return (string, "", []) }
+        var text: [String] = [], thinking: [String] = [], images: [TranscriptImage] = []
         for block in content as? [[String: Any]] ?? [] {
             switch block["type"] as? String {
             case "text": if let value = block["text"] as? String { text.append(value) }
             case "thinking": if let value = block["thinking"] as? String { thinking.append(value) }
-            case "image": images += 1
+            case "image": if let image = TranscriptImage.omp(block) { images.append(image) }
             default: break
             }
         }
@@ -275,7 +351,10 @@ public struct TranscriptReader: Sendable {
 public struct AskOption: Sendable, Equatable {
     public let label: String
     public let description: String?
-    public init(label: String, description: String? = nil) { self.label = label; self.description = description }
+    public let preview: String?
+    public init(label: String, description: String? = nil, preview: String? = nil) {
+        self.label = label; self.description = description; self.preview = preview
+    }
 }
 
 public struct AskAnswer: Sendable, Equatable {
@@ -285,10 +364,13 @@ public struct AskAnswer: Sendable, Equatable {
     public let custom: String?
     public let cancelled: Bool
     public let perQuestion: [String: [String]]
+    public let note: String?
+    public let perQuestionNotes: [String: String]
     public init(text: String, selected: [String] = [], custom: String? = nil, cancelled: Bool = false,
-                perQuestion: [String: [String]] = [:]) {
+                perQuestion: [String: [String]] = [:], note: String? = nil, perQuestionNotes: [String: String] = [:]) {
         self.text = text; self.selected = selected; self.custom = custom; self.cancelled = cancelled
         self.perQuestion = perQuestion
+        self.note = note; self.perQuestionNotes = perQuestionNotes
     }
 }
 
@@ -332,15 +414,17 @@ public struct ToolActivity: Sendable, Equatable {
     public var details: String?
     /// Claude's task list after this `TaskCreate`/`TaskUpdate`, folded from every earlier call.
     public var board: [TodoItem]?
+    /// Images the tool returned (a screenshot, a viewed file), shown by reference.
+    public var images: [TranscriptImage]
     public init(id: String, name: String, summary: String, arguments: String? = nil, state: State = .running,
-                output: String? = nil, details: String? = nil, board: [TodoItem]? = nil) {
+                output: String? = nil, details: String? = nil, board: [TodoItem]? = nil, images: [TranscriptImage] = []) {
         self.id = id; self.name = name; self.summary = summary; self.arguments = arguments
-        self.state = state; self.output = output; self.details = details; self.board = board
+        self.state = state; self.output = output; self.details = details; self.board = board; self.images = images
     }
 }
 public enum NoticeKind: Sendable, Equatable { case other, compaction, error }
 public enum ConversationItem: Identifiable, Sendable, Equatable {
-    case user(id: String, text: String, imageCount: Int)
+    case user(id: String, text: String, images: [TranscriptImage])
     case assistant(id: String, text: String)
     case thinking(id: String, text: String)
     case tool(ToolActivity)
@@ -373,6 +457,123 @@ public struct Conversation: Sendable {
     private var serial = 0
     /// Claude's task list, in creation order.
     private var tasks: [(id: String, subject: String, state: TodoItem.State)] = []
+    public private(set) var records: [TranscriptRecord] = []
+    public private(set) var activeLeafID: String?
+    public private(set) var hasIncompletePrefix = false
+    public private(set) var modelID: String?
+    public private(set) var thinkingLevel: String?
+    public private(set) var usage: TranscriptUsage?
+    public private(set) var pendingPlanReview: String?
+    private var recordIndex: [String: Int] = [:]
+    private var activeRecords: [Int] = []
+    private var usageByID: [String: TranscriptUsage] = [:]
+    private var proposal: (id: String, slug: String)?
+    private var hasTree = false
+
+    /// Retain the loaded window plus appends. Only omp has branch semantics.
+    public mutating func apply(records incoming: [TranscriptRecord]) {
+        for record in incoming {
+            if let id = record.id, recordIndex[id] != nil { continue }
+            let index = records.count
+            records.append(record)
+            if let id = record.id { recordIndex[id] = index }
+            // A file written without the tree (no record has a parent yet) is read in order;
+            // once any record names a parent, a parentless one is a root and may start a branch.
+            if record.parentId != nil { hasTree = true }
+            if record.format == .omp, record.parentId == nil, !hasTree {
+                activeRecords.append(index)
+                applyRecord(record)
+                if record.isBranchBearing, let id = record.id { activeLeafID = id }
+                continue
+            }
+            guard record.format == .omp, record.isBranchBearing, let id = record.id else {
+                if record.format == .omp, record.id != nil, activeLeafID != nil,
+                   record.parentId != activeLeafID,
+                   record.parentId != activeRecords.last.flatMap({ records[$0].id }) {
+                    // A title is global; other off-path metadata is retained until a
+                    // branch-bearing record actually selects that ancestry.
+                    for entry in record.entries { if case .title = entry { apply(entry) } }
+                    continue
+                }
+                activeRecords.append(index)
+                applyRecord(record)
+                continue
+            }
+            var predecessor = record.parentId
+            var seen = Set<String>()
+            while let key = predecessor, key != activeLeafID, seen.insert(key).inserted,
+                  let previous = recordIndex[key], !records[previous].isBranchBearing {
+                predecessor = records[previous].parentId
+            }
+            if predecessor == activeLeafID {
+                activeRecords.append(index)
+                applyRecord(record)
+            } else {
+                var path = [index], visited: Set<Int> = [index]
+                var parent = record.parentId
+                while let key = parent, let ancestor = recordIndex[key], visited.insert(ancestor).inserted {
+                    path.append(ancestor)
+                    parent = records[ancestor].parentId
+                }
+                path.reverse()
+                let incomplete = parent != nil
+                // An ancestor outside the loaded window cannot establish the earlier
+                // branch. Preserve only the existing prefix before our first known node.
+                let first = path.first ?? index
+                let prefix = incomplete ? activeRecords.prefix(while: { $0 < first }) : []
+                activeRecords = Array(prefix) + path
+                hasIncompletePrefix = incomplete
+                rebuild()
+            }
+            activeLeafID = id
+        }
+    }
+
+    private mutating func rebuild() {
+        let savedTitle = title
+        items.removeAll(keepingCapacity: true)
+        toolIndex.removeAll(keepingCapacity: true)
+        subagentIndex.removeAll(keepingCapacity: true)
+        subagentActivities.removeAll(keepingCapacity: true)
+        tasks.removeAll(keepingCapacity: true)
+        usageByID.removeAll(keepingCapacity: true)
+        serial = 0; modelID = nil; thinkingLevel = nil; usage = nil
+        proposal = nil; pendingPlanReview = nil
+        for index in activeRecords { applyRecord(records[index]) }
+        title = savedTitle ?? title
+    }
+
+    private mutating func applyRecord(_ record: TranscriptRecord) {
+        if let model = record.modelID { modelID = model }
+        if let level = record.thinkingLevel { thinkingLevel = level }
+        if let value = record.usage {
+            let key = record.usageID ?? "unidentified-\(usageByID.count)"
+            let old = usageByID.updateValue(value, forKey: key)
+            var total = usage ?? .init(inputTokens: 0, outputTokens: 0, cost: nil)
+            total.inputTokens += value.inputTokens - (old?.inputTokens ?? 0)
+            total.outputTokens += value.outputTokens - (old?.outputTokens ?? 0)
+            if let cost = value.cost { total.cost = (total.cost ?? 0) + cost - (old?.cost ?? 0) }
+            usage = total
+        }
+        if record.format == .omp {
+            for entry in record.entries {
+                guard case .message(let message) = entry else { continue }
+                if message.role == .user { proposal = nil; pendingPlanReview = nil }
+                for call in message.toolCalls {
+                    proposal = nil; pendingPlanReview = nil
+                    let args = Self.object(call.arguments)
+                    if call.name == "write", args["path"] as? String == "xd://propose",
+                       let slug = args["content"] as? String, !slug.isEmpty {
+                        proposal = (call.id, slug)
+                    }
+                }
+                if message.role == .toolResult, message.toolCallId == proposal?.id {
+                    pendingPlanReview = !message.isError && message.text.trimmingCharacters(in: .whitespacesAndNewlines) == "Plan ready for review." ? proposal?.slug : nil
+                }
+            }
+        }
+        apply(record.entries)
+    }
 
     public init() {}
 
@@ -408,7 +609,7 @@ public struct Conversation: Sendable {
         switch entry {
         case .title(let text):
             if !text.isEmpty { title = text }
-        case .metadata: break
+        case .metadata, .turnEnded: break
         case .message(let message):
             apply(message)
         case .toolStarted(let id, let name):
@@ -480,7 +681,7 @@ public struct Conversation: Sendable {
         let id = message.id.isEmpty ? nextID("message") : message.id
         switch message.role {
         case .user:
-            append(.user(id: id, text: message.text, imageCount: message.imageCount))
+            append(.user(id: id, text: message.text, images: message.images))
         case .assistant:
             if !message.thinking.isEmpty { append(.thinking(id: id + "-thinking", text: message.thinking)) }
             if !message.text.isEmpty { append(.assistant(id: id, text: message.text)) }
@@ -514,6 +715,7 @@ public struct Conversation: Sendable {
                 tool.state = message.isError ? .failed : .succeeded
                 tool.output = message.text.split(separator: "\n", omittingEmptySubsequences: false).prefix(200).joined(separator: "\n")
                 tool.details = message.details
+                tool.images = message.images
                 if tool.name == "wait" { applyWait(message.details) }
                 if ["Agent", "Task"].contains(tool.name) { applyClaudeResult(tool, message) }
                 if tool.name == "spawn_agent", let childID = Self.object(message.text)["agent_id"] as? String,
@@ -640,7 +842,7 @@ public struct Conversation: Sendable {
         let questions = list.enumerated().compactMap { index, question -> AskQuestion? in
             guard let text = question["question"] as? String else { return nil }
             let options = (question["options"] as? [[String: Any]] ?? []).compactMap { option in
-                (option["label"] as? String).map { AskOption(label: $0, description: option["description"] as? String) }
+                (option["label"] as? String).map { AskOption(label: $0, description: option["description"] as? String, preview: option["preview"] as? String) }
             }
             return AskQuestion(id: question["id"] as? String ?? "q\(index)", header: question["header"] as? String,
                                question: text, options: options,
@@ -672,14 +874,17 @@ public struct Conversation: Sendable {
                              cancelled: message.isError || per.isEmpty, perQuestion: per)
         }
         let parts = (details["results"] as? [[String: Any]]) ?? [details]
+        var notes: [String: String] = [:]
         for part in parts {
             let chosen = part["selectedOptions"] as? [String] ?? []
             let typed = part["customInput"] as? String
             selected += chosen
             if custom == nil { custom = typed }
             if let question = part["question"] as? String { per[question] = chosen + [typed].compactMap { $0 } }
+            if let question = part["question"] as? String, let note = part["note"] as? String { notes[question] = note }
         }
         return AskAnswer(text: message.text, selected: selected, custom: custom,
-                         cancelled: message.isError || (selected.isEmpty && custom == nil), perQuestion: per)
+                         cancelled: message.isError || (selected.isEmpty && custom == nil), perQuestion: per,
+                         note: details["note"] as? String, perQuestionNotes: notes)
     }
 }

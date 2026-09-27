@@ -23,21 +23,51 @@ public enum PushWatch {
         /// States worth an alert: `blocked`, `done`.
         public var states: [String]
         public var ttl: Duration
+        public var installationID: UUID
+        public var secret: String
+        public var mutes: [Mute]
+        public var activity: Activity?
+
+        public struct Activity: Sendable, Equatable {
+            public var pane: String
+            public var token: String
+            public init(pane: String, token: String) {
+                self.pane = pane
+                self.token = token
+            }
+        }
+
+        public struct Mute: Sendable, Equatable {
+            public var pane: String
+            public var reference: String
+            public var expires: Int
+            public init(pane: String, reference: String, expires: Int) {
+                self.pane = pane
+                self.reference = reference
+                self.expires = expires
+            }
+        }
 
         public init(relay: URL, deviceToken: String, environment: String, hostID: UUID,
-                    states: [String], ttl: Duration = .seconds(24 * 60 * 60)) {
+                    states: [String], installationID: UUID, secret: String, mutes: [Mute] = [],
+                    activity: Activity? = nil, ttl: Duration = .seconds(24 * 60 * 60)) {
             self.relay = relay
             self.deviceToken = deviceToken
             self.environment = environment
             self.hostID = hostID
             self.states = states
             self.ttl = ttl
+            self.installationID = installationID
+            self.secret = secret
+            self.mutes = mutes
+            self.activity = activity
         }
     }
 
     public enum WatchError: Error, Equatable {
         /// A value would not be safe inside the watcher's JSON or shell.
         case unsafe(String)
+        case handoffFailed
     }
 
     /// Starts (or restarts) the watcher for `session`.
@@ -47,14 +77,20 @@ public enum PushWatch {
 
     /// Stops the watcher for `session`, if one runs, and removes its files unless another
     /// session's watcher still needs them.
-    public static func disarm(session: String, runner: any CommandRunner) async throws {
+    public static func disarm(installationID: UUID, hostID: UUID, session: String, runner: any CommandRunner) async throws {
         try check(session, allowed: safeName, "session")
         try await run("""
-            dir="$HOME/.herdwick"
+            dir="$HOME/.herdwick/\(installationID.uuidString)-\(hostID.uuidString)"
             pid="$dir/watch.\(session).pid"
-            if [ -f "$pid" ]; then kill "$(cat "$pid")" 2>/dev/null || true; rm -f "$pid"; fi
-            ls "$dir"/watch.*.pid >/dev/null 2>&1 || { rm -f "$dir/push.env" "$dir/watch.sh"; rmdir "$dir" 2>/dev/null; }
-            true
+            if [ -f "$pid" ]; then
+                old=$(cat "$pid")
+                kill "$old" 2>/dev/null || true
+                n=0; while kill -0 "$old" 2>/dev/null && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+                kill -0 "$old" 2>/dev/null && exit 1
+                rm -f "$pid" "$dir/push.\(session).env"
+            fi
+            ls "$dir"/watch.*.pid >/dev/null 2>&1 || { rm -f "$dir/watch.sh"; rmdir "$dir" 2>/dev/null || true; }
+            echo HERDWICK_OK
             """, runner: runner)
     }
 
@@ -65,7 +101,11 @@ public enum PushWatch {
         do {
             try await channel.write(Array(program.utf8))
             try await channel.closeInput()
-            for try await _ in channel.output {}
+            var output = Data()
+            for try await bytes in channel.output { output.append(contentsOf: bytes) }
+            guard String(decoding: output, as: UTF8.self).contains("HERDWICK_OK") else {
+                throw WatchError.handoffFailed
+            }
         } catch {
             await channel.close()
             throw error
@@ -75,16 +115,30 @@ public enum PushWatch {
 
     static func installer(_ config: Config, session: String, herdrPath: String) throws -> String {
         try check(session, allowed: safeName, "session")
-        try check(config.deviceToken, allowed: "0123456789abcdef", "device token")
+        if !config.deviceToken.isEmpty || config.activity == nil {
+            try check(config.deviceToken, allowed: "0123456789abcdef", "device token")
+        }
         try check(config.environment, allowed: safeName, "environment")
-        try check(config.states.joined(), allowed: safeName, "states")
+        if !config.states.isEmpty { try check(config.states.joined(), allowed: safeName, "states") }
+        if let activity = config.activity {
+            try check(activity.pane, allowed: safeName + ":", "activity pane")
+            try check(activity.token, allowed: "0123456789abcdef", "activity token")
+        }
+        try check(config.secret, allowed: "0123456789abcdef", "secret")
+        for mute in config.mutes { try check(mute.pane, allowed: safeName + ":", "pane") }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        let mutes = try config.mutes.map {
+            let encoded = String(decoding: try encoder.encode($0.reference), as: UTF8.self)
+            return "\($0.pane)|\($0.expires)|\(Data(encoded.dropFirst().dropLast().utf8).base64EncodedString())"
+        }.joined(separator: "\n")
         let relay = config.relay.absoluteString
         guard config.relay.scheme == "https", !relay.contains("'") else { throw WatchError.unsafe("relay") }
         let ttl = Int(config.ttl.components.seconds)
         return """
             set -e
             umask 077
-            dir="$HOME/.herdwick"
+            dir="$HOME/.herdwick/\(config.installationID.uuidString)-\(config.hostID.uuidString)"
             mkdir -p "$dir"
             # Stop a previous watcher first: on its way out it may clear these files.
             pid="$dir/watch.\(session).pid"
@@ -93,20 +147,29 @@ public enum PushWatch {
                 rm -f "$pid"
                 kill "$old" 2>/dev/null || true
                 n=0; while kill -0 "$old" 2>/dev/null && [ $n -lt 20 ]; do sleep 0.1; n=$((n + 1)); done
+                kill -0 "$old" 2>/dev/null && exit 1
             fi
-            cat > "$dir/push.env" <<'HERDWICK_ENV'
+            cat > "$dir/push.\(session).env" <<'HERDWICK_ENV'
             HW_URL='\(relay.hasSuffix("/") ? String(relay.dropLast()) : relay)'
             HW_TOKEN='\(config.deviceToken)'
             HW_ENV='\(config.environment)'
             HW_HOST='\(config.hostID.uuidString)'
             HW_STATES='\(config.states.joined(separator: " "))'
             HW_TTL=\(ttl)
+            HW_SECRET='\(config.secret)'
+            HW_MUTES='\(mutes)'
+            HW_ACTIVITY_PANE='\(config.activity?.pane ?? "")'
+            HW_ACTIVITY_TOKEN='\(config.activity?.token ?? "")'
             HERDWICK_ENV
-            cat > "$dir/watch.sh" <<'HERDWICK_WATCH'
+            cat > "$dir/watch.sh.new.$$" <<'HERDWICK_WATCH'
             \(script)
             HERDWICK_WATCH
+            mv "$dir/watch.sh.new.$$" "$dir/watch.sh"
             nohup /bin/sh "$dir/watch.sh" \(shellQuote(herdrPath)) \(session) >/dev/null 2>&1 </dev/null &
             echo $! > "$pid"
+            sleep 0.1
+            kill -0 "$(cat "$pid")"
+            echo HERDWICK_OK
             """
     }
 
@@ -122,8 +185,8 @@ public enum PushWatch {
         #!/bin/sh
         # Herdwick push watcher: armed while the iPhone app is away, killed when it returns.
         herdr=$1 session=$2
-        dir="$HOME/.herdwick"
-        . "$dir/push.env" || exit 1
+        dir=$(dirname "$0")
+        . "$dir/push.$session.env" || exit 1
         run="$dir/run.$session.$$"
         mkdir -p "$run" || exit 1
         deadline=$(( $(date +%s) + ${HW_TTL:-86400} ))
@@ -133,31 +196,64 @@ public enum PushWatch {
             trap - TERM INT HUP
             reap $$
             rm -rf "$run"
-            # Leave nothing behind once no watcher remains.
-            [ "$(cat "$dir/watch.$session.pid" 2>/dev/null)" = $$ ] && rm -f "$dir/watch.$session.pid"
-            ls "$dir"/watch.*.pid >/dev/null 2>&1 || { rm -f "$dir/push.env" "$dir/watch.sh"; rmdir "$dir" 2>/dev/null; }
+            # Only remove this run's session files; never another owner's files.
+            if [ "$(cat "$dir/watch.$session.pid" 2>/dev/null)" = $$ ]; then
+                rm -f "$dir/watch.$session.pid" "$dir/push.$session.env"
+            fi
             exit 0
         }
         trap stop TERM INT HUP
 
         field() { printf '%s\n' "$1" | sed -n "s/.*\"$2\":\"\{0,1\}\([^\",}]*\).*/\1/p"; }
 
+        # Activity updates are independent of ordinary alert toggles and conversation mutes.
+        # The kind is domain-separated from alert MACs. APNs, not the NSE, consumes this payload.
+        activity() {
+            [ "$1" = "$HW_ACTIVITY_PANE" ] && [ -n "$HW_ACTIVITY_TOKEN" ] || return 0
+            [ ! -e "$run/activity-ended" ] || return 0
+            case $2 in working|blocked|done) ;; *) return 0 ;; esac
+            case $3 in ''|*[!0-9]*) return 0 ;; esac
+            mac=$(printf 'v1|liveactivity|%s|%s|%s|%s|%s' "$HW_HOST" "$session" "$1" "$2" "$3" |
+                openssl dgst -sha256 -hmac "$HW_SECRET" 2>/dev/null | sed 's/^.*= //')
+            auth=
+            case "$mac" in ''|*[!0-9a-f]*) ;; *) [ ${#mac} -eq 64 ] && auth=",\"mac\":\"$mac\"" ;; esac
+            curl -fsS -m 20 --retry 3 -o /dev/null -H 'content-type: application/json' \
+                --data-binary @- "$HW_URL/v1/push" <<EOF || true
+        {"kind":"liveactivity","token":"$HW_ACTIVITY_TOKEN","env":"$HW_ENV","host":"$HW_HOST","session":"$session","pane":"$1","state":"$2","seq":$3$auth}
+        EOF
+            [ "$2" != done ] || : > "$run/activity-ended"
+        }
+
         post() {
             case " $HW_STATES " in *" $2 "*) ;; *) return 0 ;; esac
             case $3 in ''|*[!0-9]*) set -- "$1" "$2" 0 ;; esac
+            ref=$(printf '%s\n' "$4" | sed -nE 's/.*"value":"(([^"\\]|\\.)*)".*/\1/p' | tr -d '\n' | base64 | tr -d '\n')
+            now=$(date +%s)
+            while IFS='|' read -r muted until reference; do
+                if [ "$muted" = "$1" ] && [ "$reference" = "$ref" ] &&
+                   { [ "$until" = 0 ] || [ "$until" -gt "$now" ]; }; then return 0; fi
+            done <<MUTES
+        $HW_MUTES
+        MUTES
+            mac=$(printf 'v1|%s|%s|%s|%s|%s' "$HW_HOST" "$session" "$1" "$2" "$3" |
+                openssl dgst -sha256 -hmac "$HW_SECRET" 2>/dev/null | sed 's/^.*= //')
+            auth=
+            case "$mac" in ''|*[!0-9a-f]*) ;; *) [ ${#mac} -eq 64 ] && auth=",\"mac\":\"$mac\"" ;; esac
             curl -fsS -m 20 --retry 3 -o /dev/null -H 'content-type: application/json' \
                 --data-binary @- "$HW_URL/v1/push" <<EOF || true
-        {"token":"$HW_TOKEN","env":"$HW_ENV","host":"$HW_HOST","session":"$session","pane":"$1","state":"$2","seq":$3}
+        {"token":"$HW_TOKEN","env":"$HW_ENV","host":"$HW_HOST","session":"$session","pane":"$1","state":"$2","seq":$3$auth}
         EOF
         }
 
         # One blocked wait at a time per pane: until it works, then until it stops.
         follow() {
-            while out=$("$herdr" --session "$session" agent wait "$1" --until working) &&
-                  out=$("$herdr" --session "$session" agent wait "$1"); do
+            while out=$("$herdr" --session "$session" agent wait "$1" --until working); do
+                activity "$1" working "$(field "$out" state_change_seq)"
+                out=$("$herdr" --session "$session" agent wait "$1") || break
                 state=$(field "$out" agent_status)
                 [ "$state" = idle ] && state=done
-                post "$1" "$state" "$(field "$out" state_change_seq)"
+                activity "$1" "$state" "$(field "$out" state_change_seq)"
+                post "$1" "$state" "$(field "$out" state_change_seq)" "$out"
             done
             rm -f "$run/$1"
         }

@@ -1,0 +1,20 @@
+
+ Run the bash command: echo approval-test > b.txt . Do nothing else.
+
+
+  󱊷 Working…
+
+╭─ Allow tool: write ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                     │
+│ Path: b.txt                                                                                                         │
+│ Content:                                                                                                            │
+│ approval-test                                                                                                       │
+│                                                                                                                     │
+│   Approve                                                                                                          │
+│    Deny                                                                                                             │
+│                                                                                                                     │
+│ up/down navigate  enter select  esc cancel                                                                          │
+│                                                                                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+proj
+

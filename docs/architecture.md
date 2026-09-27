@@ -10,6 +10,22 @@ Decisions as of 2026-09-24. The evidence behind them is in
 - Bundle ID `dev.btuckerc.herdwick`, team `7F3KV9WTNW`.
 - The Xcode project is generated from `project.yml` (XcodeGen), so every
   source file stays editable and reviewable from nous.
+- Extensions share the App Group `group.dev.btuckerc.herdwick`: `HerdwickNotifications`
+  (service), `HerdwickWidgets` (widgets and the Watch This Run Live Activity) and
+  `HerdwickShare` (share extension; `dev.btuckerc.herdwick.share`). The share extension
+  previews the item and offers "Decide in Herdwick" or an agent from the `AttentionSnapshot`
+  (items carry the conversation's `DraftStore` id when it has a transcript session), then
+  writes one complete-protection package (text and up to four images, 20 MB, no provider
+  URLs, the chosen agent as a hint) to `Imports/`. It can't open the app. The app never
+  presents shares on its own: `SharedInbox` lists them behind the Inbox's "Shared" row, where
+  the user picks the suggested agent, another live one or New Agent…. The package records
+  that conversation's draft as `staged` (one share per draft); its text joins the draft
+  unless the draft already contains it, and opening that conversation any way re-attaches
+  its images. Nothing is sent until the user sends; the package is deleted only after a
+  send from that conversation succeeds, or by swiping it off the shelf.
+- Multiple windows: each window has its own `SceneState` (host, navigation path, sheets,
+  import); `SceneCommands` adds ⌘N (New Agent), ⌘F (search), ⌘[ (back) and ⌘R (refresh).
+  A regular-width window uses a split view with the inbox as sidebar.
 
 ## Modules
 - `Packages/HerdwickCore`: plain Swift, builds and tests on Linux and iOS.
@@ -58,13 +74,16 @@ Decisions as of 2026-09-24. The evidence behind them is in
   (`dev.btuckerc.herdwick.refresh`) and the `herdwick://` URL scheme.
 - Notification service extension `HerdwickNotifications` (`Notifications/`): dresses
   alerts-while-away pushes from `snapshot` data and updates the snapshot and badge. The
-  push relay is `relay/` (Cloudflare Worker, `wrangler deploy` from there; secrets
-  `APNS_KEY`, `APNS_KEY_ID`, `APNS_TEAM_ID`); the app finds it through the
+  push relay is `relay/` (Cloudflare Worker, deployed with `scripts/mini/deploy-relay.sh`;
+  secrets `APNS_KEY`, `APNS_KEY_ID`, `APNS_TEAM_ID`); the app finds it through the
   `HerdwickPushRelay` Info.plist key.
 
 ## Remote commands (no server-side install)
-- Alerts while away: `PushWatch` writes `~/.herdwick/{push.env,watch.sh}` and runs the
-  watcher with `nohup` only while the app is away; see `design-v2.md` › Attention.
+- Alerts while away: `PushWatch` writes `~/.herdwick/<installation>-<host profile>/`
+  (`watch.sh`, `push.<session>.env`, `watch.<session>.pid`) and runs the watcher with
+  `nohup` only while the app is away; see `design-v2.md` › Attention. Needs `sh`, `curl` and
+  `openssl` on the host. Uploads go to `${TMPDIR:-/tmp}/herdwick-<uid>/<session>/` (mode 700)
+  and are swept by the chosen retention at the next upload; nothing else is written.
 - Discovery: `$SHELL -lc 'command -v herdr'`, then `~/.local/bin/herdr`,
   `/opt/homebrew/bin/herdr`, `/usr/local/bin/herdr`. Cache the path per host.
 - API: `herdr --session <s> remote-api-bridge` (probe with `--check`).
@@ -137,6 +156,24 @@ One SSH connection per host multiplexes every channel. States: `idle`,
    Keychain (this device only) and offer a copyable `authorized_keys` line, or
    accept a password.
 
+## Local privacy
+- Settings › Privacy enables app lock (device-owner authentication, including passcode)
+  on launch and after more than 30 seconds in the background. Every inactive scene has an
+  opaque window-level cover, including over sheets, even with app lock disabled.
+- Drafts migrate from `composerDrafts` only after an atomic complete-protection file write
+  succeeds. An unreadable store is never overwritten. Private files are excluded from backup.
+- Opt-in offline transcripts keep complete raw records in protected Application Support
+  files: at most 20 conversations, 4 MiB per conversation (80 MiB raw total plus bounded
+  identity/title envelopes), and no more than the requested history window. Replay uses the
+  existing parser, displays “Offline copy · <date>”, and must never count as read or enable
+  remote actions. Opt-out deletes files; host removal deletes that host's copies.
+- Key replacement retains the active private key while a second Keychain identity is pending.
+  Users install the new public key, select it for each host's next connection, reconnect,
+  then explicitly attest success per host. They can revert a host to the old key while
+  pending. Only confirmation for every applicable host permits destructive old-key removal.
+  This is manual verification, not an automated installation/test; remote old authorizations
+  are left intact for the user to remove afterward.
+
 ## UI
 Liquid Glass only on the control and navigation layer: toolbars, the composer,
 the key bar and ask option buttons; never on status, cards or content, and never
@@ -160,6 +197,16 @@ keyboard accessory (sticky ctrl) replaces the key bar.
   API-made Apple Distribution identity and App Store profiles
   (`scripts/mini/app-store-profiles.mjs`, rerun after adding a target or a
   capability), so no Apple ID has to be signed in to Xcode.
+- A new target or capability, in order: register its explicit bundle id in the developer
+  portal (Identifiers) with its capabilities; App Groups must also be pointed at
+  `group.dev.btuckerc.herdwick` there (Configure), which the App Store Connect API can't do.
+  Then add the id and profile name to `app-store-profiles.mjs` and to the `ExportOptions`
+  in `sync-and-build.sh`, set `PROVISIONING_PROFILE_SPECIFIER` in `project.yml`, and run
+  the profiles script on the Mini. Check a profile's entitlements with
+  `security cms -D -i <uuid>.mobileprovision | plutil -extract Entitlements xml1 -o - -`.
+- Relay: `scripts/mini/deploy-relay.sh` syncs and runs `wrangler deploy` on the Mini, the
+  deploy host (its Cloudflare login and the fallback are described in the script). Deploy
+  the relay before an app build that sends a new push kind.
 - `scripts/mini/build-tailscalekit.sh` builds `Frameworks/TailscaleKit.xcframework`
   from libtailscale with `GOTOOLCHAIN=go1.25.5`; Go 1.27's json/v2 breaks
   `go-json-experiment` ("undefined: json.SkipFunc").

@@ -4,6 +4,7 @@ import SwiftUI
 struct MachinesView: View {
     @Environment(AppModel.self) private var model
     @Environment(Settings.self) private var settings
+    @Environment(SceneState.self) private var scene
     @State private var collapsed: Set<SessionAddress> = []
     @State private var expanded: Set<SessionAddress> = []
     @State private var pendingClose: CloseTarget?
@@ -27,11 +28,12 @@ struct MachinesView: View {
     }
 
     private var connections: [HostConnection] {
-        settings.allHosts ? model.connections : model.connection.map { [$0] } ?? []
+        settings.allHosts ? model.connections : model.connection(in: scene).map { [$0] } ?? []
     }
 
     var body: some View {
-        List {
+        @Bindable var scene = scene
+        List(selection: $scene.selectedRoute) {
             ForEach(connections, id: \.identity) { connection in
                 Section("\(connection.profile.name) · \(connection.activeSession ?? connection.profile.session ?? "Session")") {
                     if let snapshot = connection.snapshot {
@@ -43,6 +45,11 @@ struct MachinesView: View {
                         Text(failure.message).font(.caption).foregroundStyle(.secondary)
                     } else {
                         ProgressView().frame(maxWidth: .infinity).listRowSeparator(.hidden)
+                    }
+                    if let skew = connection.clockSkew {
+                        Label("This host's clock is \(Duration.seconds(abs(skew)).formatted(.units(allowed: [.days, .hours, .minutes], width: .wide))) \(skew > 0 ? "ahead" : "behind"). Times shown may be off.",
+                              systemImage: "clock.badge.exclamationmark")
+                            .font(.caption).foregroundStyle(.orange)
                     }
                 }
             }

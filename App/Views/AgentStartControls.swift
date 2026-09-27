@@ -16,6 +16,10 @@ final class AgentStartFlow {
         let connection: HostConnection
         let address: PaneAddress
         let kind: String
+        /// Literal argv after the agent's command, from a launch preset or a resume.
+        var arguments: [String] = []
+        /// The pane was just created for this agent: no busy check, startup files waited out.
+        var freshPane = false
     }
 
     var running = false
@@ -31,7 +35,8 @@ final class AgentStartFlow {
         defer { running = false }
         do {
             guard request.connection.activeSession == request.address.session else { throw HerdrError.noResponse }
-            switch try await request.connection.startAgent(kind: request.kind, paneID: request.address.paneID, inNewTab: inNewTab) {
+            switch try await request.connection.startAgent(kind: request.kind, arguments: request.arguments, paneID: request.address.paneID,
+                                                           inNewTab: inNewTab, freshPane: request.freshPane) {
             case .busy(let command):
                 pending = request
                 busyCommand = command

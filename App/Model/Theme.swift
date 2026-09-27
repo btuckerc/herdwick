@@ -121,6 +121,16 @@ final class Settings {
     var notifyFinished: Bool { didSet { save() } }
     /// Opt-in: while the app is away, hosts send alerts through the push relay (`Push`).
     var pushWhileAway: Bool { didSet { save() } }
+    /// Text inserted into the composer from its + menu; never sent by itself.
+    var snippets: [Snippet] { didSet { save() } }
+    /// Named ways to start an agent: a kind plus literal extra arguments.
+    var launchPresets: [LaunchPreset] { didSet { save() } }
+    /// A line of each conversation's newest message under its inbox row.
+    var inboxPreviews: Bool { didSet { save() } }
+    /// Keep the last loaded part of recent conversations on this device to read offline.
+    var offlineTranscripts: Bool { didSet { save() } }
+    /// Face ID (or the passcode) before the app shows anything, and a cover in the app switcher.
+    var appLock: Bool { didSet { save() } }
 
     private let defaults = UserDefaults.standard
 
@@ -145,6 +155,15 @@ final class Settings {
         notifyNeedsYou = defaults.object(forKey: "notifyNeedsYou") as? Bool ?? false
         notifyFinished = defaults.object(forKey: "notifyFinished") as? Bool ?? false
         pushWhileAway = defaults.object(forKey: "pushWhileAway") as? Bool ?? false
+        snippets = Self.decode([Snippet].self, "snippets") ?? []
+        launchPresets = Self.decode([LaunchPreset].self, "launchPresets") ?? []
+        inboxPreviews = defaults.object(forKey: "inboxPreviews") as? Bool ?? true
+        offlineTranscripts = defaults.object(forKey: "offlineTranscripts") as? Bool ?? false
+        appLock = defaults.object(forKey: "appLock") as? Bool ?? false
+    }
+
+    private static func decode<T: Decodable>(_ type: T.Type, _ key: String) -> T? {
+        UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(type, from: $0) }
     }
 
     func theme(for scheme: ColorScheme) -> TerminalTheme {
@@ -171,7 +190,26 @@ final class Settings {
         defaults.set(notifyNeedsYou, forKey: "notifyNeedsYou")
         defaults.set(notifyFinished, forKey: "notifyFinished")
         defaults.set(pushWhileAway, forKey: "pushWhileAway")
+        defaults.set(try? JSONEncoder().encode(snippets), forKey: "snippets")
+        defaults.set(try? JSONEncoder().encode(launchPresets), forKey: "launchPresets")
+        defaults.set(inboxPreviews, forKey: "inboxPreviews")
+        defaults.set(offlineTranscripts, forKey: "offlineTranscripts")
+        defaults.set(appLock, forKey: "appLock")
     }
+}
+
+struct Snippet: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var title: String
+    var text: String
+}
+
+/// Starts `kind` with `arguments` passed as literal argv (no shell parsing).
+struct LaunchPreset: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var name: String
+    var kind: String
+    var arguments: [String]
 }
 
 /// Agents answers "who needs me"; Machines mirrors herdr's own host › workspace › tab › pane tree.

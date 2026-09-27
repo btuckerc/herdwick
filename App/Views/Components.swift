@@ -1,4 +1,5 @@
 import HerdrAPI
+import HerdwickSSH
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
@@ -136,6 +137,7 @@ struct FailureCard: View {
     let connection: HostConnection
     let failure: ConnectionFailure
     var onEdit: (() -> Void)?
+    @State private var confirmingKey = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -149,9 +151,14 @@ struct FailureCard: View {
                 HStack {
                     Button("Retry") { connection.handle(.userRetry) }
                         .buttonStyle(.glassProminent)
-                    if connection.rejectedHostKey != nil {
-                        Button("Trust New Key") { connection.trustPresentedHostKey() }
+                    if let presented = connection.rejectedHostKey {
+                        Button("Trust New Key…") { confirmingKey = true }
                             .buttonStyle(.glass)
+                            .confirmationDialog("Trust the new host key?", isPresented: $confirmingKey, titleVisibility: .visible) {
+                                Button("Trust New Key", role: .destructive) { connection.trustPresentedHostKey() }
+                            } message: {
+                                Text("Pinned: \(pinnedFingerprint)\nPresented: \(presented.fingerprint)\n\nOnly trust it if you changed the server's key or reinstalled it.")
+                            }
                     }
                     if let onEdit {
                         Button("Edit Host", action: onEdit).buttonStyle(.glass)
@@ -163,6 +170,10 @@ struct FailureCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.fill.quaternary, in: .rect(cornerRadius: 24))
         .padding()
+    }
+
+    private var pinnedFingerprint: String {
+        Keychain.string(for: connection.profile.hostKeyAccount).flatMap(SSHKeys.fingerprint(ofPublicKeyLine:)) ?? "none (tailnet-advertised keys)"
     }
 }
 
@@ -200,12 +211,20 @@ struct MessageComposer: View {
     var sending: Bool
     var focus: FocusState<Bool>.Binding
     var placeholder = "Message"
+    /// Extra sends offered in the + menu (omp's "Send After This Run").
+    var actions: [ComposerAction] = []
+    /// Interrupts the agent's run. Present for harnesses that support it, enabled only while working,
+    /// so the field doesn't reflow as runs start and end.
+    var onStop: (() -> Void)? = nil
+    var canStop = false
     let onSend: () -> Void
     @State private var photos: [PhotosPickerItem] = []
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var importing = false
     @State private var importError: String?
+
+    private var busy: Bool { sending || importing }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -225,6 +244,7 @@ struct MessageComposer: View {
                                 Button {
                                     attachments.removeAll { $0.id == attachment.id }
                                 } label: { Image(systemName: "xmark") }
+                                .disabled(busy)
                                 .accessibilityLabel("Remove \(attachment.filename)")
                             }
                             .font(.caption)
@@ -239,32 +259,53 @@ struct MessageComposer: View {
                     Menu {
                         Button("Photo Library", systemImage: "photo.on.rectangle") { showPhotos = true }
                         Button("Files", systemImage: "folder") { showFiles = true }
+                        if !settings.snippets.isEmpty {
+                            Menu("Insert Snippet", systemImage: "text.badge.plus") {
+                                ForEach(settings.snippets) { snippet in
+                                    Button(snippet.title) { insert(snippet.text) }
+                                }
+                            }
+                        }
+                        ForEach(actions) { action in
+                            Button(action.title, systemImage: action.systemImage, action: action.perform)
+                                .disabled(busy || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
                     } label: {
                         Image(systemName: "plus").frame(width: 30, height: 30)
                     }
                     .buttonStyle(.glass)
                     .buttonBorderShape(.circle)
+                    .disabled(busy)
                     .accessibilityLabel("Attach")
                     ComposerTextView(text: $draft, focus: focus, placeholder: placeholder,
                                      autocorrect: settings.composerAutocorrect,
                                      returnKeySends: settings.returnKeySends) {
-                        if !sending && !importing { onSend() }
+                        if !busy { onSend() }
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 11)
                     .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
+                    if let onStop {
+                        Button(action: onStop) {
+                            Image(systemName: "stop.fill").frame(width: 30, height: 30)
+                        }
+                        .buttonStyle(.glass)
+                        .buttonBorderShape(.circle)
+                        .disabled(!canStop)
+                        .accessibilityLabel("Stop Run")
+                    }
                     Button(action: onSend) {
                         Image(systemName: "arrow.up")
                             .font(.body.weight(.semibold)).frame(width: 30, height: 30)
                     }
                     .buttonStyle(.glassProminent)
                     .buttonBorderShape(.circle)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
+                    .disabled(busy || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
                     .accessibilityLabel("Send")
                 }
             }
         }
-        .disabled(sending || importing)
+        // The field stays enabled while sending: disabling it would drop the keyboard.
         .photosPicker(isPresented: $showPhotos, selection: $photos, maxSelectionCount: 4, matching: .images)
         .onChange(of: photos) { _, selection in
             guard !selection.isEmpty else { return }
@@ -296,4 +337,17 @@ struct MessageComposer: View {
             Button("OK", role: .cancel) {}
         } message: { Text(importError ?? "") }
     }
+
+    /// Adds a snippet at the end of the draft on its own line; the draft is never sent here.
+    private func insert(_ text: String) {
+        draft = draft.isEmpty || draft.hasSuffix("\n") ? draft + text : draft + "\n" + text
+        focus.wrappedValue = true
+    }
+}
+
+struct ComposerAction: Identifiable {
+    let title: String
+    let systemImage: String
+    let perform: () -> Void
+    var id: String { title }
 }

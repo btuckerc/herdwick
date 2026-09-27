@@ -10,11 +10,47 @@ final class AppModel {
     private var primary: [HostProfile.ID: HostConnection] = [:]
     private var additional: [SessionAddress: HostConnection] = [:]
     private var demoConnection: HostConnection?
-    private(set) var selectedHostID: HostProfile.ID?
-    var navigationPath: [Route] = []
+    private var initialHostID: HostProfile.ID?
+    private var scenes: [UUID: SceneState] = [:]
+    private var activeSceneID: UUID?
+    private var pendingAddress: PaneAddress?
+    private var pendingReply: (address: PaneAddress, draftID: String)?
+    let watchedRun = WatchedRun()
+    private var activeScene: SceneState? { activeSceneID.flatMap { scenes[$0] } }
+    var selectedHostID: HostProfile.ID? { activeScene?.selectedHostID ?? initialHostID }
+    var connection: HostConnection? { activeScene.flatMap { connection(in: $0) } ?? selectedHostID.flatMap { primary[$0] } ?? demoConnection }
 
-    var connection: HostConnection? {
-        demo != nil ? demoConnection : selectedHostID.flatMap { primary[$0] }
+    func connection(in scene: SceneState) -> HostConnection? {
+        if demo != nil { return demoConnection }
+        guard let id = scene.selectedHostID ?? initialHostID else { return nil }
+        if let session = scene.selectedSession {
+            return connection(for: SessionAddress(hostID: id, session: session)) ?? primary[id]
+        }
+        return primary[id]
+    }
+
+    func register(_ scene: SceneState) {
+        scene.selectedHostID = scene.selectedHostID ?? initialHostID
+        scenes[scene.id] = scene
+        activeSceneID = scene.id
+        if let pendingAddress { self.pendingAddress = nil; open(pendingAddress, in: scene) }
+        reconcile()
+        resolveReply()
+    }
+
+    func unregister(_ scene: SceneState) {
+        scenes.removeValue(forKey: scene.id)
+        if activeSceneID == scene.id { activeSceneID = scenes.values.first(where: { $0.phase == .active })?.id }
+        reconcile()
+        if scenes.values.allSatisfy({ $0.phase == .background }) { scenePhaseChanged(.background) }
+    }
+
+    func scenePhaseChanged(_ phase: ScenePhase, in scene: SceneState) {
+        scene.phase = phase
+        if phase == .active { activeSceneID = scene.id }
+        if phase == .active || scenes.values.allSatisfy({ $0.phase == .background }) {
+            scenePhaseChanged(phase)
+        }
     }
 
     /// Profile order, then session name. Failed hosts remain present for inline recovery.
@@ -43,7 +79,7 @@ final class AppModel {
     private var pathSignature: String?
     private var isForeground = true
     @ObservationIgnored private var attention: Attention?
-    @ObservationIgnored private var push: Push?
+    @ObservationIgnored private(set) var push: Push?
     /// Arming push watchers after leaving the foreground, under a UIKit background assertion.
     @ObservationIgnored private var handoff: (id: Int, task: Task<Void, Never>, assertion: UIBackgroundTaskIdentifier)?
     @ObservationIgnored private var handoffCount = 0
@@ -59,8 +95,13 @@ final class AppModel {
         attention = Attention(settings: settings, links: { [weak self] in self?.connections ?? [] },
                               profiles: { [weak self] in self?.profiles ?? [] },
                               pushOwns: { [weak self] in self?.push?.ownsAlerts(for: $0) ?? false },
-                              onScreen: { [weak self] in self?.onScreen },
-                              open: { [weak self] in self?.open($0) })
+                              onScreen: { [weak self] in self?.onScreen ?? [] },
+                              open: { [weak self] address, draftID in
+                                  guard let self else { return }
+                                  if let draftID { self.pendingReply = (address, draftID) }
+                                  self.open(address)
+                                  self.resolveReply()
+                              })
         push = Push(settings: settings)
         if profiles.contains(where: \.isTailnet) || tailnet.isConfigured {
             tailnet.start()
@@ -80,21 +121,26 @@ final class AppModel {
 
     // MARK: Hosts
 
-    func select(_ id: HostProfile.ID) {
+    func select(_ id: HostProfile.ID, in scene: SceneState? = nil) {
         guard profiles.contains(where: { $0.id == id }) else { return }
-        if demo == nil, selectedHostID == id { reconcile(); return }
         endDemoHost()
-        selectedHostID = id
-        if !settings.allHosts { navigationPath = [] }
+        if let scene = scene ?? activeScene {
+            if scene.selectedHostID != id {
+                scene.selectedHostID = id
+                scene.selectedSession = nil
+                if !settings.allHosts { scene.navigationPath = [] }
+            }
+        }
+        initialHostID = id
         UserDefaults.standard.set(id.uuidString, forKey: "selected-host")
         reconcile()
     }
 
-    func selectSession(_ name: String) {
-        guard var profile = profiles.first(where: { $0.id == selectedHostID }) else { return }
-        profile.session = name
-        navigationPath = []
-        update(profile)
+    func selectSession(_ name: String, in scene: SceneState? = nil) {
+        guard let scene = scene ?? activeScene else { return }
+        scene.selectedSession = name
+        scene.navigationPath = []
+        reconcile()
     }
 
     private func observeScope() {
@@ -111,17 +157,18 @@ final class AppModel {
 
     private func reconcile() {
         guard demo == nil else { return }
-        let desired = Set(profiles.filter { settings.allHosts || $0.id == selectedHostID }.map(\.id))
+        let selected = Set(scenes.values.compactMap(\.selectedHostID) + [initialHostID, watchedRun.address?.hostID].compactMap { $0 })
+        let desired = Set(profiles.filter { settings.allHosts || selected.contains($0.id) }.map(\.id))
         for id in Array(primary.keys) where !desired.contains(id) {
             primary.removeValue(forKey: id)?.stop()
         }
-        for key in Array(additional.keys) where !settings.allHosts || !desired.contains(key.hostID) {
+        for key in Array(additional.keys) where !desired.contains(key.hostID) {
             additional.removeValue(forKey: key)?.stop()
         }
         for profile in profiles where desired.contains(profile.id) {
             if let link = primary[profile.id] {
-                let changed = link.includesAllSessions != settings.allHosts
-                link.includesAllSessions = settings.allHosts
+                let changed = !link.includesAllSessions
+                link.includesAllSessions = true
                 if changed {
                     if isForeground { link.handle(.userRetry) }
                 }
@@ -129,8 +176,8 @@ final class AppModel {
                 let link = HostConnection(profile: profile, tailnet: tailnet, onSessions: { [weak self] link in
                     self?.reconcileSessions(link)
                 }) { [weak self] updated in self?.store(updated) }
-                link.includesAllSessions = settings.allHosts
-                link.onAttentionChange = { [weak self] in self?.attention?.changed($0) }
+                link.includesAllSessions = true
+                link.onAttentionChange = { [weak self] in self?.changed($0) }
                 link.onLive = { [weak self] in self?.wentLive($0) }
                 primary[profile.id] = link
                 if isForeground { link.handle(.start) }
@@ -139,7 +186,7 @@ final class AppModel {
     }
 
     private func reconcileSessions(_ primaryLink: HostConnection) {
-        guard demo == nil, settings.allHosts, primary[primaryLink.profile.id] === primaryLink else { return }
+        guard demo == nil, primary[primaryLink.profile.id] === primaryLink else { return }
         let names = Set(primaryLink.sessions.filter(\.running).map(\.name))
         let desired = names.subtracting(primaryLink.activeSession.map { [$0] } ?? [])
         for key in Array(additional.keys) where key.hostID == primaryLink.profile.id && !desired.contains(key.session) {
@@ -155,7 +202,7 @@ final class AppModel {
             // would require a new host-level supervisor and cross-session cancellation
             // ownership. Cost: one SSH keepalive per session, all closed in background.
             let link = HostConnection(profile: profile, tailnet: tailnet) { _ in }
-            link.onAttentionChange = { [weak self] in self?.attention?.changed($0) }
+            link.onAttentionChange = { [weak self] in self?.changed($0) }
             link.onLive = { [weak self] in self?.wentLive($0) }
             additional[key] = link
             if isForeground { link.handle(.start) }
@@ -211,13 +258,16 @@ final class AppModel {
 
     func delete(_ id: HostProfile.ID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        try? TranscriptCache.remove(hostID: profile.id)
         Keychain.delete(profile.passwordAccount)
         Keychain.delete(profile.hostKeyAccount)
         profiles.removeAll { $0.id == id }
         ProfileStorage.save(profiles)
-        if selectedHostID == id {
-            selectedHostID = profiles.first?.id
-            navigationPath = []
+        if initialHostID == id { initialHostID = profiles.first?.id }
+        for scene in scenes.values where scene.selectedHostID == id {
+            scene.selectedHostID = profiles.first?.id
+            scene.selectedSession = nil
+            scene.navigationPath = []
         }
         reconcile()
     }
@@ -234,7 +284,7 @@ final class AppModel {
     func startDemo(_ launch: DemoLaunch? = nil) {
         guard let director = try? DemoDirector(launch: launch) else { return }
         stopAll()
-        navigationPath = []
+        for scene in scenes.values { scene.navigationPath = [] }
         demo = director
         if launch?.scene == .tailscale, let tailnet = director.scenario.tailnet {
             self.tailnet.showDemo(name: tailnet.name, peers: director.tailnetPeers)
@@ -252,7 +302,7 @@ final class AppModel {
     /// Leaves the demo for the saved hosts, or onboarding when there are none.
     func endDemo() {
         stopAll()
-        navigationPath = []
+        for scene in scenes.values { scene.navigationPath = [] }
         endDemoHost()
         if let first = profiles.first { select(first.id) }
     }
@@ -275,24 +325,53 @@ final class AppModel {
         push?.register()
     }
 
-    /// An alert or a widget asked for this agent: show its host, then its conversation.
-    func open(_ address: PaneAddress) {
-        guard demo == nil, let profile = profiles.first(where: { $0.id == address.hostID }) else { return }
-        if !settings.allHosts {
-            if selectedHostID != address.hostID { select(address.hostID) }
-            if profile.session != address.session { selectSession(address.session) }
+    private func changed(_ link: HostConnection) {
+        attention?.changed(link)
+        if isForeground { watchedRun.changed(link, push: push) }
+        resolveReply()
+    }
+
+    private func resolveReply() {
+        guard let pendingReply, let scene = activeScene,
+              let link = connection(for: pendingReply.address), link.isLive else { return }
+        self.pendingReply = nil
+        if let agent = link.snapshot?.agents.first(where: {
+            DraftStore.id(host: link.identity, agent: $0) == pendingReply.draftID
+        }) {
+            scene.open(.conversation(link.address(paneID: agent.paneID)))
+            scene.draftRevision += 1
+        } else {
+            scene.navigationPath = []
+            scene.notificationNotice = "The original conversation is no longer live. Your reply is saved in its draft; it was not sent."
         }
-        navigationPath = [.conversation(address)]
+    }
+    /// An alert or a widget asked for this agent: show its host, then its conversation.
+    func open(_ address: PaneAddress, in scene: SceneState? = nil) {
+        guard demo == nil, profiles.contains(where: { $0.id == address.hostID }) else { return }
+        guard let scene = scene ?? activeScene else { pendingAddress = address; return }
+        select(address.hostID, in: scene)
+        scene.selectedSession = address.session
+        if pendingReply == nil { scene.open(.conversation(address)) }
+        else { scene.navigationPath = [] }
+        reconcile()
     }
 
-    func open(_ url: URL) {
+    func open(_ url: URL, in scene: SceneState? = nil) {
+        if url.scheme == "herdwick", ["inbox", "needs-you"].contains(url.host ?? "") {
+            guard let scene = scene ?? activeScene else { return }
+            scene.needsYouOnly = url.host == "needs-you"
+            scene.navigationPath = []
+            return
+        }
         guard let link = AttentionLink.parse(url) else { return }
-        open(PaneAddress(hostID: link.host, session: link.session, paneID: link.pane))
+        open(PaneAddress(hostID: link.host, session: link.session, paneID: link.pane), in: scene)
     }
 
-    private var onScreen: PaneAddress? {
-        guard isForeground, case .conversation(let address)? = navigationPath.last else { return nil }
-        return address
+    private var onScreen: Set<PaneAddress> {
+        Set(scenes.values.compactMap { scene in
+            guard scene.phase == .active, case .conversation(let address)? = scene.navigationPath.last else { return nil }
+            return address
+        })
     }
 
     /// iOS wakes the app now and then: bring each link up long enough for one fresh snapshot,
@@ -354,7 +433,11 @@ final class AppModel {
                 }
             }
             let task = Task {
-                _ = try? await withTimeout(.seconds(10)) { @MainActor in await push.arm(links) }
+                let known = self.profiles
+                let hosts = Set(links.map { $0.profile.id })
+                _ = try? await withTimeout(.seconds(10)) { @MainActor in
+                    await push.arm(links, profiles: known, selectedHostIDs: hosts)
+                }
                 let back = isForeground
                 finishHandoff(id)
                 // Back before the watchers were up: the app watches for itself again.

@@ -16,9 +16,16 @@ struct MarkdownText: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Code spans naming an image file (`shot.png`) link to the image preview.
     static func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+        var string = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
+        guard text.contains("`") else { return string }
+        for run in string.runs where run.inlinePresentationIntent?.contains(.code) == true && run.link == nil {
+            let path = String(string[run.range].characters)
+            if isImagePath(path), !path.contains(" "), let url = imageLink(path) { string[run.range].link = url }
+        }
+        return string
     }
 
     @ViewBuilder private func view(for block: MarkdownBlock) -> some View {

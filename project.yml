@@ -39,6 +39,7 @@ targets:
         embed: true
       - target: HerdwickWidgets
       - target: HerdwickNotifications
+      - target: HerdwickShare
     entitlements:
       path: App/Herdwick.entitlements
       properties:
@@ -49,6 +50,11 @@ targets:
       properties:
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: Herdwick connects to herdr on computers on your local network.
+        NSFaceIDUsageDescription: Unlock your Herdwick conversations.
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: false
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
         # Background refresh reconnects briefly to raise alerts and update widgets.
         UIBackgroundModes: [fetch]
         BGTaskSchedulerPermittedIdentifiers: [dev.btuckerc.herdwick.refresh]
@@ -137,3 +143,37 @@ targets:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: Apple Distribution
           PROVISIONING_PROFILE_SPECIFIER: Herdwick Notifications App Store
+  HerdwickShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ShareExtension
+      - Shared/SharePackage.swift
+      - Shared/AttentionSnapshot.swift
+    entitlements:
+      path: ShareExtension/HerdwickShare.entitlements
+      properties:
+        com.apple.security.application-groups: [group.dev.btuckerc.herdwick]
+    info:
+      path: ShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Import to Herdwick
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 10
+              NSExtensionActivationSupportsImageWithMaxCount: 4
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.btuckerc.herdwick.share
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: Herdwick Share App Store

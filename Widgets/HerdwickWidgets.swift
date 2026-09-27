@@ -5,6 +5,8 @@ import WidgetKit
 struct HerdwickWidgets: WidgetBundle {
     var body: some Widget {
         AttentionWidget()
+        NeedsYouControl()
+        WatchedRunWidget()
     }
 }
 

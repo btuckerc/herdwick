@@ -4,6 +4,7 @@ import HerdrAPI
 struct ToolStepView: View {
     let tool: ToolActivity
     @State private var expanded: Bool
+    @Environment(\.previewImage) private var previewImage
 
     init(tool: ToolActivity, expanded: Bool = false) {
         self.tool = tool
@@ -22,6 +23,7 @@ struct ToolStepView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            if !tool.images.isEmpty { TranscriptImages(images: tool.images) }
             if expanded { detailView }
         }
     }
@@ -77,7 +79,15 @@ struct ToolStepView: View {
                 if let output { cappedText(output) }
                 if let exitCode, exitCode != 0 { Text("exit \(exitCode)").font(.caption2.monospaced()).foregroundStyle(.red).padding(.horizontal, 6).padding(.vertical, 3).background(.red.opacity(0.12), in: Capsule()) }
             }
-        case .read(let path, _): Text(path).font(.caption2.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+        case .read(let path, _):
+            if isImagePath(path), let previewImage {
+                Button { previewImage(.file(path)) } label: {
+                    Label(path, systemImage: "photo").font(.caption2.monospaced())
+                }
+                .buttonStyle(.borderless)
+            } else {
+                Text(path).font(.caption2.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+            }
         case .edit(let files): DiffView(files: files)
         case .write(let path, let content):
             VStack(alignment: .leading, spacing: 5) { Text(path).font(.caption2).foregroundStyle(.secondary); cappedText(content, limit: 40) }

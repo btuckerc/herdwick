@@ -2,11 +2,11 @@
 // nothing, logs nothing and sees only opaque ids. Secrets: APNS_KEY (the .p8 PEM),
 // APNS_KEY_ID, APNS_TEAM_ID. Var: APNS_TOPIC.
 //
-// POST /v1/push {token, env, host, session, pane, state, seq} → 204.
+// POST /v1/push {token, env, host, session, pane, state, seq, mac?, kind?} → 204.
 //
-// The alert text is fixed here and the ids mean nothing without the phone's own records, so
-// whoever holds a device token can at most repeat these two generic alerts to that device, and
-// no faster than the rate limit.
+// Alert text is fixed; liveactivity updates carry only working/blocked/done.
+// Possession of the respective APNs token authorizes delivery, bounded by rate limiting.
+// MACs are forwarded, not verified by this stateless relay.
 
 const HEX = /^[0-9a-f]{64,200}$/;
 const UUID = /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/;
@@ -20,30 +20,41 @@ export default {
     if (new URL(request.url).pathname !== "/v1/push") return status(404);
     const body = (await readJSON(request)) ?? {};
     const { token, host, session, pane, state, seq } = body;
-    if (!HEX.test(token ?? "") || !(body.env in HOSTS) || !(state in STATES) || !UUID.test(host ?? "") ||
-        !NAME.test(session ?? "") || !NAME.test(pane ?? "") || !Number.isSafeInteger(seq)) return status(400);
+    const activity = body.kind === "liveactivity";
+    if ((body.kind !== undefined && body.kind !== "alert" && !activity) ||
+        !HEX.test(token ?? "") || !(body.env in HOSTS) ||
+        !(activity ? ["working", "blocked", "done"].includes(state) : Object.hasOwn(STATES, state)) ||
+        !UUID.test(host ?? "") || !NAME.test(session ?? "") || !NAME.test(pane ?? "") ||
+        !Number.isSafeInteger(seq)) return status(400);
     if (!(await env.LIMIT.limit({ key: token })).success) return status(429);
 
+    const now = Math.floor(Date.now() / 1000);
     // The notification service extension replaces this text with names the phone already knows.
     const alert = {
-      aps: {
+      aps: activity ? {
+        timestamp: now,
+        event: state === "done" ? "end" : "update",
+        "content-state": { status: state },
+        "stale-date": now + 4 * 60 * 60,
+      } : {
         alert: { title: "Herdwick", body: STATES[state] },
         ...(state === "blocked" ? { sound: "default" } : {}),
         "thread-id": `${host}/${session}`,
         "mutable-content": 1,
       },
       host, session, pane, state, seq,
+      ...(typeof body.mac === "string" ? { mac: body.mac } : {}),
     };
     const id = `${host}/${session}/${pane}`;
     const headers = {
       authorization: `bearer ${await providerToken(env)}`,
-      "apns-topic": env.APNS_TOPIC,
-      "apns-push-type": "alert",
+      "apns-topic": activity ? `${env.APNS_TOPIC}.push-type.liveactivity` : env.APNS_TOPIC,
+      "apns-push-type": activity ? "liveactivity" : "alert",
       "apns-priority": "10",
-      "apns-expiration": String(Math.floor(Date.now() / 1000) + 3600),
+      "apns-expiration": String(now + 3600),
     };
     // A newer alert for the same agent replaces the older one, as local alerts do.
-    if (id.length <= 64) headers["apns-collapse-id"] = id;
+    if (!activity && id.length <= 64) headers["apns-collapse-id"] = id;
     const sent = await fetch(`https://${HOSTS[body.env]}/3/device/${token}`, {
       method: "POST", headers, body: JSON.stringify(alert),
     });

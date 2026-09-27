@@ -250,7 +250,7 @@ struct AuthorizedKeySection: View {
         } header: {
             Text("This iPhone's key")
         } footer: {
-            Text("Run the setup command once on the computer, e.g. over SSH or in a terminal there. The private key never leaves this iPhone.")
+            Text("Run the setup command once on the computer. The private key never leaves this iPhone.")
         }
     }
 }
@@ -440,9 +440,11 @@ private struct KeySetupSheet: View {
             Group {
                 switch setup.state {
                 case .idle, .connecting:
-                    ProgressView("Signing in…")
+                    ProgressView("Checking the server…")
                 case .confirming(let confirmation):
                     confirmationView(confirmation)
+                case .signingIn:
+                    ProgressView("Signing in…")
                 case .installing:
                     ProgressView("Installing this iPhone's key…")
                 case .failed(let message):
@@ -476,7 +478,11 @@ private struct KeySetupSheet: View {
             Text(confirmation.address).font(.headline)
             Text("Host key fingerprint").font(.subheadline).foregroundStyle(.secondary)
             Text(confirmation.fingerprint).font(.body.monospaced()).textSelection(.enabled)
-            Text("The password worked. Install this iPhone's key so future connections do not need the password.")
+            Text(confirmation.advertised
+                 ? "Your tailnet vouches for this key. Your password is sent only after you continue."
+                 : "Compare it with the server's own (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). Your password is sent only after you continue.")
+                .foregroundStyle(.secondary)
+            Text("Install this iPhone's key so future connections do not need the password.")
             Button("Install this iPhone's key") { setup.install() }
                 .buttonStyle(.glassProminent)
             Button("Keep using password") {

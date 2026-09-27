@@ -26,8 +26,10 @@ struct ComposerTextView: UIViewRepresentable {
     func updateUIView(_ view: ComposerInput, context: Context) {
         context.coordinator.parent = self
         // Only outside changes (a cleared draft, a demo cue) are pushed in; the view's own
-        // edits already match, and writing a stale binding back would drop keystrokes.
-        if text != context.coordinator.reported, view.markedTextRange == nil {
+        // edits already match, and writing a stale binding back would drop keystrokes. A
+        // clear (a send) also ends any composition, or its text would come back.
+        if text != context.coordinator.reported, view.markedTextRange == nil || text.isEmpty {
+            if view.markedTextRange != nil { view.unmarkText() }
             view.text = text
             context.coordinator.reported = text
         }
@@ -126,7 +128,7 @@ final class ComposerInput: UITextView {
         let newline = UIKeyCommand(title: "New Line", action: #selector(newlineCommand), input: "\r", modifierFlags: .shift)
         return (super.keyCommands ?? []) + [send, newline]
     }
-    @objc private func sendCommand() { onSend?() }
+    @objc private func sendCommand() { if markedTextRange == nil { onSend?() } }
     @objc private func newlineCommand() { insertLiteralNewline() }
 
     /// Hardware keyboard, whatever the on-screen key does: Return and ⌘Return send;

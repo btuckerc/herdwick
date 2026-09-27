@@ -2,8 +2,8 @@ import UserNotifications
 import WidgetKit
 
 /// Dresses a push from a host watcher (opaque ids only) with the names the app last saw:
-/// the thread, or at least its host. Records it so the app never repeats it, and moves that
-/// agent in the widgets' snapshot.
+/// thread, or at least its host. Only authenticated, newer events may update shared state.
+/// Dressing text does not authenticate an alert or cancel APNs delivery.
 final class NotificationService: UNNotificationServiceExtension {
     override func didReceive(_ request: UNNotificationRequest,
                              withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void) {
@@ -18,9 +18,24 @@ final class NotificationService: UNNotificationServiceExtension {
         let key = AttentionSnapshot.key(host: host, session: session, pane: pane)
 
         let shared = AttentionSnapshot.shared
+        let authenticated = AttentionSnapshot.authentic(host: host.uuidString, session: session, pane: pane,
+                                                        state: state.rawValue, seq: seq, mac: info["mac"] as? String)
+        var sequences = shared?.dictionary(forKey: AttentionSnapshot.sequencesKey) as? [String: Int] ?? [:]
         var alerted = shared?.dictionary(forKey: AttentionSnapshot.alertedKey) as? [String: Int] ?? [:]
-        alerted[key] = max(alerted[key] ?? 0, seq)
-        shared?.set(alerted, forKey: AttentionSnapshot.alertedKey)
+        let newer = seq > max(sequences[key] ?? -1, alerted[key] ?? -1)
+        let references = shared?.dictionary(forKey: AttentionSnapshot.referencesKey) as? [String: String] ?? [:]
+        let muted = references[key].map { reference in
+            AttentionSnapshot.mutes[AttentionSnapshot.muteKey(key, reference: reference)]?
+                .active(reference: reference) ?? false
+        } ?? false
+        // Best effort only: an NSE cannot promise to cancel an already accepted alert.
+        if authenticated && muted { content.sound = nil }
+        if authenticated && newer {
+            sequences[key] = seq
+            alerted[key] = seq
+            shared?.set(sequences, forKey: AttentionSnapshot.sequencesKey)
+            shared?.set(alerted, forKey: AttentionSnapshot.alertedKey)
+        }
 
         guard var snapshot = AttentionSnapshot.load() else {
             contentHandler(content)
@@ -37,10 +52,10 @@ final class NotificationService: UNNotificationServiceExtension {
             // An agent started since the app last looked: the relay's "An agent …" body stays.
             content.title = hostName
         }
-        if let index {
+        if authenticated && newer, let index {
             let item = snapshot.items[index]
             snapshot.items[index] = AttentionSnapshot.Item(id: item.id, title: item.title, place: item.place, state: state,
-                                                           since: .now, url: item.url)
+                                                           since: .now, url: item.url, draftID: item.draftID)
             snapshot.sort()
             snapshot.save()
             if state == .blocked { content.badge = snapshot.blocked as NSNumber }

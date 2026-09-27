@@ -39,7 +39,13 @@ struct DraftAttachment: Identifiable {
         guard output.length <= 5 * 1024 * 1024 else { throw AttachmentError.imageTooLarge }
         let ext = UTType(type)?.preferredFilenameExtension ?? "jpg"
         let name = (filename as NSString).deletingPathExtension + "." + ext
-        return Self(data: output as Data, filename: name, isImage: true, thumbnail: UIImage(cgImage: image))
+        // The composer shows a 32 pt chip: decode a thumbnail that size, not the 2000 px upload.
+        let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 96,
+        ] as CFDictionary)
+        return Self(data: output as Data, filename: name, isImage: true, thumbnail: thumbnail.map { UIImage(cgImage: $0) })
     }
 }
 
@@ -96,4 +102,9 @@ func deliverDraft(_ text: String, attachments initial: [DraftAttachment], connec
         try await connection.sendText((paths + (text.isEmpty ? [] : [text])).joined(separator: " "),
                                       pane: pane, submit: true)
     }
+}
+
+/// A failed send's text back in the composer, ahead of anything typed since.
+func restoringDraft(_ failed: String, before typed: String) -> String {
+    typed.isEmpty ? failed : failed + "\n" + typed
 }

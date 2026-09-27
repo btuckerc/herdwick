@@ -1,29 +1,27 @@
 import Foundation
 
-extension TranscriptMessage {
-    /// A message the user sent or the agent wrote to them. Thinking, tool calls and tool
-    /// results are work, not messages; harness text never becomes a message at all.
-    public var isConversation: Bool {
-        role != .toolResult && (imageCount > 0 || text.contains { !$0.isWhitespace })
-    }
-}
-
-/// When an agent's transcript last recorded a conversation message, and how far the file has
-/// been read. Transcripts are append-only (omp's padded title line is rewritten in place at
-/// the same size), so each refresh reads only what was appended since.
+/// When an agent's conversation last moved for the person following it: the user sent a
+/// message (a prompt or a steer mid-turn), or the agent finished a turn. Thinking, narration
+/// between tool calls, tool calls and their results are work inside a turn and don't count;
+/// harness text never becomes a message at all. Also tracks how far the file has been read.
+/// Transcripts are append-only (omp's padded title line is rewritten in place at the same
+/// size), so each refresh reads only what was appended since.
 ///
-/// A first read takes the file's tail; when that holds no message (one long tool run, say),
-/// it pages backwards until it finds one or reaches the start. File times are never used:
-/// tool output and title rewrites change them without a message.
+/// A first read takes the file's tail; when that holds no such moment (one long tool run,
+/// say), it pages backwards until it finds one or reaches the start. File times are never
+/// used: tool output and title rewrites change them without a message.
 public struct TranscriptActivity: Codable, Sendable, Equatable {
     public static let window = 256 * 1024
-    /// Backward pages read before giving up on an old conversation's last message.
+    /// Backward pages read before giving up on an old conversation's last turn.
     static let maxLookBackPages = 8
 
     public let path: String
     public let format: TranscriptFormat
-    /// The newest conversation message's own timestamp; nil while none is known.
-    public private(set) var lastMessageAt: Date?
+    /// The newest user message or turn end, by the transcript's own clock; nil while unknown.
+    public private(set) var lastTurnAt: Date?
+    /// Newest observed user/assistant text, independently of turn-completion time.
+    public private(set) var preview: String?
+    public private(set) var previewAt: Date?
     /// End of the last complete line read; appends are read from here. Nil before the first read.
     public private(set) var offset: Int?
     /// While looking back for a message: the end of the next page, and pages read so far.
@@ -73,8 +71,9 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
             return
         }
         if let lookBack {
-            let (found, _) = Self.scan(bytes, format: format, startsMidFile: from > 0, flush: true)
-            lastMessageAt = found
+            let (found, _, text, at) = Self.scanDetails(bytes, format: format, startsMidFile: from > 0, flush: true)
+            absorbPreview(text, at: at)
+            lastTurnAt = found
             self.lookBack = found == nil && from > 0 && lookBack.pages + 1 < Self.maxLookBackPages
                 ? LookBack(end: from + Self.partialLineLength(bytes), pages: lookBack.pages + 1) : nil
             return
@@ -82,8 +81,9 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
         guard let offset else {
             // First read: the tail. Its last line may still be being written; counting it now
             // is harmless, as it is read again from `offset` once complete.
-            let (found, consumed) = Self.scan(bytes, format: format, startsMidFile: from > 0, flush: true)
-            lastMessageAt = found
+            let (found, consumed, text, at) = Self.scanDetails(bytes, format: format, startsMidFile: from > 0, flush: true)
+            absorbPreview(text, at: at)
+            lastTurnAt = found
             self.offset = from + consumed
             if found == nil, from > 0 { lookBack = LookBack(end: from + Self.partialLineLength(bytes), pages: 0) }
             return
@@ -93,8 +93,9 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
             self = TranscriptActivity(path: path, format: format)
             return
         }
-        let (found, consumed) = Self.scan(bytes, format: format, startsMidFile: midLine, flush: false)
-        if let found { lastMessageAt = max(lastMessageAt ?? found, found) }
+        let (found, consumed, text, at) = Self.scanDetails(bytes, format: format, startsMidFile: midLine, flush: false)
+        absorbPreview(text, at: at)
+        if let found { lastTurnAt = max(lastTurnAt ?? found, found) }
         let full = bytes.count >= Self.forwardLimit
         if consumed == 0, full {
             // One line fills the whole read: step past it rather than rereading it forever.
@@ -107,18 +108,53 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
         behind = full
     }
 
-    /// The newest conversation message among `bytes`' complete lines, and the bytes those
+    /// The newest user message or turn end among `bytes`' complete lines, and the bytes those
     /// lines span. `flush` also parses a final line that lacks its newline.
     static func scan(_ bytes: [UInt8], format: TranscriptFormat, startsMidFile: Bool, flush: Bool) -> (Date?, Int) {
+        let result = scanDetails(bytes, format: format, startsMidFile: startsMidFile, flush: flush)
+        return (result.0, result.1)
+    }
+
+    private mutating func absorbPreview(_ text: String?, at: Date?) {
+        guard let text else { return }
+        if preview == nil || (at != nil && (previewAt == nil || at! >= previewAt!)) {
+            preview = text; previewAt = at
+        }
+    }
+
+    private static func scanDetails(_ bytes: [UInt8], format: TranscriptFormat, startsMidFile: Bool, flush: Bool) -> (Date?, Int, String?, Date?) {
         var reader = TranscriptReader(format: format, startsMidFile: startsMidFile)
         var entries = reader.append(bytes)
         let consumed = reader.consumedBytes
         if flush { entries += reader.append([0x0A]) }
         let newest = entries.compactMap { entry -> Date? in
-            guard case .message(let message) = entry, message.isConversation else { return nil }
-            return message.timestamp
+            switch entry {
+            case .message(let message) where message.role == .user:
+                message.images.isEmpty && !message.text.contains { !$0.isWhitespace } ? nil : message.timestamp
+            case .turnEnded(let at): at
+            default: nil
+            }
         }.max()
-        return (newest, consumed)
+        var preview: String?, previewAt: Date?
+        for entry in entries {
+            guard case .message(let message) = entry, message.role != .toolResult,
+                  !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            if preview == nil || message.timestamp == nil || previewAt == nil || message.timestamp! >= previewAt! {
+                var short = "", count = 0, space = false
+                for character in message.text {
+                    if character.isWhitespace { space = !short.isEmpty; continue }
+                    if space {
+                        short.append(" "); count += 1; space = false
+                        if count == 140 { break }
+                    }
+                    short.append(character); count += 1
+                    if count == 140 { break }
+                }
+                preview = short
+                previewAt = message.timestamp
+            }
+        }
+        return (newest, consumed, preview, previewAt)
     }
 
     /// Bytes up to and including the first newline: the line a mid-file read cannot parse.

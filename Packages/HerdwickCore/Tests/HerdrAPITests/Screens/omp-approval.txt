@@ -1,0 +1,18 @@
+
+ Run the bash command: echo approval-test > b.txt . Do nothing else.
+
+
+  󱊷 Working…
+
+╭─ Allow tool: bash ──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                     │
+│ Command: echo approval-test > b.txt                                                                                 │
+│                                                                                                                     │
+│   Approve                                                                                                          │
+│    Deny                                                                                                             │
+│                                                                                                                     │
+│ up/down navigate  enter select  esc cancel                                                                          │
+│                                                                                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+proj
+

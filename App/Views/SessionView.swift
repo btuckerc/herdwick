@@ -5,6 +5,7 @@ import SwiftUI
 /// shells sit folded at the bottom. The title swipes between hosts and opens the host list.
 struct SessionView: View {
     @Environment(AppModel.self) private var model
+    @Environment(SceneState.self) private var scene
     @Environment(Settings.self) private var settings
     @Environment(DemoDirector.self) private var demo: DemoDirector?
     let connection: HostConnection
@@ -23,6 +24,8 @@ struct SessionView: View {
     @State private var hostSelection = 0
     @State private var startFlow = AgentStartFlow()
     @State private var pushEdge: Edge = .trailing
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
 
     /// Retained for scripted demo navigation.
     enum Mode: String, CaseIterable, Identifiable {
@@ -32,14 +35,24 @@ struct SessionView: View {
 
     enum Sheet: Identifiable {
         case settings, hosts, addHost, editHost(HostProfile)
-        case newThread(HostConnection, NewThreadSheet.Kind)
+        /// A workspace preselects where the agent goes ("New Agent Here").
+        case newAgent(HostConnection?, workspace: String?)
+        case ended(EndedAgent)
+        case resume(EndedAgent)
+        case shared
+        /// New Agent for a package on the Shared shelf, which then opens in its composer.
+        case shareNewAgent(UUID)
         var id: String {
             switch self {
             case .settings: "settings"
             case .hosts: "hosts"
             case .addHost: "add"
             case .editHost(let profile): profile.id.uuidString
-            case .newThread(let link, let kind): "new-\(ObjectIdentifier(link))-\(kind)"
+            case .newAgent(let link, let workspace): "new-\(link.map { "\(ObjectIdentifier($0))" } ?? "")-\(workspace ?? "")"
+            case .ended(let item): "ended-\(item.id)"
+            case .resume(let item): "resume-\(item.id)"
+            case .shared: "shared"
+            case .shareNewAgent(let id): "share-new-\(id)"
             }
         }
     }
@@ -50,14 +63,17 @@ struct SessionView: View {
                 if let next { settings.inboxGrouping = next == .workspaces ? .workspace : .none }
             }
             .onChange(of: demo?.paneID, initial: true) { _, next in
-                if let demo { model.navigationPath = next.map { [demo.route(for: $0, connection: connection)] } ?? [] }
+                if let demo { scene.navigationPath = next.map { [demo.route(for: $0, connection: connection)] } ?? [] }
             }
             .onChange(of: connection.snapshot == nil) { _, missing in
                 if !missing, let demo, let pane = demo.paneID {
-                    model.navigationPath = [demo.route(for: pane, connection: connection)]
+                    scene.navigationPath = [demo.route(for: pane, connection: connection)]
                 }
             }
             .onChange(of: demo?.showsSettings, initial: true) { _, shows in if shows == true { sheet = .settings } }
+            .onChange(of: scene.showNewAgent) { _, show in
+                if show { sheet = .newAgent(nil, workspace: nil); scene.showNewAgent = false }
+            }
     }
 
     /// Split from `body`, whose single modifier chain overran the type-checker's time limit.
@@ -68,18 +84,7 @@ struct SessionView: View {
             .navigationTitle(allHosts ? "All Hosts" : connection.profile.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbar }
-            .sheet(item: $sheet) { sheet in
-                switch sheet {
-                case .settings: SettingsView()
-                case .hosts: hostList
-                case .addHost: AddHostView()
-                case .editHost(let profile): NavigationStack { HostEditor(profile: profile) }
-                case .newThread(let link, let kind):
-                    NewThreadSheet(connection: link, kind: kind, workspaceID: nil) { paneID in
-                        model.navigationPath.append(.terminal(link.address(paneID: paneID)))
-                    }
-                }
-            }
+            .sheet(item: $sheet, content: sheetContent)
             .modifier(AgentStartFeedback(flow: startFlow, onStarted: didStart))
             .sensoryFeedback(.warning, trigger: blockedCount) { old, new in settings.haptics && new > old }
             .sensoryFeedback(.selection, trigger: hostSelection) { _, _ in settings.haptics }
@@ -104,12 +109,56 @@ struct SessionView: View {
             }
     }
 
+    @ViewBuilder private func sheetContent(_ sheet: Sheet) -> some View {
+        switch sheet {
+        case .settings: SettingsView()
+        case .hosts: hostList
+        case .addHost: AddHostView()
+        case .editHost(let profile): NavigationStack { HostEditor(profile: profile) }
+        case .newAgent(let link, let workspace):
+            NewAgentSheet(links: links, preferred: link ?? model.connection(in: scene), workspace: workspace) { route in
+                scene.navigationPath.append(route)
+            }
+        case .resume(let item):
+            NewAgentSheet(links: links, preferred: connection, resume: item) { scene.navigationPath.append($0) }
+        case .ended(let item):
+            if let link = links.first(where: { $0.profile.id == item.hostID && $0.activeSession == item.session }) {
+                EndedAgentView(item: item, connection: link) { self.sheet = .resume(item) }
+            }
+        case .shared:
+            SharedShelfView { id, thread in
+                stage(id, draftID: DraftStore.id(host: thread.connection.identity, agent: thread.agent), address: nil)
+                self.sheet = nil
+                model.open(thread.address, in: scene)
+            } newAgent: { id in
+                self.sheet = .shareNewAgent(id)
+            }
+        case .shareNewAgent(let id):
+            NewAgentSheet(links: links, preferred: model.connection(in: scene)) { route in
+                // A start that fell back to the terminal has no composer; the share stays on the shelf.
+                if case .conversation(let address) = route { stage(id, draftID: nil, address: address) }
+                scene.navigationPath.append(route)
+            }
+        }
+    }
+
+    private func stage(_ id: UUID, draftID: String?, address: PaneAddress?) {
+        scene.importPackageID = id
+        scene.importDraftID = draftID
+        scene.importAddress = address
+    }
+
     private var hostList: some View {
         HostList(connection: connection) { sheet = $0 }
             .presentationDetents([.medium, .large])
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        if settings.inboxView == .agents {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Search", systemImage: "magnifyingglass") { scene.searchPresented = true }
+            }
+        }
         ToolbarItem(placement: .principal) {
             let swipe: ((Int) -> Void)? = canSwitchHosts ? { switchHost(by: $0) } : nil
             HostTitle(title: allHosts ? "All Hosts" : connection.profile.name, subtitle: subtitle,
@@ -122,15 +171,22 @@ struct SessionView: View {
         ToolbarItem(placement: .bottomBar) { viewMenu }
         ToolbarSpacer(.flexible, placement: .bottomBar)
         ToolbarItem(placement: .bottomBar) {
-            Menu { newMenu } label: { Image(systemName: "plus") }
-                .accessibilityLabel("New")
+            Button("New Agent", systemImage: "plus") { sheet = .newAgent(nil, workspace: nil) }
         }
     }
 
     private var allHosts: Bool { settings.allHosts && model.demo == nil }
     private var links: [HostConnection] { allHosts ? model.connections : [connection] }
     private var threads: [Thread] {
-        allHosts ? model.threads : model.threads.filter { $0.connection === connection }
+        let scoped = (allHosts ? model.threads : model.threads.filter { $0.connection === connection })
+            .filter { !scene.needsYouOnly || $0.agent.agentStatus == .blocked }
+        let query = query.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return scoped }
+        return scoped.filter { thread in
+            [thread.agent.conversationTitle, thread.workspace?.label, thread.agent.cwd, thread.connection.profile.name,
+             settings.inboxPreviews ? thread.connection.preview(thread.agent) : nil]
+                .contains { $0?.localizedStandardContains(query) == true }
+        }
     }
     private var liveRanks: [PaneAddress: InboxRank] {
         Dictionary(threads.map { ($0.address, inboxRank($0)) }) { first, _ in first }
@@ -169,7 +225,7 @@ struct SessionView: View {
     private func switchHost(by offset: Int) {
         guard let target = neighbor(offset) else { return }
         pushEdge = offset > 0 ? .trailing : .leading
-        withAnimation(.smooth) { model.select(target.id) }
+        withAnimation(.smooth) { model.select(target.id, in: scene) }
         hostSelection += 1
     }
 
@@ -181,35 +237,13 @@ struct SessionView: View {
         closing = nil
     }
 
-    @ViewBuilder private var newMenu: some View {
-        if allHosts {
-            ForEach(model.profiles) { profile in
-                Menu(profile.name) {
-                    ForEach(links.filter { $0.profile.id == profile.id }, id: \.identity) { link in
-                        if links.filter({ $0.profile.id == profile.id }).count > 1 {
-                            Menu(link.activeSession ?? "Session") { newButtons(link) }
-                        } else {
-                            newButtons(link)
-                        }
-                    }
-                }
-            }
-        } else if let link = model.connection {
-            newButtons(link)
-        }
-    }
-
-    @ViewBuilder private func newButtons(_ link: HostConnection) -> some View {
-        Button("New Agent…", systemImage: "sparkles") { sheet = .newThread(link, .agent) }
-        Button("New Workspace…", systemImage: "square.stack.3d.up") { sheet = .newThread(link, .workspace) }
-    }
-
     @ViewBuilder
     private var content: some View {
         if settings.inboxView == .machines {
             MachinesView()
         } else if !allHosts, case .failed(let failure) = connection.phase, connection.snapshot == nil {
             ScrollView {
+                sharedButton
                 FailureCard(connection: connection, failure: failure) { sheet = .editHost(connection.profile) }
             }
             .refreshable { await model.refresh() }
@@ -220,7 +254,17 @@ struct SessionView: View {
                 ProgressView()
             } description: {
                 Text("Connecting to \(connection.profile.address)…")
+            } actions: {
+                sharedButton
             }
+        }
+    }
+
+    /// The Shared shelf stays reachable while the host connects or fails; the inbox has its own row.
+    @ViewBuilder private var sharedButton: some View {
+        if !SharedInbox.shared.packages.isEmpty {
+            Button("Shared · \(SharedInbox.shared.packages.count)", systemImage: "square.and.arrow.down") { sheet = .shared }
+                .buttonStyle(.glass)
         }
     }
 
@@ -228,10 +272,11 @@ struct SessionView: View {
 
     private var inboxList: some View {
         let shown = sections(held: heldRanks != nil)
+        @Bindable var scene = scene
         let order = Self.order(shown)
         let newActivity = heldRanks != nil && Self.order(sections(held: false)) != order
         return ScrollViewReader { proxy in
-            List {
+            List(selection: $scene.selectedRoute) {
                 ForEach(links, id: \.identity) { link in
                     if case .failed(let failure) = link.phase {
                         Section {
@@ -245,9 +290,19 @@ struct SessionView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                if !SharedInbox.shared.packages.isEmpty {
+                    Section {
+                        Button { sheet = .shared } label: {
+                            Label { Text("Shared").foregroundStyle(Color.primary) } icon: { Image(systemName: "square.and.arrow.down") }
+                        }
+                        .badge(SharedInbox.shared.packages.count)
+                    }
+                }
                 inbox(shown)
             }
             .listStyle(.insetGrouped)
+            .safeAreaInset(edge: .top) { if scene.searchPresented { searchBar } }
+            .onChange(of: scene.searchPresented, initial: true) { _, shown in searchFocused = shown }
             .refreshable { await model.refresh() }
             .opacity(allHosts || connection.isLive ? 1 : 0.6)
             .animation(.smooth, value: blockedCount)
@@ -288,6 +343,27 @@ struct SessionView: View {
         }
     }
 
+    /// Opened from the toolbar's magnifying glass (or ⌘F); Done clears the filter.
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Title, workspace, folder or message", text: $query)
+                .focused($searchFocused)
+                .submitLabel(.search)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Done") {
+                query = ""
+                scene.searchPresented = false
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .glassEffect(.regular, in: .capsule)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 4)
+    }
+
     @ViewBuilder
     private func inbox(_ result: (needsYou: [Thread], sections: [InboxSection], hidden: [Thread])) -> some View {
             if !result.needsYou.isEmpty { Section("Needs You") { rows(result.needsYou) } }
@@ -303,17 +379,19 @@ struct SessionView: View {
                     }
                 }
             }
-            if result.needsYou.isEmpty && result.sections.isEmpty && result.hidden.isEmpty {
+            if result.needsYou.isEmpty && result.sections.isEmpty && result.hidden.isEmpty && !query.isEmpty {
+                ContentUnavailableView.search(text: query)
+            } else if result.needsYou.isEmpty && result.sections.isEmpty && result.hidden.isEmpty {
                 ContentUnavailableView {
                     Label("No agents", systemImage: "sparkles")
                 } description: {
-                    Text("Start an agent or create a workspace.")
+                    Text("Start an agent in any folder on this host.")
                 } actions: {
-                    Menu { newMenu } label: { Label("New", systemImage: "plus") }
+                    Button("New Agent", systemImage: "plus") { sheet = .newAgent(nil, workspace: nil) }
                 }
             }
             ForEach(links, id: \.identity) { link in
-                if let snapshot = link.snapshot {
+                if query.isEmpty, let snapshot = link.snapshot {
                     terminals(snapshot.panes.filter { pane in !snapshot.agents.contains { $0.paneID == pane.id } }, link)
                 }
             }
@@ -321,6 +399,31 @@ struct SessionView: View {
                 Section {
                     DisclosureGroup("Hidden (\(result.hidden.count))") {
                         rows(result.hidden, hidden: true)
+                    }
+                }
+            }
+            let ended = EndedAgents.shared.entries.filter { item in
+                item.ended && links.contains { $0.profile.id == item.hostID && $0.activeSession == item.session }
+            }
+            if !ended.isEmpty {
+                Section {
+                    DisclosureGroup("Ended (\(ended.count))") {
+                        ForEach(ended) { item in
+                            Button { sheet = .ended(item) } label: {
+                                VStack(alignment: .leading) {
+                                    Text(item.title).foregroundStyle(.primary)
+                                    Text("\(agentKindLabel(item.harness)) · \(item.workspaceLabel) · \(item.session)")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            .contextMenu {
+                                Button("Resume", systemImage: "play") { sheet = .resume(item) }
+                                Button("Remove from Shelf", role: .destructive) { EndedAgents.shared.remove(item) }
+                            }
+                            .swipeActions {
+                                Button("Remove", role: .destructive) { EndedAgents.shared.remove(item) }
+                            }
+                        }
                     }
                 }
             }
@@ -332,10 +435,11 @@ struct SessionView: View {
                 AgentRow(
                     agent: thread.agent,
                     status: thread.connection.presentedStatus(thread.agent),
-                    workspace: thread.workspace?.label,
+                    workspace: thread.workspace?.displayLabel,
                     unread: thread.connection.isUnread(thread.agent),
                     host: allHosts ? "\(thread.connection.profile.name) · \(thread.address.session)" : nil,
-                    subagents: thread.connection.workingSubagents[thread.agent.paneID] ?? 0
+                    subagents: thread.connection.workingSubagents[thread.agent.paneID] ?? 0,
+                    preview: settings.inboxPreviews ? thread.connection.preview(thread.agent) : nil
                 )
             }
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
@@ -354,6 +458,11 @@ struct SessionView: View {
                         .tint(.gray)
                 }
             }
+            .contextMenu {
+                Button("New Agent Here", systemImage: "plus") {
+                    sheet = .newAgent(thread.connection, workspace: thread.agent.workspaceID)
+                }
+            }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 Button("Close", systemImage: "trash", role: .destructive) { closing = thread }
             }
@@ -368,7 +477,7 @@ struct SessionView: View {
                     ForEach(Array(Set(panes.map(\.workspaceID))).sorted(), id: \.self) { workspaceID in
                         let workspace = link.snapshot?.workspaces.first { $0.id == workspaceID }
                         let noAgent = !(link.snapshot?.agents.contains { $0.workspaceID == workspaceID } ?? false)
-                        Text(workspace?.label ?? workspaceID)
+                        Text(workspace?.displayLabel ?? workspaceID)
                             .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                         ForEach(panes.filter { $0.workspaceID == workspaceID }) { pane in
                             NavigationLink(value: Route.terminal(link.address(paneID: pane.id))) {
@@ -400,7 +509,7 @@ struct SessionView: View {
     }
 
     private func didStart(_ agent: Agent, _ address: PaneAddress) {
-        model.navigationPath.append(agent.hasTranscript ? .conversation(address) : .terminal(address))
+        scene.navigationPath.append(agent.hasTranscript ? .conversation(address) : .terminal(address))
     }
 
 
@@ -424,9 +533,11 @@ struct SessionView: View {
     /// How the inbox is arranged; where it points is the title's job.
     private var viewMenu: some View {
         @Bindable var settings = settings
+        @Bindable var scene = scene
         return Menu {
             choices("View", $settings.inboxView, InboxKind.allCases, label: \.label)
             if settings.inboxView == .agents {
+                Toggle("Needs You Only", isOn: $scene.needsYouOnly)
                 choices("Group", $settings.inboxGrouping, InboxGrouping.allCases, label: \.label)
                 choices("Sort", $settings.inboxSort, InboxSort.allCases, label: \.label)
             }
@@ -453,6 +564,7 @@ struct SessionView: View {
 /// The title's host list: All Hosts or one host, in the user's order, plus the host's sessions.
 private struct HostList: View {
     @Environment(AppModel.self) private var model
+    @Environment(SceneState.self) private var scene
     @Environment(Settings.self) private var settings
     @Environment(\.dismiss) private var dismiss
     let connection: HostConnection
@@ -472,7 +584,7 @@ private struct HostList: View {
                     ForEach(model.profiles) { profile in
                         row(profile.name, detail: profile.address, selected: !allHosts && profile.id == connection.profile.id) {
                             settings.allHosts = false
-                            model.select(profile.id)
+                            model.select(profile.id, in: scene)
                         }
                     }
                     .onMove { model.moveProfiles(from: $0, to: $1) }
@@ -485,7 +597,7 @@ private struct HostList: View {
                     Section("herdr Session") {
                         ForEach(running) { session in
                             row(session.name, selected: session.name == connection.activeSession) {
-                                model.selectSession(session.name)
+                                model.selectSession(session.name, in: scene)
                             }
                         }
                     }
@@ -549,6 +661,8 @@ struct AgentRow: View {
     var host: String? = nil
     /// Subagents last seen working in this agent's open conversation; shown only while it works.
     var subagents = 0
+    /// A line of the newest message, when previews are on.
+    var preview: String? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -561,6 +675,12 @@ struct AgentRow: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if let preview {
+                    Text(preview)
+                        .font(.subheadline)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 0)
             if unread {
