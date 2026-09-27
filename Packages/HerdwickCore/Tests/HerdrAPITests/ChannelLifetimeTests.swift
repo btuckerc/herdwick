@@ -5,6 +5,30 @@ import Testing
 @testable import HerdrAPI
 
 @Suite(.timeLimit(.minutes(1))) struct ChannelLifetimeTests {
+    @Test func finiteDeadlineClosesBlockedInputWithoutResending() async {
+        let channel = LifetimeChannel(blockInput: true)
+        await #expect(throws: HerdrError.requestTimedOut) {
+            try await HerdrClient.finite(channel, timeout: .milliseconds(20)) {
+                try await channel.write([1])
+            }
+        }
+        #expect(channel.closed.withLock { $0 })
+    }
+
+    @Test func finiteDeadlineCannotReturnPartialOutputWhenCloseFinishesNormally() async {
+        let channel = LifetimeChannel(waitForConsumer: true)
+        channel.continuation.yield([1, 2, 3])
+        await #expect(throws: HerdrError.requestTimedOut) {
+            try await HerdrClient.finite(channel, timeout: .milliseconds(20)) {
+                defer { channel.consumerFinished.finish() }
+                var bytes: [UInt8] = []
+                for try await chunk in channel.output { bytes += chunk }
+                return bytes
+            }
+        }
+        #expect(channel.closed.withLock { $0 })
+    }
+
     @Test func collectClosesOnSuccessAndFailure() async throws {
         let success = LifetimeChannel()
         success.continuation.yield([1, 2, 3])
@@ -53,9 +77,14 @@ private final class LifetimeChannel: ExecChannel {
     private let blockInput: Bool
     let closed = Mutex(false)
     private let pending = Mutex<CheckedContinuation<Void, any Error>?>(nil)
+    private let waitForConsumer: Bool
+    private let consumerDone: AsyncStream<Void>
+    let consumerFinished: AsyncStream<Void>.Continuation
 
-    init(blockInput: Bool = false) {
+    init(blockInput: Bool = false, waitForConsumer: Bool = false) {
         self.blockInput = blockInput
+        self.waitForConsumer = waitForConsumer
+        (consumerDone, consumerFinished) = AsyncStream.makeStream()
         (output, continuation) = AsyncThrowingStream.makeStream()
         (started, start) = AsyncStream.makeStream()
     }
@@ -81,5 +110,6 @@ private final class LifetimeChannel: ExecChannel {
         }
         waiter?.resume(throwing: CommandError.channelClosed)
         continuation.finish()
+        if waitForConsumer { for await _ in consumerDone {} }
     }
 }

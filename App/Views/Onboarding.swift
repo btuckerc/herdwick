@@ -235,23 +235,38 @@ struct DirectHostForm: View {
 /// The public key to authorise, with a ready-to-run command.
 struct AuthorizedKeySection: View {
     @State private var copied = false
+    @State private var publicKey: String?
+    @State private var keyError: String?
 
     var body: some View {
         Section {
-            Text(DeviceKey.authorizedKeysLine)
-                .font(.caption.monospaced())
-                .textSelection(.enabled)
-                .lineLimit(3)
-            Button(copied ? "Copied" : "Copy Setup Command", systemImage: copied ? "checkmark" : "doc.on.doc") {
-                UIPasteboard.general.string = "mkdir -p ~/.ssh && echo '\(DeviceKey.authorizedKeysLine)' >> ~/.ssh/authorized_keys"
-                copied = true
+            if let publicKey {
+                Text(publicKey)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .lineLimit(3)
+                Button(copied ? "Copied" : "Copy Setup Command", systemImage: copied ? "checkmark" : "doc.on.doc") {
+                    UIPasteboard.general.string = "mkdir -p ~/.ssh && echo '\(publicKey)' >> ~/.ssh/authorized_keys"
+                    copied = true
+                }
+                ShareLink(item: publicKey) { Label("Share Public Key", systemImage: "square.and.arrow.up") }
+            } else if let keyError {
+                Text(keyError).foregroundStyle(.secondary)
+                Button("Try Again", action: loadKey)
+            } else {
+                ProgressView()
             }
-            ShareLink(item: DeviceKey.authorizedKeysLine) { Label("Share Public Key", systemImage: "square.and.arrow.up") }
         } header: {
             Text("This iPhone's key")
         } footer: {
             Text("Run the setup command once on the computer. The private key never leaves this iPhone.")
         }
+        .task { loadKey() }
+    }
+
+    private func loadKey() {
+        do { publicKey = try DeviceKey.authorizedKeysLine; keyError = nil }
+        catch { keyError = error.localizedDescription }
     }
 }
 

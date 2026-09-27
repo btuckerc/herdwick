@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import ImageIO
 
 /// Import only: never dials a host, sends a message, or opens the containing app. The agent
 /// picked here is a suggestion the app shows on its Shared shelf; the user reviews and sends there.
@@ -27,6 +28,8 @@ private struct ShareSheet: View {
     private enum Phase { case loading, ready(SharePackage), saved, failed(String) }
     @State private var phase = Phase.loading
     @State private var destination: String?
+    @State private var thumbnails: [UIImage?] = []
+    @State private var dismissed = false
     /// Conversations the app last saw with a transcript, from the App Group; may be out of date.
     private let snapshot = AttentionSnapshot.load()
     private var agents: [AttentionSnapshot.Item] { snapshot?.items.filter { $0.draftID != nil } ?? [] }
@@ -41,14 +44,16 @@ private struct ShareSheet: View {
                     case .saved, .failed:
                         ToolbarItem(placement: .confirmationAction) { Button("Done", action: close) }
                     case .loading, .ready:
-                        ToolbarItem(placement: .cancellationAction) { Button("Cancel", role: .cancel, action: close) }
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel", role: .cancel) { dismissed = true; close() }
+                        }
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Save", action: save).disabled({ if case .ready = phase { false } else { true } }())
                         }
                     }
                 }
         }
-        .task { await load() }
+        .task(id: dismissed) { if !dismissed { await load() } }
     }
 
     @ViewBuilder private var content: some View {
@@ -67,7 +72,7 @@ private struct ShareSheet: View {
                     if !package.images.isEmpty {
                         HStack {
                             ForEach(package.images.indices, id: \.self) { index in
-                                if let image = UIImage(data: package.images[index].data) {
+                                if thumbnails.indices.contains(index), let image = thumbnails[index] {
                                     Image(uiImage: image).resizable().scaledToFill()
                                         .frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 8))
                                 }
@@ -107,7 +112,7 @@ private struct ShareSheet: View {
     }
 
     private func save() {
-        guard case .ready(var package) = phase else { return }
+        guard !dismissed, case .ready(var package) = phase else { return }
         if let item = agents.first(where: { $0.draftID == destination }), let draftID = item.draftID {
             package.destination = .init(draftID: draftID, title: item.title, place: item.place)
         }
@@ -126,6 +131,7 @@ private struct ShareSheet: View {
             var package = SharePackage(id: UUID(), text: "", images: [])
             var texts: [String] = []
             for provider in providers {
+                try Task.checkCancellation()
                 if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                     package.images.append(.init(filename: "Shared image", data: try await load(provider, type: UTType.image.identifier)))
                 } else if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
@@ -139,8 +145,24 @@ private struct ShareSheet: View {
                     throw ImportLimit()
                 }
             }
+            let images = package.images
+            let previews = await Task.detached {
+                images.map { image -> UIImage? in
+                    guard let source = CGImageSourceCreateWithData(image.data as CFData, nil),
+                          let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                            kCGImageSourceCreateThumbnailFromImageAlways: true,
+                            kCGImageSourceCreateThumbnailWithTransform: true,
+                            kCGImageSourceThumbnailMaxPixelSize: 168,
+                          ] as CFDictionary) else { return nil }
+                    return UIImage(cgImage: thumbnail)
+                }
+            }.value
+            try Task.checkCancellation()
+            guard !dismissed else { return }
+            thumbnails = previews
             phase = .ready(package)
         } catch {
+            guard !Task.isCancelled, !dismissed else { return }
             phase = .failed(error.localizedDescription)
         }
     }
@@ -150,23 +172,85 @@ private struct ShareSheet: View {
     }
 
     private func load(_ provider: NSItemProvider, type: String) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
+        try await providerValue { gate in
             provider.loadDataRepresentation(forTypeIdentifier: type) { data, error in
-                if let data { continuation.resume(returning: data) }
-                else { continuation.resume(throwing: error ?? CocoaError(.fileReadUnknown)) }
+                if let data { gate.finish(.success(data)) }
+                else { gate.finish(.failure(error ?? CocoaError(.fileReadUnknown))) }
             }
         }
     }
 
     private func loadText(_ provider: NSItemProvider, type: String) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
+        try await providerValue { gate in
             provider.loadItem(forTypeIdentifier: type, options: nil) { item, error in
-                if let url = item as? URL { continuation.resume(returning: url.absoluteString) }
-                else if let text = item as? String { continuation.resume(returning: text) }
+                if let url = item as? URL { gate.finish(.success(url.absoluteString)) }
+                else if let text = item as? String { gate.finish(.success(text)) }
                 else if let data = item as? Data, let text = String(data: data, encoding: .utf8) {
-                    continuation.resume(returning: text)
-                } else { continuation.resume(throwing: error ?? CocoaError(.fileReadUnknown)) }
+                    gate.finish(.success(text))
+                } else { gate.finish(.failure(error ?? CocoaError(.fileReadUnknown))) }
             }
+            return nil
         }
+    }
+
+    private func providerValue<Value: Sendable>(
+        _ start: (ProviderLoad<Value>) -> Progress?
+    ) async throws -> Value {
+        let gate = ProviderLoad<Value>()
+        let deadline = Task {
+            do {
+                try await Task.sleep(for: .seconds(30))
+                gate.finish(.failure(CocoaError(.fileReadUnknown)))
+            } catch {}
+        }
+        defer { deadline.cancel() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if gate.wait(continuation) { gate.attach(start(gate)) }
+            }
+        } onCancel: {
+            gate.finish(.failure(CancellationError()))
+        }
+    }
+}
+
+/// Callback, cancellation and deadline race to settle once; late provider results are discarded.
+private final class ProviderLoad<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, any Error>?
+    private var result: Result<Value, any Error>?
+    private var progress: Progress?
+
+    func wait(_ continuation: CheckedContinuation<Value, any Error>) -> Bool {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(with: result)
+            return false
+        }
+        self.continuation = continuation
+        lock.unlock()
+        return true
+    }
+
+    func attach(_ progress: Progress?) {
+        lock.lock()
+        let finished = result != nil
+        if !finished { self.progress = progress }
+        lock.unlock()
+        if finished { progress?.cancel() }
+    }
+
+    func finish(_ result: Result<Value, any Error>) {
+        lock.lock()
+        guard self.result == nil else { lock.unlock(); return }
+        self.result = result
+        let continuation = self.continuation
+        self.continuation = nil
+        let progress = self.progress
+        self.progress = nil
+        lock.unlock()
+        if case .failure = result { progress?.cancel() }
+        continuation?.resume(with: result)
     }
 }

@@ -156,6 +156,7 @@ public struct TranscriptRecord: Sendable, Equatable {
 /// Splits appended bytes into transcript entries, holding back a partial last line.
 public struct TranscriptReader: Sendable {
     private var pending: [UInt8] = []
+    private var scannedBytes = 0
     private var skipsPartialLine: Bool
     private let format: TranscriptFormat
     /// Bytes fully turned into entries (or skipped), so the next read can start after them.
@@ -175,17 +176,21 @@ public struct TranscriptReader: Sendable {
         pending.append(contentsOf: bytes)
         var records: [TranscriptRecord] = []
         var start = 0
-        while let newline = pending[start...].firstIndex(of: 0x0A) {
+        var scan = scannedBytes
+        while let newline = pending[scan...].firstIndex(of: 0x0A) {
             let line = pending[start..<newline]
             start = newline + 1
+            scan = start
             if skipsPartialLine { skipsPartialLine = false; continue }
             if line.allSatisfy({ $0 == 0x20 || $0 == 0x0D }) { continue }
             records.append(.decode(line, format: format))
         }
+        if skipsPartialLine { start = pending.count }
         // A fresh array, not removeFirst: that keeps the capacity of the largest read (a
         // multi-megabyte head) alive for the whole conversation.
         if start > 0 { pending = Array(pending[start...]) }
         consumedBytes += start
+        scannedBytes = pending.count
         return records
     }
 
@@ -561,8 +566,9 @@ public struct Conversation: Sendable {
                 if message.role == .user { proposal = nil; pendingPlanReview = nil }
                 for call in message.toolCalls {
                     proposal = nil; pendingPlanReview = nil
+                    guard call.name == "write" else { continue }
                     let args = Self.object(call.arguments)
-                    if call.name == "write", args["path"] as? String == "xd://propose",
+                    if args["path"] as? String == "xd://propose",
                        let slug = args["content"] as? String, !slug.isEmpty {
                         proposal = (call.id, slug)
                     }
@@ -655,24 +661,20 @@ public struct Conversation: Sendable {
            case .tool(let tool) = items[lastToolIndex], tool.state == .failed {
             keep.insert(lastToolIndex)
         }
-        for index in items.indices {
-            guard case .assistant(_, let text) = items[index] else { continue }
-            let laterTurn = items.dropFirst(index + 1).contains { item in
-                switch item {
-                case .user, .ask, .peerMessage: true
-                default: false
-                }
+        var nextTurn: Int?
+        var nextAssistant: Int?
+        for index in items.indices.reversed() {
+            switch items[index] {
+            case .user, .ask, .peerMessage: nextTurn = index
+            default: break
             }
-            let isFinalAssistant = !items.dropFirst(index + 1).contains { if case .assistant = $0 { true } else { false } }
+            guard case .assistant(_, let text) = items[index] else { continue }
+            let isFinalAssistant = nextAssistant == nil
             let paragraphs = text.components(separatedBy: "\n\n").filter { !$0.isEmpty }.count
             let markdownStructure = text.split(separator: "\n").contains { $0.hasPrefix("#") || $0.hasPrefix("- ") || $0.hasPrefix("* ") || $0.range(of: #"^\d+\. "#, options: .regularExpression) != nil }
             if isFinalAssistant || paragraphs >= 2 || markdownStructure { keep.insert(index) }
-            if laterTurn, let next = items.indices.dropFirst(index + 1).first(where: { itemIndex in
-                switch items[itemIndex] { case .user, .ask, .peerMessage: true; default: false }
-            }) {
-                let previousTurn = items[index + 1..<next].contains { if case .assistant = $0 { true } else { false } }
-                if !previousTurn { keep.insert(index) }
-            }
+            if let nextTurn, nextAssistant == nil || nextAssistant! > nextTurn { keep.insert(index) }
+            nextAssistant = index
         }
         return items.enumerated().compactMap { keep.contains($0.offset) ? $0.element : nil }
     }
@@ -713,7 +715,7 @@ public struct Conversation: Sendable {
             switch items[index] {
             case .tool(var tool):
                 tool.state = message.isError ? .failed : .succeeded
-                tool.output = message.text.split(separator: "\n", omittingEmptySubsequences: false).prefix(200).joined(separator: "\n")
+                tool.output = message.text.split(separator: "\n", maxSplits: 200, omittingEmptySubsequences: false).prefix(200).joined(separator: "\n")
                 tool.details = message.details
                 tool.images = message.images
                 if tool.name == "wait" { applyWait(message.details) }

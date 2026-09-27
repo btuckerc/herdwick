@@ -219,6 +219,8 @@ struct MessageComposer: View {
     @State private var showFiles = false
     @State private var importing = false
     @State private var importError: String?
+    @State private var importTask: Task<Void, Never>?
+    @State private var importID = UUID()
 
     private var busy: Bool { sending || importing }
 
@@ -296,29 +298,56 @@ struct MessageComposer: View {
         .photosPicker(isPresented: $showPhotos, selection: $photos, maxSelectionCount: 4, matching: .images)
         .onChange(of: photos) { _, selection in
             guard !selection.isEmpty else { return }
+            importTask?.cancel()
+            let id = UUID()
+            importID = id
             importing = true
-            Task {
-                defer { photos = []; importing = false }
+            importTask = Task {
+                defer { if importID == id { photos = []; importing = false; importTask = nil } }
                 for item in selection {
                     do {
+                        try Task.checkCancellation()
                         guard attachments.count < 4 else { throw AttachmentError.tooMany }
                         guard let data = try await item.loadTransferable(type: Data.self) else {
                             throw AttachmentError.invalidImage
                         }
-                        attachments.append(try DraftAttachment.prepare(data, filename: "Photo", imageRequired: true))
-                    } catch { importError = error.localizedDescription }
+                        let attachment = try await DraftAttachment.prepareOffMain(data, filename: "Photo", imageRequired: true)
+                        guard attachments.count < 4 else { throw AttachmentError.tooMany }
+                        attachments.append(attachment)
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        importError = error.localizedDescription
+                    }
                 }
             }
         }
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            do {
-                for url in try result.get() {
-                    guard attachments.count < 4 else { throw AttachmentError.tooMany }
-                    let accessed = url.startAccessingSecurityScopedResource()
-                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-                    attachments.append(try DraftAttachment.prepare(Data(contentsOf: url, options: .mappedIfSafe), filename: url.lastPathComponent))
+            importTask?.cancel()
+            let id = UUID()
+            importID = id
+            importing = true
+            importTask = Task {
+                defer { if importID == id { importing = false; importTask = nil } }
+                do {
+                    for url in try result.get() {
+                        try Task.checkCancellation()
+                        guard attachments.count < 4 else { throw AttachmentError.tooMany }
+                        let attachment = try await DraftAttachment.prepareFile(url)
+                        guard attachments.count < 4 else { throw AttachmentError.tooMany }
+                        attachments.append(attachment)
+                    }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    importError = error.localizedDescription
                 }
-            } catch { importError = error.localizedDescription }
+            }
+        }
+        .onDisappear {
+            importID = UUID()
+            importTask?.cancel()
+            importTask = nil
+            importing = false
+            photos = []
         }
         .alert("Couldn't attach", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
             Button("OK", role: .cancel) {}

@@ -5,7 +5,7 @@ public enum AttachmentUpload {
     public static func command(session: String, filename: String, retentionMinutes: Int) -> String {
         let directory = "\"${TMPDIR:-/tmp}/herdwick-$(id -u)\""
         let file = shellQuote(filename)
-        return "root=\(directory); session=\(shellQuote(session)); d=\"$root/$session\"; umask 077; mkdir -p \"$d\" && find \"$root\" -type f -mmin +\(max(1, retentionMinutes)) -delete 2>/dev/null && cat > \"$d\"/\(file).part && mv \"$d\"/\(file).part \"$d\"/\(file) && printf '%s\\n' \"$d\"/\(file) && wc -c < \"$d\"/\(file)"
+        return HerdrClient.posix("root=\(directory); session=\(shellQuote(session)); d=\"$root/$session\"; umask 077; mkdir -p \"$d\" && find \"$root\" -type f -mmin +\(max(1, retentionMinutes)) -delete 2>/dev/null && cat > \"$d\"/\(file).part && mv \"$d\"/\(file).part \"$d\"/\(file) && printf '%s\\n' \"$d\"/\(file) && wc -c < \"$d\"/\(file)")
     }
 
     public static func upload(_ data: Data, session: String, filename: String, retentionMinutes: Int, runner: any CommandRunner) async throws -> String {

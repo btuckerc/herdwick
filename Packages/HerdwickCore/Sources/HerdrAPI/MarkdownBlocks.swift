@@ -118,7 +118,8 @@ public enum MarkdownBlocks {
             let rest = trimmed.dropFirst(hashes)
             guard rest.isEmpty || rest.first == " " else { return nil }
             var text = rest.trimmingCharacters(in: .whitespaces)
-            while text.hasSuffix("#") { text.removeLast() }
+            let content = text.dropLast(text.reversed().prefix { $0 == "#" }.count)
+            if content.isEmpty || content.last == " " || content.last == "\t" { text = String(content) }
             return .heading(level: hashes, text: text.trimmingCharacters(in: .whitespaces))
         }
 
@@ -206,12 +207,16 @@ public enum MarkdownBlocks {
             var escaped = false
             var inCode = false
             for ch in row {
-                if escaped { current.append(ch); escaped = false; continue }
+                if escaped {
+                    if ch != "|" || inCode { current.append("\\") }
+                    current.append(ch); escaped = false; continue
+                }
                 if ch == "\\" { escaped = true; continue }
                 if ch == "`" { inCode.toggle() }
                 if ch == "|", !inCode { result.append(current); current = ""; continue }
                 current.append(ch)
             }
+            if escaped { current.append("\\") }
             result.append(current)
             return result.map { $0.trimmingCharacters(in: .whitespaces) }
         }

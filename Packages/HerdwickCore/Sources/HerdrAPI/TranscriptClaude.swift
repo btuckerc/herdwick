@@ -47,8 +47,10 @@ internal enum ClaudeTranscript {
         default: break }
         }
         let typed = texts.joined(separator: "\n\n")
-        if typed.hasPrefix("[Request interrupted by user") { result.insert(.notice(typed), at: 0) }
-        else if !texts.isEmpty || !images.isEmpty { result.insert(.message(.init(id: id, role: .user, text: typed, images: images, timestamp: TranscriptMessage.date(r["timestamp"]))), at: 0) }
+        if r["isMeta"] as? Bool != true && !isHarness(typed) {
+            if typed.hasPrefix("[Request interrupted by user") { result.insert(.notice(typed), at: 0) }
+            else if !texts.isEmpty || !images.isEmpty { result.insert(.message(.init(id: id, role: .user, text: typed, images: images, timestamp: TranscriptMessage.date(r["timestamp"]))), at: 0) }
+        }
         return result.isEmpty ? [.metadata(type: type)] : result
     }
     private static func isHarness(_ s: String) -> Bool { ["<command-name>", "<command-message>", "<local-command-stdout>", "<system-reminder>", "Caveat:"].contains(where: s.hasPrefix) }

@@ -1,15 +1,21 @@
 import Foundation
 import HerdrAPI
+import UIKit
 
 /// Unsent composer text per conversation, kept across leaving the view and relaunches.
 /// Text only, in an atomic complete-protection file, dropped after two weeks.
 /// A locked/unreadable file is never replaced with an empty store.
+@MainActor
 enum DraftStore {
     private static let key = "composerDrafts"
     private static let lifetime: TimeInterval = 14 * 24 * 3600
     private static var file: URL { ProtectedFiles.directory.appendingPathComponent("Drafts.json") }
+    private static var cached: [String: Entry]?
+    private static let queue = DispatchQueue(label: "dev.btuckerc.herdwick.drafts", qos: .utility)
+    private static var backgroundTask = UIBackgroundTaskIdentifier.invalid
+    private static var revision: UInt64 = 0
 
-    private struct Entry: Codable {
+    private struct Entry: Codable, Sendable {
         var text: String
         var saved: Date
     }
@@ -24,7 +30,12 @@ enum DraftStore {
     }
 
     static func load(_ id: String) -> String? {
-        entries()?[id]?.text
+        guard let entry = entries()?[id] else { return nil }
+        guard entry.saved.timeIntervalSinceNow > -lifetime else {
+            save("", for: id)
+            return nil
+        }
+        return entry.text
     }
 
     /// The composer's text once the conversation's id becomes `id`. An agent gaining its
@@ -41,24 +52,67 @@ enum DraftStore {
         let text = current.isEmpty ? all[id]?.text ?? "" : current
         all.removeValue(forKey: previous)
         if !text.isEmpty { all[id] = Entry(text: text, saved: .now) }
-        try? store(all)
+        persist(all)
         return text
     }
 
-    /// Saving empty text forgets the draft. Returns whether the store now holds `text`.
+    /// Saving empty text forgets the draft. Every edit is enqueued in order, without debounce.
     @discardableResult
     static func save(_ text: String, for id: String) -> Bool {
+        save(text, for: id, completion: nil)
+    }
+
+    private static func save(_ text: String, for id: String,
+                             completion: (@Sendable (Bool) -> Void)?) -> Bool {
         guard var all = entries() else { return false }
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard all.removeValue(forKey: id) != nil else { return true }
+            if all.removeValue(forKey: id) == nil, completion == nil { return true }
         } else {
             all[id] = Entry(text: text, saved: .now)
         }
-        return (try? store(all)) != nil
+        persist(all, completion: completion)
+        return true
+    }
+
+    /// Used before consuming an imported draft: success means this edit reached protected storage.
+    static func saveChecked(_ text: String, for id: String) async -> Bool {
+        await withCheckedContinuation { continuation in
+            if !save(text, for: id, completion: { continuation.resume(returning: $0) }) {
+                continuation.resume(returning: false)
+            }
+        }
+    }
+
+    private static func persist(_ all: [String: Entry], completion: (@Sendable (Bool) -> Void)? = nil) {
+        cached = all
+        revision &+= 1
+        let revision = revision
+        if backgroundTask == .invalid {
+            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Save draft") {
+                MainActor.assumeIsolated { finishBackgroundWrite() }
+            }
+        }
+        let url = file
+        queue.async {
+            do {
+                try ProtectedFiles.write(JSONEncoder().encode(all), to: url)
+                completion?(true)
+            } catch { completion?(false) }
+            Task { @MainActor in
+                if self.revision == revision { finishBackgroundWrite() }
+            }
+        }
+    }
+
+    private static func finishBackgroundWrite() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
     }
 
     /// Live drafts; expired ones are dropped from storage as they're found.
     private static func entries() -> [String: Entry]? {
+        if let cached { return cached }
         do {
             var all: [String: Entry] = [:]
             if FileManager.default.fileExists(atPath: file.path) {
@@ -72,6 +126,7 @@ enum DraftStore {
             }
             let live = all.filter { $0.value.saved.timeIntervalSinceNow > -lifetime }
             if live.count < all.count { try store(live) }
+            cached = live
             return live
         } catch { return nil }
     }

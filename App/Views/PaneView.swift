@@ -12,7 +12,7 @@ struct PaneView: View {
     let connection: HostConnection
     let paneID: String
 
-    @State private var terminal = TerminalController()
+    @StateObject private var terminal = TerminalController()
     @State private var draft = ""
     @State private var attachments: [DraftAttachment] = []
     @State private var sending = false
@@ -29,6 +29,8 @@ struct PaneView: View {
     @State private var history: [[ANSIRun]] = []
     @State private var readingBack = false
     @State private var showsText = false
+    @State private var historyTask: Task<Void, Never>?
+    @State private var historyID = UUID()
 
     private var pane: Pane? { connection.snapshot?.panes.first { $0.id == paneID } }
     private var agent: Agent? { connection.snapshot?.agents.first { $0.paneID == paneID } }
@@ -80,7 +82,7 @@ struct PaneView: View {
                 .onScrollGeometryChange(for: Bool.self) { geometry in
                     geometry.contentOffset.y + geometry.containerSize.height < geometry.contentSize.height - 8
                 } action: { _, up in
-                    if up, !readingBack { Task { await loadHistory() } }
+                    if up, !readingBack { refreshHistory() }
                     readingBack = up
                 }
                 .opacity(connection.isLive && terminal.hasFrame ? 1 : 0.55)
@@ -127,11 +129,24 @@ struct PaneView: View {
         .onChange(of: settings.font) { terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
         .onChange(of: settings.fontSize) { terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
         .task(id: StreamKey(liveID: connection.liveID, typing: typing, grid: typing ? nil : terminal.grid)) {
-            guard let client = connection.client, let session = connection.activeSession, terminal.grid != nil else { return }
-            await terminal.run(client: client, session: session, pane: paneID, control: typing)
-            if typing, !Task.isCancelled { typing = false }
+            guard terminal.grid != nil else { return }
+            let control = typing
+            repeat {
+                guard !Task.isCancelled, connection.isLive, pane != nil, terminal.closedReason == nil,
+                      let client = connection.client, let session = connection.activeSession else { return }
+                await terminal.run(client: client, session: session, pane: paneID, control: control)
+                guard !Task.isCancelled else { return }
+                if control { typing = false; return }
+                guard terminal.closedReason == nil,
+                      (try? await Task.sleep(for: .seconds(2))) != nil else { return }
+            } while !Task.isCancelled
         }
-        .task(id: HistoryKey(liveID: connection.liveID, typing: typing)) { await loadHistory() }
+        .onChange(of: HistoryKey(liveID: connection.liveID, typing: typing), initial: true) {
+            cancelHistory()
+            refreshHistory()
+        }
+        .onAppear { refreshHistory() }
+        .onDisappear { cancelHistory() }
         .sensoryFeedback(.success, trigger: sentCount) { _, _ in settings.haptics }
         // Scenario cues for the demo captures: a typed reply, then the real send.
         .onChange(of: demo?.draft, initial: true) { _, text in if let text { draft = text } }
@@ -246,12 +261,36 @@ struct PaneView: View {
         }
     }
 
-    /// Refreshes the host width and the output above the screen. Read-only calls: the
-    /// host's pane is never scrolled or resized for reading.
-    private func loadHistory() async {
-        guard !typing, let client = connection.client, let session = connection.activeSession else { return }
-        if let size = try? await client.paneSize(paneID, session: session) { paneCols = size.cols }
-        if let lines = try? await client.paneHistory(paneID, session: session, lines: 500), !Task.isCancelled {
+    private func cancelHistory() {
+        historyID = UUID()
+        historyTask?.cancel()
+        historyTask = nil
+    }
+
+    /// One refresh at a time; further scroll-up gestures share the in-flight read.
+    private func refreshHistory() {
+        guard historyTask == nil, !typing, connection.isLive,
+              let client = connection.client, let session = connection.activeSession else { return }
+        let id = UUID()
+        historyID = id
+        historyTask = Task {
+            defer { if historyID == id { historyTask = nil } }
+            async let size: Void = refreshPaneSize(client: client, session: session, id: id)
+            async let text: Void = refreshHistoryText(client: client, session: session, id: id)
+            _ = await (size, text)
+        }
+    }
+
+    private func refreshPaneSize(client: HerdrClient, session: String, id: UUID) async {
+        if let size = try? await client.paneSize(paneID, session: session),
+           !Task.isCancelled, historyID == id, !typing {
+            paneCols = size.cols
+        }
+    }
+
+    private func refreshHistoryText(client: HerdrClient, session: String, id: UUID) async {
+        if let lines = try? await client.paneHistory(paneID, session: session, lines: 500),
+           !Task.isCancelled, historyID == id, !typing {
             history = lines
         }
     }

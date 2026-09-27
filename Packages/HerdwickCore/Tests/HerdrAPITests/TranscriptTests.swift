@@ -40,6 +40,20 @@ private extension Conversation {
 
 @Suite("Claude Code and Codex transcripts")
 struct AgentTranscriptTests {
+    @Test func claudeArrayHarnessFilteringRetainsResultsAndRealImages() {
+        var reader = TranscriptReader(format: .claude)
+        let harness = #"{"type":"user","message":{"content":[{"type":"text","text":"<system-reminder>internal</system-reminder>"},{"type":"tool_result","tool_use_id":"call","content":"done"}]}}"#
+        let meta = #"{"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"internal"}]}}"#
+        let image = #"{"type":"user","uuid":"image","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aA=="}}]}}"#
+        let interrupted = #"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#
+        let entries = reader.append(Array(([harness, meta, image, interrupted].joined(separator: "\n") + "\n").utf8))
+        let messages = entries.compactMap { if case .message(let message) = $0 { message } else { nil } }
+        #expect(messages.map(\.role) == [.toolResult, .user])
+        #expect(messages.first?.text == "done")
+        #expect(messages.last?.images.count == 1)
+        #expect(entries.contains(.notice("[Request interrupted by user]")))
+    }
+
     @Test func claudeSessionReadsAsAConversation() throws {
         let claude = try recorded("claude-transcript", .claude)
         #expect(claude.users.count == 4)
@@ -88,6 +102,30 @@ struct AgentTranscriptTests {
 }
 
 @Suite("Transcript") struct TranscriptTests {
+    @Test func bytewiseRecordsPreserveUTF8AndSkippedPrefixOffsets() {
+        let line = #"{"type":"message","id":"u","message":{"role":"user","content":"hé🐑"}}"# + "\n"
+        var reader = TranscriptReader()
+        var entries: [TranscriptEntry] = []
+        for byte in line.utf8 { entries += reader.append([byte]) }
+        #expect(entries == [.message(.init(id: "u", role: .user, text: "hé🐑"))])
+        #expect(reader.consumedBytes == line.utf8.count)
+        var mid = TranscriptReader(startsMidFile: true)
+        #expect(mid.append(Array("discard".utf8)).isEmpty)
+        #expect(mid.consumedBytes == 7)
+        #expect(mid.append(Array(("tail\n" + line).utf8)) == entries)
+        #expect(mid.consumedBytes == 12 + line.utf8.count)
+    }
+
+    @Test func toolOutputCapPreservesEmptyLinesAtBoundary() {
+        for count in [0, 1, 199, 200, 201, 1000] {
+            let text = Array(repeating: "", count: count).joined(separator: "\n") + "end\n"
+            var conversation = Conversation()
+            conversation.apply([.toolStarted(id: "call", name: "bash"),
+                .message(.init(id: "result", role: .toolResult, text: text, toolCallId: "call"))])
+            #expect(conversation.tools.first?.output == text.split(separator: "\n", omittingEmptySubsequences: false).prefix(200).joined(separator: "\n"))
+        }
+    }
+
     @Test func holdsBackPartialLinesAndCountsConsumedBytes() {
         var reader = TranscriptReader()
         let bytes = Array((Line.title + "\n" + Line.user).utf8)

@@ -96,41 +96,54 @@ enum TerminalFont: String, CaseIterable, Identifiable, Sendable {
 /// User preferences, persisted to UserDefaults on every change.
 @MainActor @Observable
 final class Settings {
-    var appearance: Appearance { didSet { save() } }
-    var darkThemeID: String { didSet { save() } }
-    var lightThemeID: String { didSet { save() } }
-    var font: TerminalFont { didSet { save() } }
-    var fontSize: Double { didSet { save() } }
-    var haptics: Bool { didSet { save() } }
-    var composerAutocorrect: Bool { didSet { save() } }
+    var appearance: Appearance { didSet { if appearance != oldValue { defaults.set(appearance.rawValue, forKey: "appearance") } } }
+    var darkThemeID: String { didSet { if darkThemeID != oldValue { defaults.set(darkThemeID, forKey: "theme.dark") } } }
+    var lightThemeID: String { didSet { if lightThemeID != oldValue { defaults.set(lightThemeID, forKey: "theme.light") } } }
+    var font: TerminalFont { didSet { if font != oldValue { defaults.set(font.rawValue, forKey: "font") } } }
+    var fontSize: Double { didSet { if fontSize != oldValue { defaults.set(fontSize, forKey: "fontSize") } } }
+    var haptics: Bool { didSet { if haptics != oldValue { defaults.set(haptics, forKey: "haptics") } } }
+    var composerAutocorrect: Bool { didSet { if composerAutocorrect != oldValue { defaults.set(composerAutocorrect, forKey: "composerAutocorrect") } } }
     /// The on-screen keyboard's Return sends instead of adding a line.
-    var returnKeySends: Bool { didSet { save() } }
-    var showWorkingSubagents: Bool { didSet { save() } }
-    var attachmentRetention: AttachmentRetention { didSet { save() } }
+    var returnKeySends: Bool { didSet { if returnKeySends != oldValue { defaults.set(returnKeySends, forKey: "returnKeySends") } } }
+    var showWorkingSubagents: Bool { didSet { if showWorkingSubagents != oldValue { defaults.set(showWorkingSubagents, forKey: "showWorkingSubagents") } } }
+    var attachmentRetention: AttachmentRetention { didSet { if attachmentRetention != oldValue { defaults.set(attachmentRetention.rawValue, forKey: "attachmentRetention") } } }
     /// One inbox for every saved host instead of the selected one.
-    var allHosts: Bool { didSet { save() } }
-    var inboxView: InboxKind { didSet { save() } }
-    var inboxGrouping: InboxGrouping { didSet { save() } }
-    var inboxSort: InboxSort { didSet { save() } }
+    var allHosts: Bool { didSet { if allHosts != oldValue { defaults.set(allHosts, forKey: "allHosts") } } }
+    var inboxView: InboxKind { didSet { if inboxView != oldValue { defaults.set(inboxView.rawValue, forKey: "inboxView") } } }
+    var inboxGrouping: InboxGrouping { didSet { if inboxGrouping != oldValue { defaults.set(inboxGrouping.rawValue, forKey: "inboxGrouping") } } }
+    var inboxSort: InboxSort { didSet { if inboxSort != oldValue { defaults.set(inboxSort.rawValue, forKey: "inboxSort") } } }
     /// Fold idle, read agents into one "N Idle" row.
-    var collapseIdle: Bool { didSet { save() } }
+    var collapseIdle: Bool { didSet { if collapseIdle != oldValue { defaults.set(collapseIdle, forKey: "collapseIdle") } } }
     /// How much of a conversation shows; set in Settings or any conversation's More menu.
-    var detailLevel: DetailLevel { didSet { save() } }
+    var detailLevel: DetailLevel { didSet { if detailLevel != oldValue { defaults.set(detailLevel.rawValue, forKey: "detailLevel") } } }
     /// Alerts for agents that need you (with the badge) and for finished work.
-    var notifyNeedsYou: Bool { didSet { save() } }
-    var notifyFinished: Bool { didSet { save() } }
+    var notifyNeedsYou: Bool {
+        didSet {
+            guard notifyNeedsYou != oldValue else { return }
+            defaults.set(notifyNeedsYou, forKey: "notifyNeedsYou")
+            onNotifyNeedsYouChange?()
+        }
+    }
+    @ObservationIgnored var onNotifyNeedsYouChange: (() -> Void)?
+    var notifyFinished: Bool { didSet { if notifyFinished != oldValue { defaults.set(notifyFinished, forKey: "notifyFinished") } } }
     /// Opt-in: while the app is away, hosts send alerts through the push relay (`Push`).
-    var pushWhileAway: Bool { didSet { save() } }
+    var pushWhileAway: Bool { didSet { if pushWhileAway != oldValue { defaults.set(pushWhileAway, forKey: "pushWhileAway") } } }
     /// Text inserted into the composer from its + menu; never sent by itself.
-    var snippets: [Snippet] { didSet { save() } }
+    var snippets: [Snippet] { didSet { if snippets != oldValue { defaults.set(try? JSONEncoder().encode(snippets), forKey: "snippets") } } }
     /// Named ways to start an agent: a kind plus literal extra arguments.
-    var launchPresets: [LaunchPreset] { didSet { save() } }
+    var launchPresets: [LaunchPreset] { didSet { if launchPresets != oldValue { defaults.set(try? JSONEncoder().encode(launchPresets), forKey: "launchPresets") } } }
     /// A line of each conversation's newest message under its inbox row.
-    var inboxPreviews: Bool { didSet { save() } }
+    var inboxPreviews: Bool { didSet { if inboxPreviews != oldValue { defaults.set(inboxPreviews, forKey: "inboxPreviews") } } }
     /// Keep the last loaded part of recent conversations on this device to read offline.
-    var offlineTranscripts: Bool { didSet { save() } }
+    var offlineTranscripts: Bool {
+        didSet {
+            guard offlineTranscripts != oldValue else { return }
+            defaults.set(offlineTranscripts, forKey: "offlineTranscripts")
+            TranscriptCache.preferenceChanged()
+        }
+    }
     /// Face ID (or the passcode) before the app shows anything, and a cover in the app switcher.
-    var appLock: Bool { didSet { save() } }
+    var appLock: Bool { didSet { if appLock != oldValue { defaults.set(appLock, forKey: "appLock") } } }
 
     private let defaults = UserDefaults.standard
 
@@ -170,32 +183,6 @@ final class Settings {
         TerminalTheme.named(scheme == .dark ? darkThemeID : lightThemeID)
     }
 
-    private func save() {
-        defaults.set(appearance.rawValue, forKey: "appearance")
-        defaults.set(darkThemeID, forKey: "theme.dark")
-        defaults.set(lightThemeID, forKey: "theme.light")
-        defaults.set(font.rawValue, forKey: "font")
-        defaults.set(fontSize, forKey: "fontSize")
-        defaults.set(haptics, forKey: "haptics")
-        defaults.set(composerAutocorrect, forKey: "composerAutocorrect")
-        defaults.set(returnKeySends, forKey: "returnKeySends")
-        defaults.set(showWorkingSubagents, forKey: "showWorkingSubagents")
-        defaults.set(attachmentRetention.rawValue, forKey: "attachmentRetention")
-        defaults.set(allHosts, forKey: "allHosts")
-        defaults.set(inboxView.rawValue, forKey: "inboxView")
-        defaults.set(inboxGrouping.rawValue, forKey: "inboxGrouping")
-        defaults.set(inboxSort.rawValue, forKey: "inboxSort")
-        defaults.set(collapseIdle, forKey: "collapseIdle")
-        defaults.set(detailLevel.rawValue, forKey: "detailLevel")
-        defaults.set(notifyNeedsYou, forKey: "notifyNeedsYou")
-        defaults.set(notifyFinished, forKey: "notifyFinished")
-        defaults.set(pushWhileAway, forKey: "pushWhileAway")
-        defaults.set(try? JSONEncoder().encode(snippets), forKey: "snippets")
-        defaults.set(try? JSONEncoder().encode(launchPresets), forKey: "launchPresets")
-        defaults.set(inboxPreviews, forKey: "inboxPreviews")
-        defaults.set(offlineTranscripts, forKey: "offlineTranscripts")
-        defaults.set(appLock, forKey: "appLock")
-    }
 }
 
 struct Snippet: Codable, Identifiable, Hashable {

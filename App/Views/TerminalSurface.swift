@@ -8,7 +8,7 @@ import UIKit
 /// re-renders; the stream is reopened on reconnect, resize (read-only mode) or
 /// when the user switches between reading and typing.
 @MainActor @Observable
-final class TerminalController {
+final class TerminalController: ObservableObject {
     /// The grid that fits the view with the current font; herdr renders at this size.
     private(set) var grid: Grid?
     private(set) var closedReason: String?
@@ -25,6 +25,7 @@ final class TerminalController {
     @ObservationIgnored let view = HerdwickTerminalView(frame: .zero)
     @ObservationIgnored private var session: TerminalSession?
     @ObservationIgnored private let bridge = DelegateBridge()
+    @ObservationIgnored private var runID = UUID()
 
     init() {
         view.terminalDelegate = bridge
@@ -58,17 +59,25 @@ final class TerminalController {
     /// Streams the pane until cancelled or the stream ends. `control` takes input
     /// ownership, which also resizes the pane to this grid on the host.
     func run(client: HerdrClient, session: String, pane: String, control: Bool) async {
-        guard let grid else { return }
-        closedReason = nil
+        guard let grid, closedReason == nil, !Task.isCancelled else { return }
+        let id = UUID()
+        runID = id
+        // A replacement must not forward input to the preceding stream while opening.
+        self.session = nil
         view.acceptsKeyboard = control
+        defer {
+            if runID == id {
+                self.session = nil
+                view.acceptsKeyboard = false
+            }
+        }
         do {
             let stream = try await client.terminal(pane: pane, session: session, cols: grid.cols, rows: grid.rows, control: control)
+            defer { Task { await stream.close() } }
+            guard !Task.isCancelled, runID == id else { return }
             self.session = stream
-            defer {
-                self.session = nil
-                Task { await stream.close() }
-            }
             for try await message in stream.messages {
+                guard !Task.isCancelled, runID == id else { return }
                 switch message {
                 case .frame(let frame):
                     view.feed(byteArray: frame.bytes[...])
@@ -80,9 +89,8 @@ final class TerminalController {
             }
         } catch is CancellationError {
         } catch {
-            // A dropped transport is handled by the connection; the view reopens on reconnect.
+            // Observe mode retries channel failures; control never silently retakes ownership.
         }
-        if !Task.isCancelled { view.acceptsKeyboard = false }
     }
 
     private func sizeChanged(cols: Int, rows: Int) {

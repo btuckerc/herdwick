@@ -5,6 +5,26 @@ import Testing
 @testable import HerdwickSSH
 
 @Suite struct SSHTimeoutTests {
+    @Test(.timeLimit(.minutes(1))) func cancellingSilentHandshakeReturnsPromptly() async throws {
+        let (accepted, continuation) = AsyncStream<Void>.makeStream()
+        let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .childChannelInitializer { channel in
+                continuation.yield()
+                return channel.eventLoop.makeSucceededVoidFuture()
+            }.bind(host: "127.0.0.1", port: 0).get()
+        defer { server.close(promise: nil); continuation.finish() }
+        let port = try #require(server.localAddress?.port)
+        let task = Task {
+            try await SSHConnection.connect(host: "127.0.0.1", port: port, username: "nobody",
+                authentication: .none, hostKeyValidator: { _ in true }, timeout: .seconds(30))
+        }
+        for await _ in accepted { break }
+        let started = ContinuousClock.now
+        task.cancel()
+        await #expect(throws: (any Error).self) { try await task.value }
+        #expect(ContinuousClock.now - started < .seconds(5))
+    }
+
     /// A peer that accepts TCP but never speaks SSH (a captive portal, a half-dead VPN)
     /// must fail within the handshake timeout instead of hanging the reconnect loop.
     @Test(.timeLimit(.minutes(1))) func silentPeerTimesOut() async throws {

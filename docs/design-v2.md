@@ -181,7 +181,11 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
   own `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (from `/proc/<foreground pid>/environ` on Linux), then
   the shell's, then `~/.claude` / `~/.codex`; `projects/*/<id>.jsonl` or
   `sessions/*/*/*/rollout-*-<id>.jsonl`. The app retries 4× (2/4/6 s): a fresh session's file
-  can appear after herdr reports the id.
+  can appear after herdr reports the id. Several agents' files are located concurrently (at
+  most four at a time). A conversation keeps its loaded transcript through reconnects and
+  while the agent's reference is missing, and starts over only when a different agent
+  session appears in the pane. Subagent and ended transcripts resume following after a
+  reconnect.
 - `TranscriptReader(format:)` adapts each format to the same `TranscriptEntry`s:
   - Claude (`TranscriptClaude`): `user`/`assistant` records, `tool_use`/`tool_result` blocks,
     `toolUseResult` as details; "[Request interrupted by user…" becomes a notice.
@@ -246,7 +250,8 @@ From the councils of 2026-09-25 (`Attention`, `Push`):
   on. They fire on a new unread state (one per pane and `state_change_seq`, remembered so a
   reconnect never repeats one), not for the conversation on screen, and are withdrawn once
   the agent is read or answered. Tapping one opens that agent. With Needs You on, the badge
-  counts blocked agents across hosts; finished work is not a debt.
+  counts blocked agents across hosts; finished work is not a debt. The badge is recounted
+  when Needs You is turned off or a host is removed.
 - The app only sees hosts while it runs. In the background iOS wakes it now and then
   (`BGAppRefreshTask`, earliest 15 min): it reconnects each link for one snapshot (20 s cap),
   which raises alerts and updates the widgets, then lets go.
@@ -256,7 +261,10 @@ From the councils of 2026-09-25 (`Attention`, `Push`):
   the app saw that state begin, and whether every host answered. Small shows the three counts
   and the most pressing agent; medium adds the two most pressing agents, each a link, with a
   live "4m ago", and drops to one agent (then counts only) when the widget or text size leaves
-  no room, so nothing clips. The app reloads timelines only when that content changes. Widgets say when
+  no room, so nothing clips. The app reloads timelines only when that content changes, and
+  rewrites the snapshot for freshness alone at most once a minute. While the snapshot is fresh
+  the widget asks for a reload at its 30-minute stale point, which re-reads the latest
+  snapshot. Widgets say when
   what they show is old or a host was offline and never claim "all clear" then.
   `herdwick://open?host=&session=&pane=` deep-links alerts and widgets.
 - Alerts while away (opt-in, Settings › Alerts While Away, with a How It Works page). As the

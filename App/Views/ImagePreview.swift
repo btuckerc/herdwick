@@ -32,6 +32,7 @@ struct ImageLoader {
     let transcript: String?
 
     @MainActor func data(_ image: TranscriptImage) async throws -> Data {
+        try Task.checkCancellation()
         if case .base64 = image.source {
             guard let data = await Task.detached(priority: .userInitiated, operation: { image.inlineData }).value else {
                 throw FileUnreadable(path: "image")
@@ -41,8 +42,9 @@ struct ImageLoader {
         guard let client = connection.client, let transcript, let path = image.blobPath(transcript: transcript) else {
             throw FileUnreadable(path: "image")
         }
-        await fetchGate.enter()
+        try await fetchGate.enter()
         defer { fetchGate.leave() }
+        try Task.checkCancellation()
         return try await client.readFile(path: path)
     }
 }
@@ -54,16 +56,27 @@ struct ImageLoader {
 @MainActor private final class FetchGate {
     private let limit: Int
     private var running = 0
-    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var waiting: [(id: UUID, continuation: CheckedContinuation<Void, any Error>)] = []
     init(limit: Int) { self.limit = limit }
 
-    func enter() async {
+    func enter() async throws {
+        try Task.checkCancellation()
         if running < limit { running += 1; return }
-        await withCheckedContinuation { waiting.append($0) }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiting.append((id, continuation))
+            }
+        } onCancel: {
+            Task { @MainActor in
+                guard let index = self.waiting.firstIndex(where: { $0.id == id }) else { return }
+                self.waiting.remove(at: index).continuation.resume(throwing: CancellationError())
+            }
+        }
     }
 
     func leave() {
-        if waiting.isEmpty { running -= 1 } else { waiting.removeFirst().resume() }
+        if waiting.isEmpty { running -= 1 } else { waiting.removeFirst().continuation.resume() }
     }
 }
 
@@ -89,8 +102,9 @@ func imageLinkPath(_ url: URL) -> String? {
 }
 
 /// Decodes at most `maxPixel` on the long side, off the main thread: never the full bitmap.
-private func downsample(_ data: Data, maxPixel: CGFloat) async -> CGImage? {
-    await Task.detached(priority: .userInitiated) {
+func downsample(_ data: Data, maxPixel: CGFloat) async -> CGImage? {
+    guard !Task.isCancelled else { return nil }
+    return await Task.detached(priority: .userInitiated) {
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
         let options = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -141,7 +155,7 @@ struct TranscriptImageThumbnail: View {
             guard visible, inStrip else { image = nil; return }
             let source = images[index]
             if let cached = thumbnails.object(forKey: source) { image = cached; return }
-            guard let loader, let data = try? await loader.data(source),
+            guard let loader, let data = try? await loader.data(source), !Task.isCancelled,
                   let decoded = await downsample(data, maxPixel: 360), !Task.isCancelled else { return }
             let thumbnail = UIImage(cgImage: decoded)
             thumbnails.setObject(thumbnail, forKey: source, cost: decoded.bytesPerRow * decoded.height)

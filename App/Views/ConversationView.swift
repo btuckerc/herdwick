@@ -16,6 +16,7 @@ struct ConversationView: View {
 
     @State private var feed = ConversationFeed()
     @State private var location: TranscriptLocation?
+    @State private var locatedRef: AgentSessionRef?
     @State private var locateFailure: String?
     @State private var draft = ""
     @State private var attachments: [DraftAttachment] = []
@@ -55,6 +56,7 @@ struct ConversationView: View {
     @State private var resuming: EndedAgent?
     /// The shared package already merged into this conversation's draft.
     @State private var importedPackageID: UUID?
+    @State private var shareImportTaskID: UUID?
     /// Find in the loaded messages: the query and which match is in view; nil when closed.
     @State private var find: (query: String, index: Int)?
     @FocusState private var findFocused: Bool
@@ -63,7 +65,7 @@ struct ConversationView: View {
     private var blocked: Bool { agent?.agentStatus == .blocked }
     /// omp waits on its Plan Review screen while herdr reports it idle, so the transcript says when.
     private var planReview: Bool {
-        agent?.agent == "omp" && agent?.agentStatus != .working && feed.conversation.pendingPlanReview != nil
+        locatedRef == agent?.agentSession && agent?.agent == "omp" && agent?.agentStatus != .working && feed.conversation.pendingPlanReview != nil
     }
 
     var body: some View {
@@ -100,52 +102,74 @@ struct ConversationView: View {
     /// Brings a share picked on the Shared shelf into this conversation's composer. Nothing is
     /// sent. The package records this draft as its home (one share per draft), so reopening the
     /// conversation later restores its images; its text joins the draft unless already there.
-    private func importSharedDraft() {
+    private func importSharedDraft() async {
         guard let id = scene.importPackageID, importedPackageID != id, let draftID,
               scene.importDraftID == draftID || scene.importAddress == connection.address(paneID: paneID),
-              let package = SharedInbox.shared.package(id) else { return }
-        scene.importPackageID = nil
-        scene.importDraftID = nil
-        scene.importAddress = nil
+              SharedInbox.shared.package(id) != nil else { return }
+        defer {
+            if !Task.isCancelled, self.draftID == draftID, scene.importPackageID == id {
+                scene.importPackageID = nil
+                scene.importDraftID = nil
+                scene.importAddress = nil
+            }
+        }
         do {
+            let package = try await SharedInbox.shared.load(id)
+            guard !Task.isCancelled, self.draftID == draftID, scene.importPackageID == id else { return }
+            let incoming = try await DraftAttachment.prepareImages(package.images)
+            guard !Task.isCancelled, self.draftID == draftID, scene.importPackageID == id,
+                  SharedInbox.shared.package(id) != nil else { return }
+            guard attachments.count + incoming.count <= SharePackage.maximumImages else { throw AttachmentError.tooMany }
             if SharedInbox.shared.packages.contains(where: { $0.staged == draftID && $0.id != id }) {
                 throw SharedInbox.Occupied()
             }
-            let incoming = try package.images.map { try DraftAttachment.prepare($0.data, filename: $0.filename, imageRequired: true) }
-            guard attachments.count + incoming.count <= SharePackage.maximumImages else { throw AttachmentError.tooMany }
             if package.staged != draftID { try SharedInbox.shared.stage(id, in: draftID) }
-            if !package.text.isEmpty, !draft.contains(package.text) {
-                let merged = draft.isEmpty ? package.text : draft + "\n" + package.text
-                guard DraftStore.save(merged, for: draftID) else { throw CocoaError(.fileWriteUnknown) }
+            while !package.text.isEmpty, !draft.contains(package.text) {
+                let previous = draft
+                let merged = previous.isEmpty ? package.text : previous + "\n" + package.text
+                let saved = await DraftStore.saveChecked(merged, for: draftID)
+                guard !Task.isCancelled, self.draftID == draftID, scene.importPackageID == id,
+                      SharedInbox.shared.package(id)?.staged == draftID else { return }
+                guard saved else { throw CocoaError(.fileWriteUnknown) }
+                // A keystroke during persistence belongs to the user; merge into that draft,
+                // never replace it with the pre-await snapshot.
+                if draft != previous { continue }
                 draft = merged
             }
+            guard attachments.count + incoming.count <= SharePackage.maximumImages else { throw AttachmentError.tooMany }
             attachments += incoming
             importedPackageID = id
         } catch {
+            guard !Task.isCancelled, self.draftID == draftID, scene.importPackageID == id else { return }
             sendError = error.localizedDescription
         }
     }
 
     /// A conversation opened any way restores the images of the share staged in its draft.
-    private func restoreStagedShare() {
+    private func restoreStagedShare() async {
         guard importedPackageID == nil, let draftID,
-              let package = SharedInbox.shared.packages.first(where: { $0.staged == draftID }) else { return }
+              let item = SharedInbox.shared.packages.first(where: { $0.staged == draftID }) else { return }
         do {
-            let incoming = try package.images.map { try DraftAttachment.prepare($0.data, filename: $0.filename, imageRequired: true) }
+            let package = try await SharedInbox.shared.load(item.id)
+            guard !Task.isCancelled, self.draftID == draftID, importedPackageID == nil else { return }
+            let incoming = try await DraftAttachment.prepareImages(package.images)
+            guard !Task.isCancelled, self.draftID == draftID, importedPackageID == nil,
+                  SharedInbox.shared.package(item.id)?.staged == draftID else { return }
             guard attachments.count + incoming.count <= SharePackage.maximumImages else { throw AttachmentError.tooMany }
             attachments += incoming
             importedPackageID = package.id
         } catch {
+            guard !Task.isCancelled, self.draftID == draftID, importedPackageID == nil else { return }
             sendError = error.localizedDescription
         }
     }
 
     /// After a successful send, the share staged in this draft leaves the shelf.
-    private func finishImport() {
-        guard let id = importedPackageID else { return }
+    private func finishImport(_ id: UUID?) {
+        guard let id else { return }
         do {
             try SharedInbox.shared.remove(id)
-            importedPackageID = nil
+            if importedPackageID == id { importedPackageID = nil }
         } catch {
             sendError = error.localizedDescription
         }
@@ -163,7 +187,8 @@ struct ConversationView: View {
             .task(id: LocateKey(liveID: connection.liveID, ref: agent?.agentSession)) {
                 await locateTranscript()
             }
-            .task(id: FeedKey(liveID: connection.liveID, location: location, window: feed.window)) {
+            .task(id: FeedKey(liveID: connection.liveID, location: location, window: feed.window, feedID: ObjectIdentifier(feed))) {
+                let feed = feed
                 // A kept offline copy paints first, even with no connection.
                 if let location { feed.restore(location, host: connection.identity) }
                 // A channel can end while the transport lives on (a brief background, a killed
@@ -173,7 +198,7 @@ struct ConversationView: View {
                     guard (try? await Task.sleep(for: .seconds(2))) != nil else { return }
                 }
             }
-            .task(id: PromptKey(liveID: connection.liveID, watching: (blocked || planReview) && pendingAsk == nil)) {
+            .task(id: PromptKey(liveID: connection.liveID, watching: (blocked || planReview) && pendingAsk == nil, ref: agent?.agentSession)) {
                 await watchScreenPrompt()
             }
             .onChange(of: ReadKey(sequence: agent?.stateChangeSeq, visible: showsLatest), initial: true) {
@@ -194,14 +219,25 @@ struct ConversationView: View {
             .onChange(of: feed.state, initial: true) { _, state in demo?.conversationReady = state == .live }
             .onChange(of: settings.offlineTranscripts) { _, on in if !on { feed.discardOfflineCopy() } }
             .onChange(of: scene.draftRevision) { if let draftID { draft = DraftStore.load(draftID) ?? draft } }
-            .onChange(of: scene.importPackageID, initial: true) { importSharedDraft() }
-            .onChange(of: draftID) { importSharedDraft(); restoreStagedShare() }
+            .task(id: SharedImportKey(importID: scene.importPackageID, draftID: draftID,
+                                     stagedID: scene.importPackageID == nil
+                                        ? SharedInbox.shared.packages.first(where: { $0.staged == draftID })?.id : nil,
+                                     sending: sending)) {
+                // A pending import waits for an in-flight delivery, and sends wait for imports.
+                guard !Task.isCancelled, !sending else { return }
+                let id = UUID()
+                shareImportTaskID = id
+                defer { if shareImportTaskID == id { shareImportTaskID = nil } }
+                await importSharedDraft()
+                guard !Task.isCancelled else { return }
+                await restoreStagedShare()
+            }
     }
 
     /// Read means seen: the app is in front, this agent's transcript has painted live and its
     /// end is on screen. An error or a still-loading feed is never a read.
     private var showsLatest: Bool {
-        scenePhase == .active && feed.state == .live && !feed.isOfflineCopy && locateFailure == nil && atLatest
+        locatedRef == agent?.agentSession && scenePhase == .active && feed.state == .live && !feed.isOfflineCopy && locateFailure == nil && atLatest
     }
 
     private var scroller: some View {
@@ -446,12 +482,10 @@ struct ConversationView: View {
 
     private var transcript: some View {
         let detail = detailOverride ?? settings.detailLevel
-        let items = feed.conversation.items(at: detail)
-        let finalAssistantID = items.reversed().first { if case .assistant = $0 { true } else { false } }?.id
-        let finished = detail == .digest && (agent?.agentStatus == .done || agent?.agentStatus == .idle)
+        let status = agent?.agentStatus
         // Not lazy: a lazy stack pinned to the bottom estimates the heights of rows it
         // hasn't drawn, and a new message re-anchors onto those estimates, which left the
-        // screen blank until the next reply. The transcript window bounds the row count.
+        // screen blank until the next reply.
         return VStack(alignment: .leading, spacing: 14) {
             if let date = feed.offlineDate {
                 Label("Offline copy · \(date.formatted(date: .abbreviated, time: .shortened))", systemImage: "icloud.slash")
@@ -468,11 +502,8 @@ struct ConversationView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
             }
-            ForEach(ConversationRow.rows(items, full: detail == .full,
-                                         lastAssistantID: finished ? finalAssistantID : nil,
-                                         subagents: { feed.conversation.subagents(spawnedBy: $0) })) { row in
-                row.view.id(row.id)
-            }
+            TranscriptRows(feed: feed, detail: detail, finished: status == .done || status == .idle)
+                .equatable()
             ForEach(queued) { message in
                 QueuedBubble(text: message.text, canUnsend: message.id == queued.last?.id && !unsending) {
                     Task { await unsend(message) }
@@ -485,7 +516,7 @@ struct ConversationView: View {
             // only fades out then, and the tail's height (which follow-latest tracks)
             // changes only when the turn starts or ends.
             if agent?.agentStatus == .working, feed.state == .live {
-                let stepRunning = items.contains { if case .tool(let tool) = $0 { tool.state == .running } else { false } }
+                let stepRunning = feed.conversation.items(at: detail).contains { if case .tool(let tool) = $0 { tool.state == .running } else { false } }
                 WorkingRow()
                     .opacity(stepRunning ? 0 : 1)
                     .accessibilityHidden(stepRunning)
@@ -550,7 +581,7 @@ struct ConversationView: View {
 
     /// The question the agent is blocked on, when its transcript says what it asked.
     private var pendingAsk: AskActivity? {
-        guard blocked, !feed.isOfflineCopy else { return nil }
+        guard locatedRef == agent?.agentSession, blocked, !feed.isOfflineCopy else { return nil }
         return feed.conversation.pendingAsk
     }
 
@@ -563,7 +594,7 @@ struct ConversationView: View {
                 }
                 .id(ask.toolCallId)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if blocked || planReview, let prompt = screenPrompt {
+            } else if locatedRef == agent?.agentSession, blocked || planReview, let prompt = screenPrompt {
                 PermissionCard(prompt: prompt, choosing: choosing, paneID: paneID, terminalAddress: connection.address(paneID: paneID)) { label in
                     Task { await choose(label, on: prompt) }
                 }
@@ -571,7 +602,7 @@ struct ConversationView: View {
             } else if blocked {
                 NeedsYouBanner(paneID: paneID, terminalAddress: connection.address(paneID: paneID))
             }
-            MessageComposer(draft: $draft, attachments: $attachments, sending: sending, focus: $composerFocused,
+            MessageComposer(draft: $draft, attachments: $attachments, sending: sending || shareImportTaskID != nil, focus: $composerFocused,
                             actions: composerActions) { Task { await sendDraft() } }
                 .disabled(!connection.isLive || agent == nil || feed.isOfflineCopy)
         }
@@ -583,11 +614,12 @@ struct ConversationView: View {
 
     private func sendDraft() async {
         let text = draft
-        guard !sending, connection.isLive, let agent,
+        guard !sending, shareImportTaskID == nil, connection.isLive, let agent,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
         // omp holds a message sent mid-turn as steering and can hand it back (Alt+Up).
         let queues = agent.agent == "omp" && agent.agentStatus == .working && attachments.isEmpty
         let usersBefore = userTexts.count
+        let packageID = importedPackageID
         sending = true
         defer { sending = false }
         // Cleared before delivery so the keyboard stays up and anything typed meanwhile is kept.
@@ -600,7 +632,7 @@ struct ConversationView: View {
             if queues { queued.append(QueuedSend(text: text, usersBefore: usersBefore)) }
             attachments = []
             sentCount += 1
-            finishImport()
+            finishImport(packageID)
         } catch {
             draft = restoringDraft(text, before: draft)
             sendError = "The message wasn't delivered completely. Your draft and attachments are still here. \(error.localizedDescription)"
@@ -616,9 +648,10 @@ struct ConversationView: View {
     /// The text is typed into omp's own editor, so that editor has to be empty first.
     private func sendFollowUp() async {
         let text = draft
-        guard !sending, connection.isLive, let client = connection.client, let session = connection.activeSession,
+        guard !sending, shareImportTaskID == nil, connection.isLive, let client = connection.client, let session = connection.activeSession,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let usersBefore = userTexts.count
+        let packageID = importedPackageID
         sending = true
         defer { sending = false }
         draft = ""
@@ -632,7 +665,7 @@ struct ConversationView: View {
             try await connection.sendKeys(["ctrl+q"], pane: paneID)
             queued.append(QueuedSend(text: text, usersBefore: usersBefore))
             sentCount += 1
-            finishImport()
+            finishImport(packageID)
         } catch {
             draft = restoringDraft(text, before: draft)
             sendError = "The message wasn't queued. Your draft is still here. \(error.localizedDescription)"
@@ -720,7 +753,16 @@ struct ConversationView: View {
     /// Finds the transcript file. Claude Code and Codex name only a session id, which the
     /// host resolves to a path; a dropped channel or a file not flushed yet gets a few retries.
     private func locateTranscript() async {
+        guard !Task.isCancelled else { return }
         guard let ref = agent?.agentSession else { return }
+        if locatedRef != ref {
+            locatedRef = ref
+            location = nil
+            locateFailure = nil
+            feed = ConversationFeed()
+            screenPrompt = nil
+            queued = []
+        }
         guard let client = connection.client, let session = connection.activeSession else {
             // Offline: a reported path is enough to paint a kept copy.
             if location == nil, let path = ref.transcriptPath, let format = TranscriptFormat(agent: ref.agent) {
@@ -731,11 +773,13 @@ struct ConversationView: View {
         for attempt in 1...4 {
             let failure: String
             do {
-                location = try await client.locateTranscript(ref, pane: paneID, session: session)
-                if location != nil { locateFailure = nil; return }
+                let found = try await client.locateTranscript(ref, pane: paneID, session: session)
+                guard !Task.isCancelled, agent?.agentSession == ref else { return }
+                if let found { location = found; locateFailure = nil; return }
                 failure = "The agent's transcript isn't on the host."
             } catch {
                 failure = "The agent's transcript couldn't be found."
+                guard !Task.isCancelled, agent?.agentSession == ref else { return }
             }
             guard attempt < 4 else {
                 // A location found before the drop is still right; keep following it.
@@ -756,6 +800,7 @@ struct ConversationView: View {
         }
         while !Task.isCancelled {
             if choosing == nil, let text = try? await client.readPane(paneID, session: session).text {
+                guard !Task.isCancelled else { return }
                 let parsed = ScreenPrompt.parse(text)
                 screenPrompt = parsed?.style == .choice && parsed?.phase == .question ? parsed : nil
             }
@@ -797,11 +842,20 @@ private struct FeedKey: Hashable {
     let liveID: Int
     let location: TranscriptLocation?
     let window: Int
+    let feedID: ObjectIdentifier
 }
 
 private struct PromptKey: Hashable {
     let liveID: Int
     let watching: Bool
+    let ref: AgentSessionRef?
+}
+
+private struct SharedImportKey: Hashable {
+    let importID: UUID?
+    let draftID: String?
+    let stagedID: UUID?
+    let sending: Bool
 }
 
 private struct ReadKey: Hashable {
@@ -810,6 +864,28 @@ private struct ReadKey: Hashable {
 }
 
 // MARK: - Rows
+
+/// Keep projection dependent only on transcript data and presentation preferences, not
+/// the composer's draft, focus or scroll state. Observation still tracks the feed here.
+private struct TranscriptRows: View, Equatable {
+    let feed: ConversationFeed
+    let detail: DetailLevel
+    let finished: Bool
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.feed === rhs.feed && lhs.detail == rhs.detail && lhs.finished == rhs.finished
+    }
+
+    var body: some View {
+        let items = feed.conversation.items(at: detail)
+        let finalAssistantID = items.reversed().first { if case .assistant = $0 { true } else { false } }?.id
+        ForEach(ConversationRow.rows(items, full: detail == .full,
+                                     lastAssistantID: detail == .digest && finished ? finalAssistantID : nil,
+                                     subagents: { feed.conversation.subagents(spawnedBy: $0) })) { row in
+            row.view.id(row.id)
+        }
+    }
+}
 
 /// Transcript items as the chat shows them: runs of tool calls and thinking fold into
 /// one "steps" row so the words stay readable.
@@ -834,10 +910,15 @@ enum ConversationRow: Identifiable {
         var run: [ConversationItem] = []
         for item in items {
             switch item {
-            case .tool(let tool) where !subagents(tool.id).isEmpty:
-                if !run.isEmpty { rows.append(.steps(run, full: full)); run = [] }
-                rows.append(.subagents(callID: tool.id, subagents(tool.id)))
-            case .tool, .thinking, .raw:
+            case .tool(let tool):
+                let children = subagents(tool.id)
+                if children.isEmpty {
+                    run.append(item)
+                } else {
+                    if !run.isEmpty { rows.append(.steps(run, full: full)); run = [] }
+                    rows.append(.subagents(callID: tool.id, children))
+                }
+            case .thinking, .raw:
                 run.append(item)
             default:
                 if !run.isEmpty { rows.append(.steps(run, full: full)); run = [] }

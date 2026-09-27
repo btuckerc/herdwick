@@ -28,6 +28,7 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     }
     private var badge = -1
     private var published: AttentionSnapshot?
+    private var publication: Task<Void, Never>?
     /// Pane key → the change it is at and when the app saw that change happen.
     private var stamps: [String: Stamp] {
         didSet { UserDefaults.standard.set(try? JSONEncoder().encode(stamps), forKey: "attention.stamps") }
@@ -68,18 +69,20 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     // MARK: Changes
 
     func changed(_ link: HostConnection) {
-        guard let snapshot = link.snapshot else { return }
+        guard let snapshot = link.snapshot else { refresh(); return }
         // A reset counter is conservatively ignored until it passes the known watermark.
         if link.isLive {
             var sequences = AttentionSnapshot.shared?.dictionary(forKey: AttentionSnapshot.sequencesKey) as? [String: Int] ?? [:]
             var references = AttentionSnapshot.shared?.dictionary(forKey: AttentionSnapshot.referencesKey) as? [String: String] ?? [:]
+            let oldSequences = sequences
+            let oldReferences = references
             for agent in snapshot.agents {
                 let key = Self.key(link.address(paneID: agent.paneID))
                 sequences[key] = max(sequences[key] ?? -1, agent.stateChangeSeq ?? 0)
                 references[key] = agent.agentSession?.value
             }
-            AttentionSnapshot.shared?.set(sequences, forKey: AttentionSnapshot.sequencesKey)
-            AttentionSnapshot.shared?.set(references, forKey: AttentionSnapshot.referencesKey)
+            if sequences != oldSequences { AttentionSnapshot.shared?.set(sequences, forKey: AttentionSnapshot.sequencesKey) }
+            if references != oldReferences { AttentionSnapshot.shared?.set(references, forKey: AttentionSnapshot.referencesKey) }
         }
         var settled: [String] = []
         var alerted = alerted
@@ -102,8 +105,18 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
             }
         }
         if !settled.isEmpty { center.removeDeliveredNotifications(withIdentifiers: settled) }
+        refresh()
+    }
+
+    /// Preference and connection-set changes update surfaces without issuing alerts.
+    func refresh() {
         refreshBadge()
-        publish()
+        guard publication == nil else { return }
+        publication = Task { [weak self] in
+            guard let self else { return }
+            self.publication = nil
+            self.publish()
+        }
     }
 
     private func post(_ agent: Agent, address: PaneAddress, link: HostConnection) {
@@ -189,9 +202,14 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         var snapshot = AttentionSnapshot(items: items, complete: complete, updated: .now, names: names,
                                          hosts: Dictionary(hosts.map { ($0.id.uuidString, $0.name) }) { first, _ in first })
         snapshot.sort()
+        let contentChanged = published?.items != snapshot.items || published?.complete != snapshot.complete
+            || published?.names != snapshot.names || published?.hosts != snapshot.hosts
+        let sinceLast = snapshot.updated.timeIntervalSince(published?.updated ?? .distantPast)
+        // Keep freshness current without rewriting identical aggregates on every event.
+        guard contentChanged || sinceLast >= 60 else { return }
         snapshot.save()
-        // Only a change in content costs a widget reload; the time alone is kept for staleness.
-        if published?.items != snapshot.items || published?.complete != snapshot.complete {
+        // A widget that went stale gets no further reload of its own, so a return to fresh is one.
+        if contentChanged || sinceLast >= 30 * 60 {
             WidgetCenter.shared.reloadAllTimelines()
         }
         published = snapshot

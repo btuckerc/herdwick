@@ -115,7 +115,7 @@ public struct TranscriptLocation: Sendable, Equatable, Hashable {
 extension HerdrClient {
     /// The transcript file behind `ref`. omp reports a path; Claude Code and Codex report
     /// only a session id, which names a file under their config directory: the agent's own
-    /// `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (read from its process on Linux), else the default.
+    /// `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (read from its process on Linux), then the shell's, then the default.
     public func locateTranscript(_ ref: AgentSessionRef, pane: String, session: String) async throws -> TranscriptLocation? {
         guard let format = TranscriptFormat(agent: ref.agent) else { return nil }
         if let path = ref.transcriptPath { return TranscriptLocation(path: path, format: format) }
@@ -130,13 +130,14 @@ extension HerdrClient {
         }
         let pid = (try? await foregroundProcessID(pane: pane, session: session)).map(String.init) ?? ""
         let script = """
-        dirs="\(fallback)"; p='\(pid)'
+        agent_dir=""; p='\(pid)'
         if [ -n "$p" ] && [ -r "/proc/$p/environ" ]; then
-          d=$(tr '\\0' '\\n' < "/proc/$p/environ" | sed -n 's/^\(variable)=//p' | head -n 1)
-          [ -n "$d" ] && dirs="$d $dirs"
+          agent_dir=$(tr '\\0' '\\n' < "/proc/$p/environ" | sed -n 's/^\(variable)=//p' | head -n 1)
         fi
-        [ -n "${\(variable):-}" ] && dirs="$\(variable) $dirs"
-        for d in $dirs; do for f in "$d"/\(pattern); do [ -f "$f" ] && { printf '%s\\n' "$f"; exit 0; }; done; done
+        for d in "$agent_dir" "${\(variable):-}" "\(fallback)"; do
+          [ -n "$d" ] || continue
+          for f in "$d"/\(pattern); do [ -f "$f" ] && { printf '%s\\n' "$f"; exit 0; }; done
+        done
         """
         let data = try await Self.collect(try await runner.exec(Self.posix(script)))
         let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)

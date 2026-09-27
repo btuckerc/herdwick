@@ -83,24 +83,13 @@ final class HostConnection {
     private let tailnet: Tailnet
     /// The scripted host behind the demo; set instead of dialling SSH.
     private let demo: DemoHost?
-    private let onProfileChange: (HostProfile) -> Void
-    var includesAllSessions = false {
-        didSet {
-            // An aggregate fallback must not masquerade as the explicitly selected
-            // session when returning to single-host mode.
-            if !includesAllSessions, let wanted = profile.session, activeSession != wanted {
-                activeSession = nil
-                snapshot = nil
-            }
-        }
-    }
+    var includesAllSessions = false
     private let onSessions: ((HostConnection) -> Void)?
 
-    init(profile: HostProfile, tailnet: Tailnet, demo: DemoHost? = nil, onSessions: ((HostConnection) -> Void)? = nil, onProfileChange: @escaping (HostProfile) -> Void) {
+    init(profile: HostProfile, tailnet: Tailnet, demo: DemoHost? = nil, onSessions: ((HostConnection) -> Void)? = nil) {
         self.profile = profile
         self.tailnet = tailnet
         self.demo = demo
-        self.onProfileChange = onProfileChange
         self.onSessions = onSessions
         supervisor = ConnectionSupervisor(migratesAcrossRoutes: profile.isTailnet)
     }
@@ -285,13 +274,32 @@ final class HostConnection {
     nonisolated private static func readActivity(_ current: [String: PaneActivity], agents: [Agent],
                                                  client: HerdrClient, session: String) async -> [String: PaneActivity] {
         var next: [String: PaneActivity] = [:]
+        var missing: [(String, AgentSessionRef)] = []
         for agent in agents {
             guard let ref = agent.agentSession, TranscriptFormat(agent: ref.agent) != nil else { continue }
-            var entry = current[agent.paneID].flatMap { $0.ref == ref ? $0 : nil } ?? PaneActivity(ref: ref)
-            if entry.transcript == nil, let location = try? await client.locateTranscript(ref, pane: agent.paneID, session: session) {
-                entry.transcript = TranscriptActivity(path: location.path, format: location.format)
-            }
+            let entry = current[agent.paneID].flatMap { $0.ref == ref ? $0 : nil } ?? PaneActivity(ref: ref)
             next[agent.paneID] = entry
+            if entry.transcript == nil { missing.append((agent.paneID, ref)) }
+        }
+        await withTaskGroup(of: (String, AgentSessionRef, TranscriptLocation?).self) { group in
+            var remaining = missing.makeIterator()
+            func enqueue(_ candidate: (String, AgentSessionRef)) {
+                group.addTask {
+                    guard !Task.isCancelled else { return (candidate.0, candidate.1, nil) }
+                    let location = try? await client.locateTranscript(candidate.1, pane: candidate.0, session: session)
+                    return (candidate.0, candidate.1, location)
+                }
+            }
+            for _ in 0..<4 {
+                if let candidate = remaining.next() { enqueue(candidate) }
+            }
+            for await (pane, ref, location) in group {
+                guard !Task.isCancelled else { group.cancelAll(); break }
+                if let location, next[pane]?.ref == ref {
+                    next[pane]?.transcript = TranscriptActivity(path: location.path, format: location.format)
+                }
+                if let candidate = remaining.next() { enqueue(candidate) }
+            }
         }
         var panes = Set(next.keys)
         for _ in 0..<12 {
@@ -320,7 +328,8 @@ final class HostConnection {
 
     // MARK: Inputs
 
-    func handle(_ input: ConnectionSupervisor.Input) {
+    func handle(_ input: ConnectionSupervisor.Input, notifyAttention: Bool = true) {
+        let wasLive = isLive
         let effects = supervisor.handle(input)
         phase = supervisor.phase
         for effect in effects {
@@ -343,6 +352,7 @@ final class HostConnection {
                 retry = nil
             }
         }
+        if notifyAttention, wasLive != isLive { onAttentionChange?(self) }
     }
 
     /// Closes the link for good: its host or session was removed or replaced.
@@ -355,14 +365,6 @@ final class HostConnection {
         guard let key = rejectedHostKey else { return }
         Keychain.set(key.publicKey, for: profile.hostKeyAccount)
         rejectedHostKey = nil
-        handle(.userRetry)
-    }
-
-    func switchSession(to name: String) {
-        guard name != activeSession else { return }
-        profile.session = name
-        onProfileChange(profile)
-        snapshot = nil
         handle(.userRetry)
     }
 
@@ -521,12 +523,16 @@ final class HostConnection {
                 speculative = nil
                 for try await update in snapshots {
                     guard generation == self.generation else { return }
-                    self.apply(update.snapshot, authoritative: { if case .live = update { true } else { false } }())
-                    if case .live = update, !wentLive {
+                    let firstLive: Bool
+                    if case .live = update { firstLive = !wentLive } else { firstLive = false }
+                    if firstLive {
                         wentLive = true
                         self.client = client
                         self.liveID += 1
-                        self.handle(.connected)
+                        self.handle(.connected, notifyAttention: false)
+                    }
+                    self.apply(update.snapshot, authoritative: { if case .live = update { true } else { false } }())
+                    if firstLive {
                         self.onLive?(self)
                         self.startActivityTimer()
                         self.refreshActivity()
@@ -607,7 +613,7 @@ final class HostConnection {
 
     private func dial(_ profile: HostProfile) async throws -> SSHConnection {
         let authentication: SSHAuthentication = switch profile.auth {
-        case .deviceKey: .ed25519(DeviceKey.load(hostID: profile.id))
+        case .deviceKey: .ed25519(try DeviceKey.load(hostID: profile.id))
         case .password: .password(Keychain.string(for: profile.passwordAccount) ?? "")
         case .tailscaleSSH: .none
         }

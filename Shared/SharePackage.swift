@@ -44,16 +44,58 @@ struct SharePackage: Codable, Identifiable {
         }
         let url = try Self.directory().appendingPathComponent(id.uuidString + ".json")
         try JSONEncoder().encode(self).write(to: url, options: [.atomic, .completeFileProtection])
+        try metadata.save()
     }
-    /// Newest first. Throws while the device is locked rather than reporting none.
-    static func pending() throws -> [Self] {
+    /// Newest first. Old packages acquire a lightweight sidecar once, on the I/O worker.
+    static func pending() throws -> [Metadata] {
         try FileManager.default.contentsOfDirectory(at: directory(), includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
-            .map { try JSONDecoder().decode(Self.self, from: Data(contentsOf: $0)) }
+            .map { url in
+                let sidecar = url.deletingPathExtension().appendingPathExtension("metadata")
+                if FileManager.default.fileExists(atPath: sidecar.path) {
+                    return try JSONDecoder().decode(Metadata.self, from: Data(contentsOf: sidecar))
+                }
+                let metadata = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url)).metadata
+                try metadata.save()
+                return metadata
+            }
             .sorted { $0.saved > $1.saved }
     }
-    func remove() throws {
-        try FileManager.default.removeItem(at: Self.directory().appendingPathComponent(id.uuidString + ".json"))
+
+    static func load(_ id: UUID) throws -> Self {
+        let root = try directory()
+        var package = try JSONDecoder().decode(Self.self, from: Data(contentsOf: root.appendingPathComponent(id.uuidString + ".json")))
+        let sidecar = root.appendingPathComponent(id.uuidString + ".metadata")
+        if FileManager.default.fileExists(atPath: sidecar.path) {
+            package.staged = try JSONDecoder().decode(Metadata.self, from: Data(contentsOf: sidecar)).staged
+        }
+        return package
+    }
+
+    var metadata: Metadata {
+        Metadata(id: id, text: text, images: images.map { .init(filename: $0.filename) },
+                 saved: saved, destination: destination, staged: staged)
+    }
+
+    struct Metadata: Codable, Identifiable, Sendable {
+        struct Image: Codable, Sendable { let filename: String }
+        let id: UUID
+        let text: String
+        let images: [Image]
+        let saved: Date
+        let destination: Destination?
+        var staged: String?
+
+        func save() throws {
+            let url = try SharePackage.directory().appendingPathComponent(id.uuidString + ".metadata")
+            try JSONEncoder().encode(self).write(to: url, options: [.atomic, .completeFileProtection])
+        }
+
+        func remove() throws {
+            let root = try SharePackage.directory()
+            try FileManager.default.removeItem(at: root.appendingPathComponent(id.uuidString + ".json"))
+            try? FileManager.default.removeItem(at: root.appendingPathComponent(id.uuidString + ".metadata"))
+        }
     }
 }
 
@@ -71,3 +113,7 @@ extension SharePackage {
         staged = try c.decodeIfPresent(String.self, forKey: .staged)
     }
 }
+
+extension SharePackage: Sendable {}
+extension SharePackage.Image: Sendable {}
+extension SharePackage.Destination: Sendable {}

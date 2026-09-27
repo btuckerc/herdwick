@@ -126,9 +126,9 @@ private struct OutputBlock: View {
     @State private var showingAll = false
 
     var body: some View {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         VStack(alignment: .leading, spacing: 5) {
-            Text((showingAll ? lines : Array(lines.prefix(limit))).joined(separator: "\n"))
+            Text(showingAll ? text : lines.prefix(limit).joined(separator: "\n"))
                 .font(.caption2.monospaced())
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)

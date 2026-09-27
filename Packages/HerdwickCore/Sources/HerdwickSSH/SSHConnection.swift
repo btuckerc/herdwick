@@ -69,11 +69,10 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
         timeout: TimeAmount = .seconds(15)
     ) async throws -> SSHConnection {
         let setup = Setup(username: username, authentication: authentication, validator: hostKeyValidator)
-        let channel = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .connectTimeout(timeout)
-            .channelInitializer(setup.initialize)
-            .connect(host: host, port: port)
-            .get()
+        let channel = try await setup.bootstrap { loop, initialize in
+            ClientBootstrap(group: loop).connectTimeout(timeout)
+                .channelInitializer(initialize).connect(host: host, port: port)
+        }
         return try await setup.finish(channel: channel, timeout: timeout, keepaliveInterval: keepaliveInterval)
     }
 
@@ -89,10 +88,9 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
         timeout: TimeAmount = .seconds(15)
     ) async throws -> SSHConnection {
         let setup = Setup(username: username, authentication: authentication, validator: hostKeyValidator)
-        let channel = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .channelInitializer(setup.initialize)
-            .withConnectedSocket(fd)
-            .get()
+        let channel = try await setup.bootstrap { loop, initialize in
+            ClientBootstrap(group: loop).channelInitializer(initialize).withConnectedSocket(fd)
+        }
         return try await setup.finish(channel: channel, timeout: timeout, keepaliveInterval: keepaliveInterval)
     }
 
@@ -104,6 +102,10 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
         let child = try await withTaskCancellationHandler {
             channel.eventLoop.execute { [handler] in
                 guard operation.isPending else { return }
+                let deadline = self.channel.eventLoop.scheduleTask(in: .seconds(60)) {
+                    operation.complete(.failure(SSHError.timedOut))
+                }
+                operation.result.futureResult.whenComplete { _ in deadline.cancel() }
                 let opened = self.channel.eventLoop.makePromise(of: Channel.self)
                 handler.value.createChannel(opened, channelType: .session) { child, _ in
                     guard operation.attach(child) else {
@@ -237,6 +239,29 @@ private final class Setup: @unchecked Sendable {
         self.validator = validator
     }
 
+    func bootstrap(
+        _ connect: (any EventLoop, @escaping @Sendable (Channel) -> EventLoopFuture<Void>) -> EventLoopFuture<Channel>
+    ) async throws -> Channel {
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let operation = PendingChannel(eventLoop: loop)
+        return try await withTaskCancellationHandler {
+            // Always hand an adopted socket to NIO, even if already cancelled; NIO owns its closure.
+            let future = connect(loop) { channel in
+                guard operation.attach(channel) else { return loop.makeFailedFuture(CancellationError()) }
+                return self.initialize(channel)
+            }
+            future.whenComplete { operation.complete($0) }
+            let channel = try await operation.result.futureResult.get()
+            if Task.isCancelled {
+                channel.close(promise: nil)
+                throw CancellationError()
+            }
+            return channel
+        } onCancel: {
+            loop.execute { operation.complete(.failure(CancellationError())) }
+        }
+    }
+
     @Sendable func initialize(_ channel: Channel) -> EventLoopFuture<Void> {
         let hostAuth = HostAuth(validator: validator)
         let handler = NIOSSHHandler(
@@ -269,7 +294,16 @@ private final class Setup: @unchecked Sendable {
         }
         defer { deadline.cancel() }
         do {
-            try await watcher.authenticated.futureResult.get()
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await watcher.authenticated.futureResult.get()
+                try Task.checkCancellation()
+            } onCancel: {
+                channel.eventLoop.execute {
+                    watcher.complete(CancellationError())
+                    channel.close(promise: nil)
+                }
+            }
         } catch {
             channel.close(promise: nil)
             throw error

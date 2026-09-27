@@ -2,6 +2,17 @@ import Testing
 @testable import HerdrAPI
 
 @Suite struct MarkdownBlocksTests {
+    @Test func literalHeadingHashesAndTableBackslashesSurvive() {
+        #expect(MarkdownBlocks.parse("# C#\n# Title ###\n# escaped \\#") == [
+            .heading(level: 1, text: "C#"), .heading(level: 1, text: "Title"),
+            .heading(level: 1, text: "escaped \\#"),
+        ])
+        let blocks = MarkdownBlocks.parse("path|note\n-|-\n`C:\\Users`|ends\\\nplain\\name|a\\|b")
+        #expect(blocks == [.table(MarkdownTable(header: ["path", "note"],
+            alignments: [.leading, .leading],
+            rows: [["`C:\\Users`", "ends\\"], ["plain\\name", "a|b"]]))])
+    }
+
     @Test func tableWithAlignmentsEscapesAndRaggedRows() {
         let blocks = MarkdownBlocks.parse("""
         Results:

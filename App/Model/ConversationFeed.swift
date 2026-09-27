@@ -40,6 +40,7 @@ final class ConversationFeed {
         state = .loading
     }
     private var paintedHost: SessionAddress?
+    private var generation = 0
 
     /// May be called before a connection exists, including for an ended conversation.
     func restore(_ location: TranscriptLocation, host: SessionAddress) {
@@ -68,6 +69,8 @@ final class ConversationFeed {
     /// to the background) is not a transcript problem, so only a first read that never
     /// painted reports `unavailable`.
     func follow(_ location: TranscriptLocation, client: HerdrClient, host: SessionAddress? = nil) async {
+        generation += 1
+        let generation = generation
         let path = location.path
         if let host {
             restore(location, host: host)
@@ -78,18 +81,21 @@ final class ConversationFeed {
             paintedPath = nil
             state = .loading
         }
+        var receivedLiveCopy = false
         let liveness = Task { @MainActor [weak self] in
             guard let self, location.format == .omp else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
-                guard !Task.isCancelled, !self.isOfflineCopy, !self.conversation.workingSubagents.isEmpty else { continue }
+                guard !Task.isCancelled, generation == self.generation else { return }
+                guard receivedLiveCopy, !self.isOfflineCopy, !self.conversation.workingSubagents.isEmpty else { continue }
                 var paths: [String: String] = [:]
                 for activity in self.conversation.workingSubagents {
                     if let child = SubagentTranscript.path(parentPath: path, format: location.format, subagentID: activity.id) {
                         paths[activity.id] = child
                     }
                 }
-                if let states = try? await client.childTranscriptStates(paths) {
+                if let states = try? await client.childTranscriptStates(paths),
+                   !Task.isCancelled, generation == self.generation {
                     self.conversation.reconcile(childStates: states)
                 }
             }
@@ -97,12 +103,14 @@ final class ConversationFeed {
         defer { liveness.cancel() }
         if state != .live || paintedPath != path { state = .loading }
         var raw = Data()
+        var cacheRevision = TranscriptCache.revision
+        var caching = TranscriptCache.isEnabled && host != nil
         var dropsFirstLine = false
         var cacheHasEarlier = false
         var lastSave = Date.distantPast
-        var receivedLiveCopy = false
         func saveCopy() {
-            guard receivedLiveCopy, !dropsFirstLine, let host else { return }
+            guard generation == self.generation, cacheRevision == TranscriptCache.revision,
+                  TranscriptCache.isEnabled, caching, receivedLiveCopy, !dropsFirstLine, let host else { return }
             let complete = raw.lastIndex(of: 10).map { Data(raw[...$0]) } ?? Data()
             TranscriptCache.save(host: host, path: path, title: title,
                                  bytes: complete, hasEarlier: cacheHasEarlier)
@@ -111,41 +119,63 @@ final class ConversationFeed {
         defer { saveCopy() }
         do {
             let head = try await client.readFileTail(path: path, from: 0, limit: 4096)
+            guard !Task.isCancelled, generation == self.generation else { return }
             title = TranscriptReader.title(inHead: head.bytes, format: location.format)
             let start = max(0, head.fileSize - window)
             hasEarlier = start > 0
             dropsFirstLine = start > 0
             cacheHasEarlier = hasEarlier
             var reader = TranscriptReader(format: location.format, startsMidFile: start > 0)
-            var fresh = Conversation()
+            var staging: Conversation? = Conversation()
             var painted = head.fileSize == 0
             if painted {
-                conversation = fresh
+                conversation = staging!
+                staging = nil
                 paintedPath = path
                 offlineDate = nil
                 state = .live
                 receivedLiveCopy = true
             }
             for try await chunk in client.followFile(path: path, from: start) {
-                raw.append(contentsOf: chunk)
-                if dropsFirstLine, let newline = raw.firstIndex(of: 10) {
-                    raw = Data(raw.suffix(from: raw.index(after: newline)))
-                    dropsFirstLine = false
-                }
-                let limit = min(window, TranscriptCache.maximumBytes)
-                if raw.count > limit {
-                    raw = Data(raw.suffix(limit))
+                guard !Task.isCancelled, generation == self.generation else { return }
+                let enabled = TranscriptCache.isEnabled && host != nil
+                if caching != enabled || cacheRevision != TranscriptCache.revision {
+                    raw = Data()
+                    caching = enabled
+                    cacheRevision = TranscriptCache.revision
+                    // Enabling mid-stream starts at an unknown JSONL boundary.
                     dropsFirstLine = true
                     cacheHasEarlier = true
-                    if let newline = raw.firstIndex(of: 10) {
+                }
+                if caching {
+                    raw.append(contentsOf: chunk)
+                    if dropsFirstLine, let newline = raw.firstIndex(of: 10) {
                         raw = Data(raw.suffix(from: raw.index(after: newline)))
                         dropsFirstLine = false
                     }
+                    let limit = min(window, TranscriptCache.maximumBytes)
+                    if raw.count > limit {
+                        raw = Data(raw.suffix(limit))
+                        dropsFirstLine = true
+                        cacheHasEarlier = true
+                        if let newline = raw.firstIndex(of: 10) {
+                            raw = Data(raw.suffix(from: raw.index(after: newline)))
+                            dropsFirstLine = false
+                        }
+                    }
                 }
-                fresh.apply(records: reader.appendRecords(chunk))
+                let records = reader.appendRecords(chunk)
+                if painted {
+                    conversation.apply(records: records)
+                } else {
+                    staging?.apply(records: records)
+                }
                 // The first read arrives in pieces; paint once the backlog is in.
                 if painted || reader.consumedBytes >= head.fileSize - start {
-                    conversation = fresh
+                    if let initial = staging {
+                        conversation = initial
+                        staging = nil
+                    }
                     painted = true
                     paintedPath = path
                     offlineDate = nil
@@ -155,7 +185,7 @@ final class ConversationFeed {
                 }
             }
         } catch {
-            guard !Task.isCancelled, state != .live else { return }
+            guard !Task.isCancelled, generation == self.generation, state != .live else { return }
             state = .unavailable("Couldn't read this agent's transcript.")
         }
     }

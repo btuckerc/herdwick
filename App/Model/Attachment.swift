@@ -49,6 +49,39 @@ struct DraftAttachment: Identifiable {
     }
 }
 
+extension DraftAttachment: Sendable {}
+
+extension DraftAttachment {
+    static func prepareOffMain(_ data: Data, filename: String, imageRequired: Bool = false) async throws -> Self {
+        try Task.checkCancellation()
+        let result = try await Task.detached {
+            try prepare(data, filename: filename, imageRequired: imageRequired)
+        }.value
+        try Task.checkCancellation()
+        return result
+    }
+
+    static func prepareFile(_ url: URL) async throws -> Self {
+        try Task.checkCancellation()
+        let result = try await Task.detached {
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            return try prepare(Data(contentsOf: url, options: .mappedIfSafe), filename: url.lastPathComponent)
+        }.value
+        try Task.checkCancellation()
+        return result
+    }
+
+    static func prepareImages(_ images: [SharePackage.Image]) async throws -> [Self] {
+        try Task.checkCancellation()
+        let result = try await Task.detached {
+            try images.map { try prepare($0.data, filename: $0.filename, imageRequired: true) }
+        }.value
+        try Task.checkCancellation()
+        return result
+    }
+}
+
 enum AttachmentRetention: String, CaseIterable, Identifiable, Sendable {
     case hour, day, week
     var id: Self { self }
@@ -74,21 +107,35 @@ func deliverDraft(_ text: String, attachments initial: [DraftAttachment], connec
                   pane: String, agent: Bool, retention: AttachmentRetention,
                   update: ([DraftAttachment]) -> Void) async throws {
     var attachments = initial
-    for index in attachments.indices {
-        attachments[index].state = "Uploading"
-        update(attachments)
-        do {
-            attachments[index].remotePath = try await connection.upload(
-                attachments[index].data, filename: "\(attachments[index].id.uuidString)-\(attachments[index].filename)",
-                retention: retention)
-            attachments[index].state = "Uploaded"
-            update(attachments)
-        } catch {
-            attachments[index].state = "Failed"
-            update(attachments)
-            throw error
+    guard attachments.count <= SharePackage.maximumImages else { throw AttachmentError.tooMany }
+    for index in attachments.indices { attachments[index].state = "Uploading" }
+    update(attachments)
+    try await withThrowingTaskGroup(of: (Int, Result<String, any Error>).self) { group in
+        for (index, attachment) in initial.enumerated() {
+            group.addTask {
+                do {
+                    let path = try await connection.upload(
+                        attachment.data, filename: "\(attachment.id.uuidString)-\(attachment.filename)",
+                        retention: retention)
+                    return (index, .success(path))
+                } catch { return (index, .failure(error)) }
+            }
         }
+        var failure: (any Error)?
+        for try await (index, result) in group {
+            switch result {
+            case .success(let path):
+                attachments[index].remotePath = path
+                attachments[index].state = "Uploaded"
+            case .failure(let error):
+                attachments[index].state = "Failed"
+                if failure == nil { failure = error }
+            }
+            update(attachments)
+        }
+        if let failure { throw failure }
     }
+    try Task.checkCancellation()
     if agent {
         for attachment in attachments where attachment.isImage {
             try await connection.sendText(attachment.remotePath!, pane: pane, submit: false)

@@ -22,7 +22,11 @@ Decisions as of 2026-09-24. The evidence behind them is in
   that conversation's draft as `staged` (one share per draft); its text joins the draft
   unless the draft already contains it, and opening that conversation any way re-attaches
   its images. Nothing is sent until the user sends; the package is deleted only after a
-  send from that conversation succeeds, or by swiping it off the shelf.
+  send from that conversation succeeds, or by swiping it off the shelf. Each package has a
+  small protected metadata sidecar: the shelf reads only those (older packages gain one on
+  a background refresh), and a package's images load off the main thread only when it is
+  reviewed or staged. An import finishes before a send starts, and a send deletes only the
+  package it delivered.
 - Multiple windows: each window has its own `SceneState` (host, navigation path, sheets,
   import); `SceneCommands` adds ⌘N (New Agent), ⌘F (search), ⌘[ (back) and ⌘R (refresh).
   A regular-width window uses a split view with the inbox as sidebar.
@@ -38,6 +42,11 @@ Decisions as of 2026-09-24. The evidence behind them is in
     stream). One request per bridge process, as herdr itself does. Every
     remote command is wrapped in `/bin/sh -c` so fish or other login shells
     do not matter. `events()` returns only after `subscription_started`.
+    Finite requests have deadlines: 60 s for the channel to open and the command
+    to start, 60 s each for a bridge request's write and response and a
+    subscription's acknowledgement, 600 s for a whole finite read (large image
+    files). Expiry closes that channel and reports `requestTimedOut`; input is
+    never resent. Open streams (events, terminals, file follows) have no deadline.
     Structural events arrive with underscores (`tab_renamed`) and are mapped to
     `tab.renamed`; agent status events already arrive dotted
     (`pane.agent_status_changed`) and are kept as they are.
@@ -50,7 +59,8 @@ Decisions as of 2026-09-24. The evidence behind them is in
   - `HerdwickSSH`/`SSHConnection`: Apple swift-nio-ssh (not Citadel, which
     depends on a third-party nio-ssh fork). Ed25519 and password auth, `none`
     auth for Tailscale SSH, host-key validation hook for TOFU pinning, exec
-    channels with streaming stdio, a handshake timeout, and a keepalive that,
+    channels with streaming stdio, a handshake timeout (cancelling a connect
+    attempt closes it mid-handshake), and a keepalive that,
     after 60 s without inbound traffic, opens and closes a session channel and
     drops the connection on a miss. It can adopt an already-connected fd
     (`ClientBootstrap.withConnectedSocket`); tests prove this with a
@@ -96,12 +106,15 @@ Decisions as of 2026-09-24. The evidence behind them is in
   vertical `ScrollView` wrapping a horizontal one (direction-locked), anchored to
   the bottom. The keyboard covers old output rather than changing the grid.
   `observe` ignores stdin in herdr 0.9, so it runs under a wrapper that kills
-  it when stdin closes; otherwise dropped connections leak processes.
+  it when stdin closes; otherwise dropped connections leak processes. An observe
+  channel that ends unexpectedly on a live link is reopened after 2 s; a pane the
+  host reports closed is not, and typing mode never retakes control on its own.
 - Scrollback: `observe` has no scroll, and `pane.scroll` would move the host's
   own view, so earlier output comes from `pane.read --source recent --format ansi`
   (500 lines) minus the visible screen's line count, parsed by `ANSILines` (SGR
   only) and drawn as text above the live terminal. Reloaded on open and whenever
-  the user scrolls up from the bottom; full-screen apps have none.
+  the user scrolls up from the bottom (one refresh at a time; the pane size is
+  read alongside it); full-screen apps have none.
 - Typing mode: `terminal session control <pane> --takeover --cols C --rows R`,
   which exits on stdin EOF. It resizes the PTY, and the new size persists
   after exit, so it is opt-in and labelled. The composer (`pane.send_input`)
@@ -154,7 +167,10 @@ One SSH connection per host multiplexes every channel. States: `idle`,
    peer's `SSH_HostKeys`; direct hosts use trust-on-first-use.
 2. Host: host/IP/domain, port and user. Generate an Ed25519 key in the
    Keychain (this device only) and offer a copyable `authorized_keys` line, or
-   accept a password.
+   accept a password. Cancel cancels the setup in flight (a key already installed
+   stays installed) and forgets the password; the tailnet dial is bounded to 15 s. A
+   Keychain read that fails for any reason but "not found" is reported, never answered
+   by generating a replacement identity.
 
 ## Local privacy
 - Settings › Privacy enables app lock (device-owner authentication, including passcode)
@@ -163,11 +179,15 @@ One SSH connection per host multiplexes every channel. States: `idle`,
   it); with it off there is no cover, so launch and return never flash a lock screen.
 - Drafts migrate from `composerDrafts` only after an atomic complete-protection file write
   succeeds. An unreadable store is never overwritten. Private files are excluded from backup.
+  After a successful load the store stays in memory; every edit is written in order off the
+  main thread (no debounce), and imported text waits for its write to succeed.
 - Opt-in offline transcripts keep complete raw records in protected Application Support
   files: at most 20 conversations, 4 MiB per conversation (80 MiB raw total plus bounded
   identity/title envelopes), and no more than the requested history window. Replay uses the
   existing parser, displays “Offline copy · <date>”, and must never count as read or enable
-  remote actions. Opt-out deletes files; host removal deletes that host's copies.
+  remote actions. Opt-out deletes files; host removal deletes that host's copies. With the
+  setting off nothing is buffered; writes run on a serial background queue, only the newest
+  pending copy per conversation is written, and opt-out discards pending copies.
 - Key replacement retains the active private key while a second Keychain identity is pending.
   Users install the new public key, select it for each host's next connection, reconnect,
   then explicitly attest success per host. They can revert a host to the old key while

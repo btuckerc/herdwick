@@ -168,9 +168,17 @@ struct SubagentConversationView: View {
             }
         }
         .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
-        .task(id: path) {
-            guard let client = connection.client else { return }
-            await feed.follow(TranscriptLocation(path: path, format: format), client: client)
+        .task(id: ChildFeedKey(liveID: connection.liveID, path: path, format: format)) {
+            while !Task.isCancelled, connection.isLive, let client = connection.client {
+                await feed.follow(TranscriptLocation(path: path, format: format), client: client)
+                guard (try? await Task.sleep(for: .seconds(2))) != nil else { return }
+            }
         }
     }
+}
+
+private struct ChildFeedKey: Hashable {
+    let liveID: Int
+    let path: String
+    let format: TranscriptFormat
 }

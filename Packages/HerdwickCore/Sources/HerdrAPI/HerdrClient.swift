@@ -8,6 +8,7 @@ public enum HerdrError: Error, Equatable, Sendable {
     case workspaceGroupCloseRequired(String)
     case api(code: String, message: String)
     case noResponse
+    case requestTimedOut
     
     /// A line could not be decoded.
     case malformed(String)
@@ -107,19 +108,9 @@ public actor HerdrClient {
         return try await request("agent.start", params: Params(name: name, kind: kind, pane_id: paneID, args: args), session: session)
     }
 
-    public func agent(named name: String, session: String) async throws -> AgentResult {
-        struct Params: Encodable, Sendable { var target: String }
-        return try await request("agent.get", params: Params(target: name), session: session)
-    }
-
     public func agent(paneID: String, session: String) async throws -> AgentResult {
         struct Params: Encodable, Sendable { var target: String }
         return try await request("agent.get", params: Params(target: paneID), session: session)
-    }
-
-    public func promptAgent(_ target: String, text: String, session: String) async throws -> AgentResult {
-        struct Params: Encodable, Sendable { var target: String; var text: String }
-        return try await request("agent.prompt", params: Params(target: target, text: text), session: session)
     }
 
     public func closePane(_ paneID: String, session: String) async throws {
@@ -149,14 +140,16 @@ public actor HerdrClient {
     ) async throws -> R {
         let channel = try await runner.exec(try await command(session, ["remote-api-bridge"]))
         defer { Task { await channel.close() } }
-        try await channel.write(try Self.requestLine(id: "1", method: method, params: params))
-        var lines = LineSplitter()
-        for try await chunk in channel.output {
-            for line in lines.append(chunk) {
-                return try Self.decodeResponse(line)
+        let request = try Self.requestLine(id: "1", method: method, params: params)
+        let line = try await Self.finite(channel, timeout: .seconds(60)) {
+            try await channel.write(request)
+            var lines = LineSplitter()
+            for try await chunk in channel.output {
+                if let line = lines.append(chunk).first { return line }
             }
+            throw HerdrError.noResponse
         }
-        throw HerdrError.noResponse
+        return try Self.decodeResponse(line)
     }
 
     // MARK: Streams
@@ -168,7 +161,8 @@ public actor HerdrClient {
         struct Params: Encodable, Sendable { var subscriptions: [Subscription] }
         let channel = try await runner.exec(try await command(session, ["remote-api-bridge"]))
         do {
-            try await channel.write(try Self.requestLine(id: "events", method: "events.subscribe", params: Params(subscriptions: subscriptions)))
+            let request = try Self.requestLine(id: "events", method: "events.subscribe", params: Params(subscriptions: subscriptions))
+            try await Self.finite(channel, timeout: .seconds(60)) { try await channel.write(request) }
         } catch {
             await channel.close()
             throw error
@@ -202,8 +196,11 @@ public actor HerdrClient {
             Task { await channel.close() }
         }
         do {
-            for try await _ in ack { return stream }
-            throw HerdrError.noResponse
+            try await Self.finite(channel, timeout: .seconds(60)) {
+                for try await _ in ack { return }
+                throw HerdrError.noResponse
+            }
+            return stream
         } catch {
             continuation.finish()
             throw error
@@ -309,8 +306,35 @@ public actor HerdrClient {
         return result
     }
 
-    static func collect(_ channel: any ExecChannel) async throws -> [UInt8] {
+    /// Finite work only. Cancellation/expiry closes the channel to release blocked I/O.
+    static func finite<T: Sendable>(
+        _ channel: any ExecChannel, timeout: Duration,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
         try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: T.self) { group in
+                group.addTask(operation: operation)
+                group.addTask {
+                    try await Task.sleep(for: timeout)
+                    throw HerdrError.requestTimedOut
+                }
+                defer { group.cancelAll() }
+                do {
+                    return try await group.next()!
+                } catch {
+                    group.cancelAll()
+                    await channel.close()
+                    throw error
+                }
+            }
+        } onCancel: {
+            Task { await channel.close() }
+        }
+    }
+
+    static func collect(_ channel: any ExecChannel) async throws -> [UInt8] {
+        // Ten minutes accommodates 20 MB image reads even over slow links.
+        try await finite(channel, timeout: .seconds(600)) {
             do {
                 try Task.checkCancellation()
                 try await channel.closeInput()
@@ -323,8 +347,6 @@ public actor HerdrClient {
                 await channel.close()
                 throw error
             }
-        } onCancel: {
-            Task { await channel.close() }
         }
     }
 }

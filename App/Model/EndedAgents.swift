@@ -32,6 +32,7 @@ final class EndedAgents {
 
     func observe(_ snapshot: Snapshot, hostID: UUID, session: String, paths: [String: String]) {
         let now = Date()
+        var next = entries
         var live = Set<String>()
         for agent in snapshot.agents {
             guard let ref = agent.agentSession, ["omp", "claude", "codex"].contains(ref.agent),
@@ -42,24 +43,33 @@ final class EndedAgents {
                                   cwd: agent.cwd, workspaceID: agent.workspaceID, workspaceLabel: workspace?.label ?? agent.workspaceID,
                                   title: agent.conversationTitle, observedAt: now)
             live.insert(item.id)
-            if let index = entries.firstIndex(where: { $0.id == item.id }) {
-                item.transcriptPath = item.transcriptPath ?? entries[index].transcriptPath
-                entries[index] = item
-            } else { entries.append(item) }
+            if let index = next.firstIndex(where: { $0.id == item.id }) {
+                let previous = next[index]
+                item.transcriptPath = item.transcriptPath ?? previous.transcriptPath
+                item.observedAt = previous.observedAt
+                if item != previous { item.observedAt = now }
+                next[index] = item
+            } else { next.append(item) }
         }
-        for index in entries.indices where entries[index].hostID == hostID && entries[index].session == session {
-            if !live.contains(entries[index].id) {
+        for index in next.indices where next[index].hostID == hostID && next[index].session == session {
+            if !next[index].ended, !live.contains(next[index].id) {
                 // A temporarily missing session reference is not proof of an exit.
-                let occupant = snapshot.agents.first { $0.paneID == entries[index].paneID }
-                if occupant == nil || occupant?.agentSession != nil { entries[index].ended = true }
+                let occupant = snapshot.agents.first { $0.paneID == next[index].paneID }
+                if occupant == nil || occupant?.agentSession != nil {
+                    next[index].ended = true
+                    next[index].observedAt = now
+                }
             }
         }
-        entries.sort { $0.observedAt > $1.observedAt }
-        entries = Array(entries.prefix(50))
+        next.sort { $0.observedAt > $1.observedAt }
+        next = Array(next.prefix(50))
+        guard next != entries else { return }
+        entries = next
         save()
     }
 
     func remove(_ item: EndedAgent) {
+        guard entries.contains(where: { $0.id == item.id }) else { return }
         entries.removeAll { $0.id == item.id }
         save()
     }

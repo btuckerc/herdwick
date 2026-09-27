@@ -50,7 +50,7 @@ struct SharedShelfView: View {
 }
 
 private struct SharedPackageRow: View {
-    let package: SharePackage
+    let package: SharePackage.Metadata
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(package.text.isEmpty ? "\(package.images.count) image\(package.images.count == 1 ? "" : "s")" : package.text)
@@ -71,10 +71,11 @@ private struct SharedPackageRow: View {
 }
 
 private struct SharedPackageReview: View {
-    let package: SharePackage
+    let package: SharePackage.Metadata
     let choose: (UUID, Thread) -> Void
     let newAgent: (UUID) -> Void
     @Environment(AppModel.self) private var model
+    @State private var thumbnails: [Int: UIImage] = [:]
 
     /// Conversations that can take it: live, with a transcript to review the draft against.
     private var threads: [Thread] {
@@ -94,7 +95,7 @@ private struct SharedPackageReview: View {
                     ScrollView(.horizontal) {
                         HStack {
                             ForEach(package.images.indices, id: \.self) { index in
-                                if let image = UIImage(data: package.images[index].data) {
+                                if let image = thumbnails[index] {
                                     Image(uiImage: image).resizable().scaledToFill()
                                         .frame(width: 72, height: 72).clipShape(.rect(cornerRadius: 8))
                                 }
@@ -126,6 +127,17 @@ private struct SharedPackageReview: View {
         }
         .navigationTitle("Review Share")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: package.id) {
+            thumbnails = [:]
+            guard !package.images.isEmpty,
+                  let loaded = try? await SharedInbox.shared.load(package.id), !Task.isCancelled else { return }
+            for (index, image) in loaded.images.enumerated() {
+                guard !Task.isCancelled else { return }
+                if let decoded = await downsample(image.data, maxPixel: 216), !Task.isCancelled {
+                    thumbnails[index] = UIImage(cgImage: decoded)
+                }
+            }
+        }
     }
 }
 

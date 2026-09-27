@@ -14,7 +14,7 @@ struct HerdwickWidgets: WidgetBundle {
 struct AttentionWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "Attention", provider: Provider()) { entry in
-            AttentionView(snapshot: entry.snapshot)
+            AttentionView(snapshot: entry.snapshot, date: entry.date)
                 .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Agents")
@@ -28,7 +28,7 @@ struct Entry: TimelineEntry {
     let snapshot: AttentionSnapshot?
 }
 
-/// The app reloads widgets when what it shows changes; the timeline itself never guesses.
+/// Only freshness advances on a timer; agent states always come from the app.
 struct Provider: TimelineProvider {
     func placeholder(in context: Context) -> Entry {
         Entry(date: .now, snapshot: Self.preview)
@@ -38,8 +38,16 @@ struct Provider: TimelineProvider {
         completion(Entry(date: .now, snapshot: context.isPreview ? Self.preview : AttentionSnapshot.load()))
     }
 
+    /// A fresh snapshot also gets a "last seen" entry at its stale point, used if the reload
+    /// asked for there comes late; the reload re-reads freshness the app wrote meanwhile.
     func getTimeline(in context: Context, completion: @escaping (Timeline<Entry>) -> Void) {
-        completion(Timeline(entries: [Entry(date: .now, snapshot: AttentionSnapshot.load())], policy: .never))
+        let now = Date.now
+        let snapshot = AttentionSnapshot.load()
+        guard let boundary = snapshot?.updated.addingTimeInterval(30 * 60), boundary > now else {
+            return completion(Timeline(entries: [Entry(date: now, snapshot: snapshot)], policy: .never))
+        }
+        completion(Timeline(entries: [Entry(date: now, snapshot: snapshot), Entry(date: boundary, snapshot: snapshot)],
+                            policy: .after(boundary)))
     }
 
     private static let preview = AttentionSnapshot(items: [
@@ -67,11 +75,12 @@ extension AttentionSnapshot.Item.State {
 struct AttentionView: View {
     @Environment(\.widgetFamily) private var family
     let snapshot: AttentionSnapshot?
+    let date: Date
 
     /// Older than this, or with a host missing, what's shown is only what was last seen.
     private var stale: Bool {
         guard let snapshot else { return true }
-        return !snapshot.complete || snapshot.updated < .now.addingTimeInterval(-30 * 60)
+        return !snapshot.complete || date >= snapshot.updated.addingTimeInterval(30 * 60)
     }
 
     private var items: [AttentionSnapshot.Item] { snapshot?.items ?? [] }

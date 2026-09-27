@@ -30,6 +30,8 @@ final class KeySetup {
     private var tailnet: Tailnet?
     private var ssh: SSHConnection?
     private var presented: CapturedHostKey?
+    private var operation: Task<Void, Never>?
+    private var generation = UUID()
 
     var isPresented: Bool {
         if case .idle = state { return false }
@@ -43,29 +45,36 @@ final class KeySetup {
     }
 
     func begin(profile: HostProfile, password: String, tailnet: Tailnet) {
+        invalidateOperation()
         self.profile = profile
         self.password = password
         self.tailnet = tailnet
         result = nil
         state = .connecting
-        Task { [weak self] in await self?.connectForSetup() }
+        let generation = generation
+        operation = Task { [weak self] in await self?.connectForSetup(generation: generation) }
     }
 
     /// Signs in with the password against the confirmed host key, then keeps the password.
     func keepPassword() {
         guard let profile, let hostKey = presented?.value?.publicKey else { return }
+        invalidateOperation()
+        let generation = generation
         state = .signingIn
-        Task { [weak self] in
-            guard let self else { return }
+        operation = Task { [weak self] in
+            guard let self, self.isCurrent(generation) else { return }
             do {
                 let ssh = try await self.dial(profile: profile, authentication: .password(self.password), expected: hostKey)
+                guard self.isCurrent(generation) else { await ssh.close(); return }
                 await ssh.close()
-                Keychain.set(self.password, for: profile.passwordAccount)
-                Keychain.set(hostKey, for: profile.hostKeyAccount)
+                guard self.isCurrent(generation) else { return }
+                try Keychain.setChecked(Data(self.password.utf8), for: profile.passwordAccount)
+                try Keychain.setChecked(Data(hostKey.utf8), for: profile.hostKeyAccount)
                 self.result = profile
                 self.password = ""
                 self.state = .finished
             } catch {
+                guard self.isCurrent(generation) else { return }
                 self.state = .failed(Self.message(for: error))
             }
         }
@@ -75,29 +84,35 @@ final class KeySetup {
     /// then proves a key login before dropping the password.
     func install() {
         guard let profile, let hostKey = presented?.value?.publicKey else { return }
+        invalidateOperation()
+        let generation = generation
         state = .signingIn
-        Task { [weak self] in
-            guard let self else { return }
+        operation = Task { [weak self] in
+            guard let self, self.isCurrent(generation) else { return }
             do {
                 let ssh = try await self.dial(profile: profile, authentication: .password(self.password), expected: hostKey)
+                guard self.isCurrent(generation) else { await ssh.close(); return }
                 self.ssh = ssh
                 self.state = .installing
-                _ = try await AuthorizedKeyInstall.install(line: DeviceKey.authorizedKeysLine, client: HerdrClient(runner: ssh))
+                _ = try await AuthorizedKeyInstall.install(line: try DeviceKey.authorizedKeysLine, client: HerdrClient(runner: ssh))
+                guard self.isCurrent(generation) else { return }
                 self.closeSSH()
                 let verified: SSHConnection
                 do {
-                    verified = try await self.dial(profile: profile, authentication: .ed25519(DeviceKey.load()), expected: hostKey)
+                    verified = try await self.dial(profile: profile, authentication: .ed25519(try DeviceKey.load()), expected: hostKey)
                 } catch SSHError.authenticationFailed {
                     throw SetupError.keyRefused
                 }
                 await verified.close()
-                Keychain.set(hostKey, for: profile.hostKeyAccount)
+                guard self.isCurrent(generation) else { return }
+                try Keychain.setChecked(Data(hostKey.utf8), for: profile.hostKeyAccount)
                 var saved = profile
                 saved.auth = .deviceKey
                 self.result = saved
                 self.password = ""
                 self.state = .finished
             } catch {
+                guard self.isCurrent(generation) else { return }
                 self.closeSSH()
                 self.state = .failed(Self.message(for: error))
             }
@@ -110,15 +125,19 @@ final class KeySetup {
     }
 
     func dismiss() {
-        closeSSH()
+        invalidateOperation()
+        password = ""
+        profile = nil
+        tailnet = nil
+        presented = nil
         state = .idle
         result = nil
     }
 
     /// Learns the host key without authenticating: the validator records the key and refuses it,
     /// so the handshake stops before user auth and the password never leaves the device unconfirmed.
-    private func connectForSetup() async {
-        guard let profile else { return }
+    private func connectForSetup(generation: UUID) async {
+        guard isCurrent(generation), let profile else { return }
         let capture = CapturedHostKey()
         presented = capture
         let advertised = advertisedKeys(for: profile)
@@ -127,6 +146,7 @@ final class KeySetup {
             await ssh.close()
             throw SetupError.noHostKey
         } catch {
+            guard isCurrent(generation) else { return }
             guard let key = capture.value, case SSHError.hostKeyRejected = error else {
                 state = .failed(Self.message(for: error))
                 return
@@ -161,9 +181,22 @@ final class KeySetup {
             guard let tailnet else { throw TailnetError.notRunning }
             let handle = try await tailnet.readyHandle()
             let peer = tailnet.peer(id: nodeID)
-            let fd = try await tailnet.dial(address: peer?.address ?? address, port: 22, handle: handle)
+            let fd = try await withTimeout(.seconds(15)) {
+                try await tailnet.dial(address: peer?.address ?? address, port: 22, handle: handle)
+            }
             return try await SSHConnection.connect(adoptingConnectedSocket: fd, username: profile.username, authentication: authentication, hostKeyValidator: validator)
         }
+    }
+
+    private func invalidateOperation() {
+        generation = UUID()
+        operation?.cancel()
+        operation = nil
+        closeSSH()
+    }
+
+    private func isCurrent(_ generation: UUID) -> Bool {
+        self.generation == generation && !Task.isCancelled
     }
 
     private func closeSSH() {
@@ -194,7 +227,12 @@ final class KeySetup {
 
     private final class CapturedHostKey: @unchecked Sendable {
         private let lock = NSLock()
-        private(set) var value: SSHHostKey?
-        func set(_ value: SSHHostKey) { lock.lock(); self.value = value; lock.unlock() }
+        private var captured: SSHHostKey?
+        var value: SSHHostKey? {
+            lock.lock()
+            defer { lock.unlock() }
+            return captured
+        }
+        func set(_ value: SSHHostKey) { lock.lock(); captured = value; lock.unlock() }
     }
 }

@@ -125,7 +125,9 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
     private static func scanDetails(_ bytes: [UInt8], format: TranscriptFormat, startsMidFile: Bool, flush: Bool) -> (Date?, Int, String?, Date?) {
         var reader = TranscriptReader(format: format, startsMidFile: startsMidFile)
         var entries = reader.append(bytes)
-        let consumed = reader.consumedBytes
+        // This reader is recreated each scan; leave an unterminated skipped line to
+        // `absorb`'s midLine paging logic rather than treating it as a complete record.
+        let consumed = startsMidFile && !bytes.contains(0x0A) ? 0 : reader.consumedBytes
         if flush { entries += reader.append([0x0A]) }
         let newest = entries.compactMap { entry -> Date? in
             switch entry {

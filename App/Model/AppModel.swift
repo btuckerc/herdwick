@@ -102,6 +102,7 @@ final class AppModel {
                                   self.open(address)
                                   self.resolveReply()
                               })
+        settings.onNotifyNeedsYouChange = { [weak self] in self?.attention?.refresh() }
         push = Push(settings: settings)
         if profiles.contains(where: \.isTailnet) || tailnet.isConfigured {
             tailnet.start()
@@ -157,6 +158,7 @@ final class AppModel {
 
     private func reconcile() {
         guard demo == nil else { return }
+        defer { attention?.refresh() }
         let selected = Set(scenes.values.compactMap(\.selectedHostID) + [initialHostID, watchedRun.address?.hostID].compactMap { $0 })
         let desired = Set(profiles.filter { settings.allHosts || selected.contains($0.id) }.map(\.id))
         for id in Array(primary.keys) where !desired.contains(id) {
@@ -175,7 +177,7 @@ final class AppModel {
             } else {
                 let link = HostConnection(profile: profile, tailnet: tailnet, onSessions: { [weak self] link in
                     self?.reconcileSessions(link)
-                }) { [weak self] updated in self?.store(updated) }
+                })
                 link.includesAllSessions = true
                 link.onAttentionChange = { [weak self] in self?.changed($0) }
                 link.onLive = { [weak self] in self?.wentLive($0) }
@@ -187,6 +189,7 @@ final class AppModel {
 
     private func reconcileSessions(_ primaryLink: HostConnection) {
         guard demo == nil, primary[primaryLink.profile.id] === primaryLink else { return }
+        defer { attention?.refresh() }
         let names = Set(primaryLink.sessions.filter(\.running).map(\.name))
         let desired = names.subtracting(primaryLink.activeSession.map { [$0] } ?? [])
         for key in Array(additional.keys) where key.hostID == primaryLink.profile.id && !desired.contains(key.session) {
@@ -201,7 +204,7 @@ final class AppModel {
             // host-key failure and detail-stream lifetimes independent. Sharing SSH
             // would require a new host-level supervisor and cross-session cancellation
             // ownership. Cost: one SSH keepalive per session, all closed in background.
-            let link = HostConnection(profile: profile, tailnet: tailnet) { _ in }
+            let link = HostConnection(profile: profile, tailnet: tailnet)
             link.onAttentionChange = { [weak self] in self?.changed($0) }
             link.onLive = { [weak self] in self?.wentLive($0) }
             additional[key] = link
@@ -293,7 +296,7 @@ final class AppModel {
             director.run(connection: nil)
             return
         }
-        let connection = HostConnection(profile: director.profile, tailnet: tailnet, demo: director.host) { _ in }
+        let connection = HostConnection(profile: director.profile, tailnet: tailnet, demo: director.host)
         self.demoConnection = connection
         connection.handle(.start)
         director.run(connection: connection)
