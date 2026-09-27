@@ -154,14 +154,15 @@ A message to or from a subagent (`agent://` peer) links to that subagent's threa
 Images: transcripts hold them by reference (`TranscriptImage`, a class compared by identity).
 omp stores them as blobs (`"data": "blob:sha256:<hex>"` at `~/.omp/agent/blobs/<hex>`, found
 beside the transcript's `sessions` folder); Claude and Codex inline base64, kept undecoded.
-User messages (above the bubble, clear of its selectable text) and tool results carry them: in
-Full detail as 120 pt thumbnails, otherwise one "Image"/"N images" label that shows the
-thumbnails in place; a thumbnail opens the preview. Bytes are read from the host only when shown (`readFile`, two at a
+User messages carry them above the bubble (clear of its selectable text): in Full detail as
+120 pt thumbnails, otherwise one "Image"/"N images" label that shows them in place. A tool
+step that returned images gets a photo icon and shows them when its row is expanded (always in
+Full), with no separate label; a thumbnail opens the preview. Bytes are read from the host only when shown (`readFile`, two at a
 time, capped at 20 MB even if the file grows mid-read), decoded by ImageIO straight to the
 size needed (360 px thumbnails in a bounded cache, 3000 px in the zoomable preview). The
 transcript isn't lazy, so a thumbnail row scrolled off screen drops its bitmap and takes it
 back from the cache (or the host) on return. A code span naming an image file, or a read of
-one, opens it in the preview.
+one that returned no images, opens it in the preview.
 
 Settings say only what a label can't: detail levels are checkmark Toggles in a menu (a Picker's
 tag spreads over a two-Text row), and Keep Uploads and Alerts While

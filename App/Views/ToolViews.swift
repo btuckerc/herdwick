@@ -5,6 +5,7 @@ struct ToolStepView: View {
     let tool: ToolActivity
     @State private var expanded: Bool
     @Environment(\.previewImage) private var previewImage
+    @Environment(\.inlineImages) private var inlineImages
 
     init(tool: ToolActivity, expanded: Bool = false) {
         self.tool = tool
@@ -15,7 +16,7 @@ struct ToolStepView: View {
         VStack(alignment: .leading, spacing: 8) {
             Button { withAnimation(.snappy) { expanded.toggle() } } label: {
                 HStack(spacing: 9) {
-                    Image(systemName: icon).frame(width: 18)
+                    Image(systemName: tool.images.isEmpty ? icon : "photo").frame(width: 18)
                     titleView
                     Spacer(minLength: 4)
                     stateView
@@ -23,7 +24,11 @@ struct ToolStepView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            if !tool.images.isEmpty { TranscriptImages(images: tool.images) }
+            .accessibilityHint(tool.images.isEmpty || inlineImages || expanded ? "" : "Shows the images")
+            // The row is the images' disclosure, so no separate "Image" label; Full shows them as is.
+            if !tool.images.isEmpty, inlineImages || expanded {
+                TranscriptImages(images: tool.images).environment(\.inlineImages, true)
+            }
             if expanded { detailView }
         }
     }
@@ -80,7 +85,7 @@ struct ToolStepView: View {
                 if let exitCode, exitCode != 0 { Text("exit \(exitCode)").font(.caption2.monospaced()).foregroundStyle(.red).padding(.horizontal, 6).padding(.vertical, 3).background(.red.opacity(0.12), in: Capsule()) }
             }
         case .read(let path, _):
-            if isImagePath(path), let previewImage {
+            if tool.images.isEmpty, isImagePath(path), let previewImage {
                 Button { previewImage(.file(path)) } label: {
                     Label(path, systemImage: "photo").font(.caption2.monospaced())
                 }
