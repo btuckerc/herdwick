@@ -52,13 +52,18 @@ grouping applies it too. Cross-host order assumes the hosts' clocks agree.
    closes and clears it. While anything shared from another app is unsent, a "Shared · N" row
    tops the list (see architecture.md).
 2. **Conversation**: transcript rendered as chat; pending ask as native cards above the
-   composer; composer (`pane.send_input`, text + `enter`). Title = transcript title or agent,
+   composer, on a material surface so the transcript doesn't show through when scrolled beneath;
+   composer (`pane.send_input`, text + `enter`). Title = transcript title or agent,
    subtitle = status text in colour + workspace. Toolbar: Terminal, then (spaced apart) a More
    (`ellipsis`) menu with detail level, Find in Conversation, Retry Last Turn (omp Alt+R, only
    after a turn ended in an error), Stop Run (omp, Claude and Codex, while working; confirmed,
    sends Esc), Show Live Activity, the session's
-   model with Session Details (an alert: thinking level, tokens and estimated cost of the loaded
-   messages; omp's own estimate, Claude and Codex record none), Mute Notifications (1 hour
+   model with Session Details (an alert: thinking level, tokens and estimated cost; omp's own
+   estimate, Claude and Codex record none; with earlier messages unloaded, opening it first
+   totals the whole file on the host in one `awk` pass (`HerdrClient.sessionUsage`: omp and
+   Claude assistant usage, Claude once per API message id, Codex's latest cumulative
+   `token_count`) and shows "Whole session", since an alert's text is fixed once shown; past
+   3 s or on failure, the loaded messages' totals with "Loaded messages only"), Mute Notifications (1 hour
    or until unmuted; see Attention) and "Why <status>?" (herdr's `agent.explain`, read-only).
    The menu is its own view compared by value and holds nothing that changes per reply: a
    visible menu that SwiftUI rebuilds jumps back to its top, and the conversation re-renders

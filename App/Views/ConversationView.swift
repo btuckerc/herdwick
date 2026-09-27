@@ -52,6 +52,10 @@ struct ConversationView: View {
     @State private var previewing: ImagePreviewSource?
     @State private var confirmStop = false
     @State private var showsSessionDetails = false
+    /// Usage over the whole transcript, totalled on the host as Session Details opens on a
+    /// partly loaded conversation; nil when not needed or not counted.
+    @State private var wholeUsage: TranscriptUsage?
+    @State private var countingWholeUsage = false
     @State private var explanation: String?
     /// The ended agent being resumed from the "Agent exited" state.
     @State private var resuming: EndedAgent?
@@ -337,7 +341,7 @@ struct ConversationView: View {
 
     private func menuAction(_ action: ConversationMenu.Action) {
         switch action {
-        case .sessionDetails: showsSessionDetails = true
+        case .sessionDetails: Task { await showSessionDetails() }
         case .detail(let level): detailSelection.wrappedValue = level
         case .find:
             find = (find?.query ?? "", 0)
@@ -429,17 +433,34 @@ struct ConversationView: View {
         Task { @MainActor in position.scrollTo(id: id, anchor: .center) }
     }
 
-    /// Model, thinking level and the usage recorded in the loaded part of the transcript.
+    /// Model, thinking level and usage: the whole session's once the host has totalled it,
+    /// otherwise what the loaded part of the transcript records.
     private var sessionDetails: (title: String, body: String)? {
         let conversation = feed.conversation
         var lines = [conversation.thinkingLevel.map { "Thinking: \($0)" }].compactMap { $0 }
-        if let usage = conversation.usage {
+        let whole = feed.hasEarlier ? wholeUsage : nil
+        if let usage = whole ?? conversation.usage {
             lines.append("Tokens: \(usage.inputTokens.formatted()) in, \(usage.outputTokens.formatted()) out")
             if let cost = usage.cost { lines.append("Est. cost: \(cost.formatted(.currency(code: "USD")))") }
-            if feed.hasEarlier { lines.append("Loaded messages only") }
+            if feed.hasEarlier { lines.append(whole != nil ? "Whole session" : "Loaded messages only") }
         }
         guard conversation.modelID != nil || !lines.isEmpty else { return nil }
         return (conversation.modelID ?? "Session", lines.joined(separator: "\n"))
+    }
+
+    /// An alert's text is fixed once shown, so the whole-session total comes first: one remote
+    /// command, only when earlier messages aren't loaded. Slow or failed, the loaded totals show.
+    private func showSessionDetails() async {
+        guard !countingWholeUsage else { return }
+        wholeUsage = nil
+        if feed.hasEarlier, connection.isLive, let client = connection.client, let location {
+            countingWholeUsage = true
+            let usage = try? await withTimeout(.seconds(3)) { try await client.sessionUsage(path: location.path, format: location.format) }
+            countingWholeUsage = false
+            guard location == self.location else { return }
+            wholeUsage = usage ?? nil
+        }
+        showsSessionDetails = true
     }
 
     private func press(_ keys: [String], failure: String) async {
@@ -569,15 +590,17 @@ struct ConversationView: View {
                          terminalAddress: connection.address(paneID: paneID)) { replies in
                     Task { await answer(ask, with: replies) }
                 }
+                .cardBackground()
                 .id(ask.toolCallId)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             } else if locatedRef == agent?.agentSession, blocked || planReview, let prompt = screenPrompt {
                 PermissionCard(prompt: prompt, choosing: choosing, paneID: paneID, terminalAddress: connection.address(paneID: paneID)) { label in
                     Task { await choose(label, on: prompt) }
                 }
+                .cardBackground()
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             } else if blocked {
-                NeedsYouBanner(paneID: paneID, terminalAddress: connection.address(paneID: paneID))
+                NeedsYouBanner(paneID: paneID, terminalAddress: connection.address(paneID: paneID)).cardBackground()
             }
             MessageComposer(draft: $draft, attachments: $attachments, sending: sending || shareImportTaskID != nil, focus: $composerFocused,
                             actions: composerActions) { Task { await sendDraft() } }
@@ -1565,6 +1588,13 @@ private struct NeedsYouBanner: View {
             NavigationLink("Open", value: Route.terminal(terminalAddress))
                 .buttonStyle(.glassProminent)
         }
+    }
+}
+
+private extension View {
+    /// Cards above the composer sit over the scrolling transcript, so they need their own surface.
+    func cardBackground() -> some View {
+        padding(14).background(.regularMaterial, in: .rect(cornerRadius: 24))
     }
 }
 
