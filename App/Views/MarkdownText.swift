@@ -2,14 +2,20 @@ import HerdrAPI
 import SwiftUI
 
 /// Assistant Markdown as native blocks: headings, lists and task lists, quotes, code and
-/// tables. Inline emphasis, code spans and links come from `AttributedString`.
+/// tables. Inline emphasis, code spans and links come from `AttributedString`. The prose between
+/// code blocks, tables and rules is one `Text`, so a selection can run across paragraphs and items.
 struct MarkdownText: View {
     let text: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(MarkdownBlocks.parse(text).enumerated()), id: \.offset) { _, block in
-                view(for: block)
+            ForEach(Array(Self.segments(MarkdownBlocks.parse(text)).enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .prose(let string): Text(string)
+                case .code(let language, let text): CodeBlock(language: language, text: text)
+                case .table(let table): TableBlock(table: table)
+                case .rule: Divider().padding(.vertical, 4)
+                }
             }
         }
         .textSelection(.enabled)
@@ -28,29 +34,72 @@ struct MarkdownText: View {
         return string
     }
 
-    @ViewBuilder private func view(for block: MarkdownBlock) -> some View {
-        switch block {
-        case .paragraph(let text):
-            Text(Self.inline(text))
-        case .heading(let level, let text):
-            Text(Self.inline(text))
-                .font(level == 1 ? .title3.bold() : level == 2 ? .headline : .subheadline.bold())
-                .padding(.top, 4)
-                .accessibilityAddTraits(.isHeader)
-        case .code(let language, let text):
-            CodeBlock(language: language, text: text)
-        case .table(let table):
-            TableBlock(table: table)
-        case .list(let ordered, let start, let items):
-            ListBlock(ordered: ordered, start: start, items: items)
-        case .quote(let text):
-            HStack(spacing: 10) {
-                Capsule().fill(.quaternary).frame(width: 3)
-                Text(Self.inline(text)).foregroundStyle(.secondary)
+    private enum Segment {
+        case prose(AttributedString)
+        case code(language: String?, text: String)
+        case table(MarkdownTable)
+        case rule
+    }
+
+    private static func segments(_ blocks: [MarkdownBlock]) -> [Segment] {
+        var segments: [Segment] = []
+        var prose = AttributedString()
+        func flush() {
+            if !prose.characters.isEmpty { segments.append(.prose(prose)) }
+            prose = AttributedString()
+        }
+        for block in blocks {
+            switch block {
+            case .code(let language, let text): flush(); segments.append(.code(language: language, text: text))
+            case .table(let table): flush(); segments.append(.table(table))
+            case .rule: flush(); segments.append(.rule)
+            default:
+                if !prose.characters.isEmpty { prose += blockGap }
+                prose += Self.prose(block)
             }
-            .fixedSize(horizontal: false, vertical: true)
-        case .rule:
-            Divider().padding(.vertical, 4)
+        }
+        flush()
+        return segments
+    }
+
+    /// A line break plus a short blank line: the space between blocks inside one `Text`.
+    private static let blockGap: AttributedString = {
+        var gap = AttributedString("\n\n")
+        gap[gap.index(afterCharacter: gap.startIndex)...].font = .system(size: 6)
+        return gap
+    }()
+
+    private static func prose(_ block: MarkdownBlock) -> AttributedString {
+        switch block {
+        case .heading(let level, let text):
+            var heading = inline(text)
+            heading.font = level == 1 ? .title3.bold() : level == 2 ? .headline : .subheadline.bold()
+            heading.accessibilityHeadingLevel = level == 1 ? .h1 : level == 2 ? .h2 : level == 3 ? .h3 : .h4
+            return heading
+        case .quote(let text):
+            var quote = AttributedString("▎ ") + inline(text)
+            quote.foregroundColor = .secondary
+            return quote
+        case .list(let ordered, let start, let items):
+            var list = AttributedString()
+            var number = start
+            for (index, item) in items.enumerated() {
+                if index > 0 { list += AttributedString("\n") }
+                var marker = item.depth == 0 ? "•" : "◦"
+                if ordered, item.depth == 0 { marker = "\(number)."; number += 1 }
+                if let checked = item.checked { marker = checked ? "☑" : "☐" }
+                var prefix = AttributedString(String(repeating: "    ", count: item.depth) + marker + " ")
+                prefix.foregroundColor = .secondary
+                var body = inline(item.text)
+                if item.checked == true {
+                    body.strikethroughStyle = .single
+                    body.foregroundColor = .secondary
+                }
+                list += prefix + body
+            }
+            return list
+        case .paragraph(let text): return inline(text)
+        case .code, .table, .rule: return AttributedString()
         }
     }
 }
@@ -114,40 +163,3 @@ private struct TableBlock: View {
     }
 }
 
-private struct ListBlock: View {
-    let ordered: Bool
-    let start: Int
-    let items: [MarkdownListItem]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            ForEach(items.indices, id: \.self) { index in
-                let item = items[index]
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    marker(item, index)
-                    Text(MarkdownText.inline(item.text))
-                        .strikethrough(item.checked == true, color: .secondary)
-                        .foregroundStyle(item.checked == true ? .secondary : .primary)
-                }
-                .padding(.leading, CGFloat(item.depth) * 18)
-            }
-        }
-    }
-
-    @ViewBuilder private func marker(_ item: MarkdownListItem, _ index: Int) -> some View {
-        if let checked = item.checked {
-            Image(systemName: checked ? "checkmark.square.fill" : "square")
-                .foregroundStyle(checked ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                .accessibilityLabel(checked ? "Done" : "Not done")
-        } else if ordered, item.depth == 0 {
-            Text("\(start + ordinal(index)).").monospacedDigit().foregroundStyle(.secondary)
-        } else {
-            Text(item.depth == 0 ? "•" : "◦").foregroundStyle(.secondary)
-        }
-    }
-
-    /// Position among the top-level items, so nested items don't advance the count.
-    private func ordinal(_ index: Int) -> Int {
-        items[..<index].filter { $0.depth == 0 }.count
-    }
-}

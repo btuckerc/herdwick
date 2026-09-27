@@ -203,7 +203,8 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
   omp shapes below):
   - `message/user` → user bubble; `message/assistant` `text` → agent text (Markdown blocks:
     headings, lists and task lists, quotes, code, tables that scroll sideways; inline via
-    `AttributedString`),
+    `AttributedString`; the prose between code blocks, tables and rules is one `Text`, so a
+    selection runs across paragraphs and list items),
     `thinking` and `toolCall`s → one folded "N steps · <last summary>" row; a tool call merges
     with its `toolResult` by `toolCallId` (state, first 200 output lines).
   - `custom/tool_execution_start` → running step (replaced by its call); `compaction`,
