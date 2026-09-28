@@ -524,6 +524,9 @@ struct ConversationView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        // Full width even when empty: the scroll view sizes to it, and the placeholder and
+        // reconnecting badge over it would otherwise get a sliver and wrap a letter per line.
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var subtitle: String {

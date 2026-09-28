@@ -13,6 +13,9 @@ final class TerminalController: ObservableObject {
     private(set) var grid: Grid?
     private(set) var closedReason: String?
     private(set) var hasFrame = false
+    /// Rows down to the last one with text. An agent's TUI (omp's) draws from the top of a
+    /// tall pane; reading shows down to here, not the blank rows below.
+    private(set) var usedRows = 0
     /// SwiftTerm's cell size for the current font (its `computeFontDimensions`).
     private(set) var cellHeight: CGFloat = 0
     private(set) var cellWidth: CGFloat = 0
@@ -82,6 +85,8 @@ final class TerminalController: ObservableObject {
                 case .frame(let frame):
                     view.feed(byteArray: frame.bytes[...])
                     hasFrame = true
+                    let used = Self.usedRows(view.getTerminal())
+                    if used != usedRows { usedRows = used }
                 case .closed(let reason):
                     closedReason = reason ?? "The pane closed."
                     return
@@ -91,6 +96,21 @@ final class TerminalController: ObservableObject {
         } catch {
             // Observe mode retries channel failures; control never silently retakes ownership.
         }
+    }
+
+    /// Rows down to the last one that shows anything: a glyph, a painted background, reverse
+    /// video, or the cursor. Reading mode clips the blank rest so top-drawn TUIs aren't offscreen.
+    private static func usedRows(_ terminal: Terminal) -> Int {
+        let cursorRow = terminal.getCursorLocation().y
+        for row in stride(from: terminal.rows - 1, to: cursorRow, by: -1) {
+            guard let line = terminal.getLine(row: row) else { continue }
+            for col in 0..<min(line.count, terminal.cols) {
+                let cell = line[col], bg = cell.attribute.bg, character = cell.getCharacter()
+                if (bg != .defaultColor && bg != .defaultInvertedColor) || cell.attribute.style.contains(.inverse)
+                    || (character != "\0" && !character.isWhitespace) { return row + 1 }
+            }
+        }
+        return cursorRow + 1
     }
 
     private func sizeChanged(cols: Int, rows: Int) {

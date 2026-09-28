@@ -104,7 +104,10 @@ Decisions as of 2026-09-24. The evidence behind them is in
   prompt, and at fewer columns it cuts wide lines off, so the app observes at
   least the pane's `scroll.viewport_rows` and `pane.layout` width, inside a
   vertical `ScrollView` wrapping a horizontal one (direction-locked), anchored to
-  the bottom. The keyboard covers old output rather than changing the grid.
+  the bottom. Reading clips the surface below the last row showing anything (text,
+  a painted background, reverse video or the cursor), so a TUI drawn at the top of
+  a tall pane isn't left above the viewport. The keyboard covers old output rather
+  than changing the grid.
   `observe` ignores stdin in herdr 0.9, so it runs under a wrapper that kills
   it when stdin closes; otherwise dropped connections leak processes. An observe
   channel that ends unexpectedly on a live link is reopened after 2 s; a pane the

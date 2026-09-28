@@ -423,16 +423,19 @@ final class HostConnection {
                 try await Task.sleep(for: .milliseconds(250))
             }
         }
-        // Waits for the mirror to show the agent, so the conversation doesn't open on "Agent
-        // exited". Agents herdr has no integration for never report a transcript: don't wait for one.
+        // agent.start answers before the agent runs; its integration reports the transcript a
+        // moment later. Wait for that (bounded), so the start opens the conversation rather than
+        // the terminal, and the mirror has the agent, so it doesn't open on "Agent exited".
+        // Agents whose integration is known missing never report one: take them as soon as seen.
+        let reportsTranscript = TranscriptFormat(agent: kind) != nil
+            && !missingIntegrations.contains { $0.target == kind }
         for _ in 0..<20 {
-            if let live = snapshot?.agents.first(where: { $0.paneID == target }) {
+            if let live = snapshot?.agents.first(where: { $0.paneID == target && $0.name == agent.name }) {
                 if live.hasTranscript || !agent.hasTranscript { agent = live }
-                break
+                if agent.hasTranscript || !reportsTranscript { break }
             }
-            try? await Task.sleep(for: .milliseconds(500))
+            try await Task.sleep(for: .milliseconds(500))
         }
-        if !agent.hasTranscript { await checkIntegrations() }
         return .started(agent, PaneAddress(hostID: profile.id, session: session, paneID: target))
     }
 

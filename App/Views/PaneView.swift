@@ -22,6 +22,8 @@ struct PaneView: View {
     @State private var startFlow = AgentStartFlow()
     @FocusState private var composerFocused: Bool
     @State private var restingSize: CGSize = .zero
+    /// The visible height now, which the keyboard shrinks while `restingSize` stays.
+    @State private var viewHeight: CGFloat = 0
     /// The pane's width on the host; read-only mode renders it in full and scrolls sideways.
     @State private var paneCols: Int?
     /// Output above the pane's screen, loaded when reading starts and each time the user
@@ -51,6 +53,14 @@ struct PaneView: View {
                       height: max(fit.height, rows * terminal.cellHeight))
     }
 
+    /// Reading scrolls only down to the last row showing anything: the view anchors at the
+    /// bottom (a shell's prompt), and an agent drawn at the top of a tall pane would sit above
+    /// it, leaving a blank screen. The rows below are blank, so they are clipped, not re-rendered.
+    private var shownHeight: CGFloat {
+        guard !typing else { return liveSize.height }
+        return min(liveSize.height, max(viewHeight, CGFloat(terminal.usedRows) * terminal.cellHeight))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if agent == nil, pane != nil { startBar }
@@ -69,6 +79,8 @@ struct PaneView: View {
                             if restingSize != .zero {
                                 TerminalSurface(controller: terminal)
                                     .frame(width: liveSize.width, height: liveSize.height)
+                                    .frame(height: shownHeight, alignment: .top)
+                                    .clipped()
                             }
                         }
                         .padding(.horizontal, 6)
@@ -103,6 +115,7 @@ struct PaneView: View {
             }
             .onGeometryChange(for: CGSize.self, of: \.size) { size in
                 if !composerFocused || typing { restingSize = size }
+                viewHeight = size.height
             }
             .animation(.smooth, value: terminal.hasFrame)
 

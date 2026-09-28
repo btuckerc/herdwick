@@ -116,10 +116,11 @@ its menu. An existing workspace gets a new tab that inherits its folder; a folde
 one workspace's panes report reuses that workspace, any other folder gets a new workspace
 (labelled by herdr with the folder name). The terminal button beside Start opens a plain shell
 in the same place instead. Created panes skip the busy check and wait out startup files; a
-failed start keeps its pane for the next attempt. The start waits (up to 10 s) until the mirror
-shows the agent, so its conversation never opens on "Agent exited". Agents that report a
-transcript (omp; claude and codex once `herdr integration install` has run on the host) open
-in their conversation, the rest in the terminal.
+failed start keeps its pane for the next attempt. `agent.start` answers before the agent runs,
+so the start then waits (up to 10 s) until the mirror shows the agent, so its conversation never
+opens on "Agent exited", and, for agents that report a transcript (omp; claude and codex unless
+the host lists their `herdr integration` as not installed), until the transcript is reported.
+Those open in their conversation, the rest in the terminal.
 Launch presets (Settings › Conversations › Launch Presets) name an agent kind plus arguments,
 one per line, passed as literal argv (`agent.start {args}`: no shell, quoting or variables);
 New Agent shows a Preset picker when any exist, and no preset starts exactly as before.
