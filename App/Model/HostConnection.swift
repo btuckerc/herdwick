@@ -139,6 +139,14 @@ final class HostConnection {
         }
     }
 
+    /// Dialling, or waiting to dial again: the screen shows the last state it had.
+    var isConnecting: Bool {
+        switch phase {
+        case .connecting, .waiting: true
+        default: false
+        }
+    }
+
     // MARK: Read state
 
     /// What has been read on this phone; see `ReadState`. herdr's own "seen" belongs to the

@@ -159,7 +159,7 @@ struct SubagentConversationView: View {
         .defaultScrollAnchor(.bottom)
         .overlay {
             switch feed.state {
-            case .loading: ProgressView()
+            case .loading: if !connection.isConnecting { ProgressView() }
             // A finished child's file can stop streaming after it loaded; keep what we have.
             case .unavailable where feed.conversation.items.isEmpty:
                 ContentUnavailableView("Transcript Not Available", systemImage: "text.document",
@@ -167,6 +167,7 @@ struct SubagentConversationView: View {
             case .unavailable, .live: EmptyView()
             }
         }
+        .connectingBadge(connection)
         .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
         .task(id: ChildFeedKey(liveID: connection.liveID, path: path, format: format)) {
             while !Task.isCancelled, connection.isLive, let client = connection.client {

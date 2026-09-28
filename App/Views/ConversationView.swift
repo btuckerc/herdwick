@@ -297,6 +297,7 @@ struct ConversationView: View {
         .defaultScrollAnchor(userScrolling ? nil : .bottom, for: .sizeChanges)
         .scrollDismissesKeyboard(.interactively)
         .overlay { placeholder }
+        .connectingBadge(connection)
         .safeAreaInset(edge: .top) {
             VStack(spacing: 0) {
                 if find != nil { findBar }
@@ -564,7 +565,7 @@ struct ConversationView: View {
                 NavigationLink("Open Terminal", value: Route.terminal(connection.address(paneID: paneID)))
                 if let harness = agent?.agent { IntegrationOffer(connection: connection, harness: harness) }
             }
-        } else if feed.state == .loading, !feed.isOfflineCopy, connection.snapshot != nil {
+        } else if feed.state == .loading, !feed.isOfflineCopy, connection.snapshot != nil, !connection.isConnecting {
             ProgressView()
         } else if feed.state == .live, feed.conversation.items.isEmpty, queued.isEmpty, !sending, sentCount == 0 {
             // A quiet hint, gone the moment a message is on its way; the transcript file

@@ -36,6 +36,30 @@ extension AgentStatus {
     }
 }
 
+extension View {
+    /// A small badge in the middle of a thread while its host reconnects, so a stale transcript
+    /// doesn't pass for a live one. Brief blips never show it.
+    func connectingBadge(_ connection: HostConnection) -> some View {
+        overlay {
+            Group {
+                if connection.isConnecting, let status = connection.statusText {
+                    Label { Text(status) } icon: { ProgressView().controlSize(.small) }
+                        .font(.subheadline)
+                        .fixedSize()
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        // Material, not glass: the transcript behind would read through it.
+                        .background(.regularMaterial, in: .capsule)
+                        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+                        .transition(.opacity)
+                }
+            }
+            .animation(connection.isConnecting ? .smooth.delay(0.5) : .smooth, value: connection.isConnecting)
+            .allowsHitTesting(false)
+        }
+    }
+}
+
 /// The host name over its address as one control. Tap opens the host list; swipe moves to the
 /// neighbouring host, whose name peeks dimmed at each edge, like Weather's locations.
 struct HostTitle: View {

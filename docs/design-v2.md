@@ -54,7 +54,9 @@ grouping applies it too. Cross-host order assumes the hosts' clocks agree.
 2. **Conversation**: transcript rendered as chat; pending ask as native cards above the
    composer, on a material surface so the transcript doesn't show through when scrolled beneath;
    composer (`pane.send_input`, text + `enter`). Title = transcript title or agent,
-   subtitle = status text in colour + workspace. Toolbar: Terminal, then (spaced apart) a More
+   subtitle = status text in colour + workspace. While the host is (re)connecting, this and a
+   subagent's thread also show the link status ("Reconnecting in 4s") as a small material badge
+   mid-screen, faded in after 0.5 s so brief blips don't flash it. Toolbar: Terminal, then (spaced apart) a More
    (`ellipsis`) menu with detail level, Find in Conversation, Retry Last Turn (omp Alt+R, only
    after a turn ended in an error), Stop Run (omp, Claude and Codex, while working; confirmed,
    sends Esc), Show Live Activity, the session's
