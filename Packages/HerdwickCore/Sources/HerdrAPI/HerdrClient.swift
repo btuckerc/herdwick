@@ -77,6 +77,28 @@ public actor HerdrClient {
         }
     }
 
+    /// Starts herdr's headless server for `session` (nil: the default session), detached from
+    /// this channel, and returns once it lists as running. The login shell runs herdr so its
+    /// PATH and environment are the user's; `/bin/sh` does the detaching, whatever that shell is.
+    public func startServer(session: String?) async throws {
+        let herdr = try await command(session, ["server"])
+        // A private log for the first second's errors, unlinked once read: the server keeps its descriptor.
+        let script = """
+            log=$(mktemp "${TMPDIR:-/tmp}/herdwick-herdr.XXXXXX") || exit 1
+            nohup "${SHELL:-/bin/sh}" -lc \(shellQuote(herdr)) </dev/null >"$log" 2>&1 &
+            sleep 1
+            if kill -0 $! 2>/dev/null; then rm -f "$log"; exit 0; fi
+            tail -n 5 "$log" >&2; rm -f "$log"; exit 1
+            """
+        _ = try await Self.collect(try await runner.exec(Self.posix(script)))
+        for _ in 0..<10 {
+            let running = try await sessions().filter(\.running)
+            if running.contains(where: { session == nil ? $0.isDefault : $0.name == session }) { return }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        throw HerdrError.noResponse
+    }
+
     public func ping(session: String) async throws -> Pong {
         try await request("ping", params: EmptyParams(), session: session)
     }

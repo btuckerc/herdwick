@@ -42,7 +42,7 @@ struct TerminalText: View {
             return .handled
         })
         .sheet(item: $previewing) {
-            ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: nil), cwd: cwd)
+            ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: nil, cwd: cwd))
         }
         .task { await load() }
     }

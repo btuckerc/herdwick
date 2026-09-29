@@ -4,10 +4,13 @@ public struct ConnectionFailure: Error, Equatable, Sendable {
     /// False for problems only the user can fix (auth rejected, host key
     /// mismatch, herdr missing); the supervisor stops retrying those.
     public var retryable: Bool
+    /// herdr is installed but its server isn't running, so the app can offer to start it.
+    public var herdrStopped: Bool
 
-    public init(_ message: String, retryable: Bool) {
+    public init(_ message: String, retryable: Bool, herdrStopped: Bool = false) {
         self.message = message
         self.retryable = retryable
+        self.herdrStopped = herdrStopped
     }
 }
 

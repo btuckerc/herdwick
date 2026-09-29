@@ -39,12 +39,21 @@ public enum TranscriptEntry: Sendable, Equatable {
     /// A message injected by the harness (background job results and the like).
     case notice(String)
     case subagentEvent(SubagentActivity)
+    /// omp delivered the output of background commands the agent started earlier.
+    case jobsFinished([FinishedJob])
     case peerMessage(id: String, peer: String, text: String, outbound: Bool)
     case metadata(type: String)
     /// The agent finished its turn (answered, stopped or failed) and waits for the user.
     case turnEnded(at: Date?)
     case unknown(type: String, raw: String)
     case malformed(String)
+}
+
+/// A background command's output, delivered after the turn that started it.
+public struct FinishedJob: Sendable, Equatable {
+    public let id: String
+    public let label: String
+    public let output: String
 }
 
 public struct TranscriptMessage: Sendable, Equatable {
@@ -209,8 +218,9 @@ public struct TranscriptReader: Sendable {
                 return [.malformed(String(decoding: line.prefix(2048), as: UTF8.self))]
             }
             if record["type"] as? String == "custom_message", record["customType"] as? String == "async-result" {
-                let activities = asyncActivities(record)
-                if !activities.isEmpty { return activities.map(TranscriptEntry.subagentEvent) }
+                let jobs = finishedJobs(record)
+                let events = asyncActivities(record).map(TranscriptEntry.subagentEvent) + (jobs.isEmpty ? [] : [.jobsFinished(jobs)])
+                if !events.isEmpty { return events }
             }
             let entry = entry(record, line: line)
             // Every stop but a tool call ends the turn: `stop`, `aborted`, `error`, `length`.
@@ -293,7 +303,8 @@ public struct TranscriptReader: Sendable {
         for block in content as? [[String: Any]] ?? [] {
             switch block["type"] as? String {
             case "text": if let value = block["text"] as? String { text.append(value) }
-            case "thinking": if let value = block["thinking"] as? String { thinking.append(value) }
+            // Redacted thinking is an empty block with only a signature: nothing to show.
+            case "thinking": if let value = block["thinking"] as? String, !value.allSatisfy(\.isWhitespace) { thinking.append(value) }
             case "image": if let image = TranscriptImage.omp(block) { images.append(image) }
             default: break
             }
@@ -310,6 +321,28 @@ public struct TranscriptReader: Sendable {
 
     private static func asyncActivities(_ record: [String: Any]) -> [SubagentActivity] {
         taskResults(in: text(record["content"]).text)
+    }
+
+    /// Bash jobs in omp's `<system-notice>` delivery: one job's output follows the "…has
+    /// completed" line; several are sections headed `── Job <id> (<label>) ──`.
+    static func finishedJobs(_ record: [String: Any]) -> [FinishedJob] {
+        let jobs = ((record["details"] as? [String: Any])?["jobs"] as? [[String: Any]] ?? [])
+            .filter { $0["type"] as? String == "bash" && $0["jobId"] is String }
+        guard !jobs.isEmpty else { return [] }
+        let body = text(record["content"]).text
+            .replacing("<system-notice>", with: "").replacing("</system-notice>", with: "")
+        var lines = body.split(separator: "\n", omittingEmptySubsequences: false).drop { $0.allSatisfy(\.isWhitespace) }
+        lines = lines.dropFirst()
+        return jobs.map { job in
+            let id = job["jobId"] as! String
+            var section = lines[...]
+            if let head = lines.firstIndex(where: { $0.hasPrefix("── Job \(id) ") }) {
+                section = lines[lines.index(after: head)...]
+                if let next = section.firstIndex(where: { $0.hasPrefix("── Job ") }) { section = section[..<next] }
+            }
+            return FinishedJob(id: id, label: job["label"] as? String ?? id,
+                               output: section.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines))
+        }
     }
 
     /// Terminal subagents from omp's `<task-result id status agent duration>` tags (any
@@ -334,8 +367,9 @@ public struct TranscriptReader: Sendable {
         }
     }
 
-    /// The readable part of a task-result body: the abort reason, else the output (its JSON
-    /// `summary` when it has one), without omp's `<meta/>` and `<preview>` wrappers.
+    /// The readable part of a task-result body: the abort reason, else the output, without
+    /// omp's `<meta/>` and `<preview>` wrappers. Structured output shows its prose field (its
+    /// `summary`, else the longest string), even when the delivery cut the JSON short.
     static func resultSummary(_ body: String) -> String? {
         func inner(_ tag: String) -> String? {
             guard let open = body.range(of: "<\(tag)"), let start = body[open.upperBound...].firstIndex(of: ">") else { return nil }
@@ -344,10 +378,21 @@ public struct TranscriptReader: Sendable {
         }
         var text = inner("abort-reason") ?? inner("output") ?? inner("preview") ?? body
         text = text.replacing(/<meta\b[^>]*\/>/, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if let data = text.data(using: .utf8),
-           let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-           let summary = object["summary"] as? String {
-            text = summary
+        if text.hasPrefix("{") {
+            // A delivery can cut the JSON short: then its complete and last partial string fields.
+            var fields: [(key: String, value: String)] = []
+            if let object = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] {
+                fields = object.compactMap { key, value in (value as? String).map { (key, $0) } }
+            } else {
+                fields = text.matches(of: /"([\w-]+)"\s*:\s*"((?:[^"\\]|\\.)*)/).map { match in
+                    let raw = String(match.2)
+                    let value = (try? JSONSerialization.jsonObject(with: Data("\"\(raw)\"".utf8), options: .fragmentsAllowed)) as? String
+                    return (String(match.1), value ?? raw)
+                }
+            }
+            if let best = fields.first(where: { $0.key == "summary" }) ?? fields.max(by: { $0.value.count < $1.value.count }) {
+                text = best.value
+            }
         }
         return text.isEmpty ? nil : text
     }
@@ -626,6 +671,12 @@ public struct Conversation: Sendable {
             append(.notice(id: nextID("notice"), text: text))
         case .peerMessage(let id, let peer, let text, let outbound):
             append(.peerMessage(id: id.isEmpty ? nextID("peer") : id, peer: peer, text: text, outbound: outbound))
+        case .jobsFinished(let jobs):
+            // A row where the output arrived, labelled with the command that started it.
+            for job in jobs {
+                let id = nextID("job")
+                append(.tool(ToolActivity(id: id, name: "job", summary: "Finished \(job.label)", state: .succeeded, output: Self.capped(job.output))), tool: id)
+            }
         case .subagentEvent(let activity):
             guard !activity.id.isEmpty else { break }
             if let i = subagentActivities.firstIndex(where: { $0.id == activity.id }) {
@@ -715,7 +766,7 @@ public struct Conversation: Sendable {
             switch items[index] {
             case .tool(var tool):
                 tool.state = message.isError ? .failed : .succeeded
-                tool.output = message.text.split(separator: "\n", maxSplits: 200, omittingEmptySubsequences: false).prefix(200).joined(separator: "\n")
+                tool.output = Self.capped(message.text)
                 tool.details = message.details
                 tool.images = message.images
                 if tool.name == "wait" { applyWait(message.details) }
@@ -823,6 +874,11 @@ public struct Conversation: Sendable {
     private mutating func nextID(_ prefix: String) -> String {
         serial += 1
         return "\(prefix)-\(serial)"
+    }
+
+    /// A tool's output as shown: its first 200 lines.
+    private static func capped(_ text: String) -> String {
+        text.split(separator: "\n", maxSplits: 200, omittingEmptySubsequences: false).prefix(200).joined(separator: "\n")
     }
 
     private static func object(_ json: String?) -> [String: Any] {

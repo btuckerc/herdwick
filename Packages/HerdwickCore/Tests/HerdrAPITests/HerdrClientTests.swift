@@ -105,8 +105,8 @@ struct LiveHerdrTests {
         func sh(_ command: String) async throws {
             _ = try await HerdrClient.collect(try await LocalProcessRunner().exec(command))
         }
-        // Null stdio so the daemon holds none of the runner's pipes open.
-        try await sh("\(herdr) --session \(session) server </dev/null >/dev/null 2>&1 &")
+        // The app's own start: detached from the channel, and listed as running when it returns.
+        try await client.startServer(session: session)
         var failure: (any Error)?
         do { try await exerciseWritePath(session: session) } catch { failure = error }
         // herdr's server ignores SIGTERM; stop it through its API, then remove the session.

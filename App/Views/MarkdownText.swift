@@ -14,6 +14,8 @@ struct MarkdownText: View {
                 case .prose(let string): Text(string)
                 case .code(let language, let text): CodeBlock(language: language, text: text)
                 case .table(let table): TableBlock(table: table)
+                // Shown as the reply shows them, not folded like tool images.
+                case .images(let paths): TranscriptImages(paths: paths).environment(\.inlineImages, true)
                 case .rule: Divider().padding(.vertical, 4)
                 }
             }
@@ -22,8 +24,10 @@ struct MarkdownText: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Code spans naming an image file (`shot.png`) link to the image preview.
+    /// Code spans naming an image file (`shot.png`) link to the image preview, as do image
+    /// embeds (`![shot](shot.png)`) inside other text; remote ones stay plain links.
     static func inline(_ text: String) -> AttributedString {
+        let text = text.contains("![") ? linkingEmbeds(text) : text
         var string = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         guard text.contains("`") else { return string }
@@ -34,10 +38,40 @@ struct MarkdownText: View {
         return string
     }
 
+    /// `![alt](target "title")`, one level of parentheses in the target; group 1 is an escaping `\`.
+    nonisolated(unsafe) private static let embed = #/(\\?)!\[([^\]]*)\]\(<?((?:[^()\s>]|\([^()\s]*\))+)>?(?:\s+"[^"]*")?\)/#
+
+    /// Outside code spans only: a reply quoting the syntax keeps it as written.
+    private static func linkingEmbeds(_ text: String) -> String {
+        text.split(separator: "`", omittingEmptySubsequences: false).enumerated().map { index, part in
+            index.isMultiple(of: 2) ? String(part).replacing(embed) { match in
+                guard match.1.isEmpty else { return String(match.0) }
+                let target = String(match.3)
+                let link = localImage(target).flatMap(imageLink)?.absoluteString ?? target
+                return "[\(match.2.isEmpty ? (target as NSString).lastPathComponent : String(match.2))](\(link))"
+            } : String(part)
+        }.joined(separator: "`")
+    }
+
+    /// An embed's host path: absolute, `~/…`, relative, or a `file:` URL; nil for web images.
+    private static func localImage(_ target: String) -> String? {
+        if target.hasPrefix("file://") { return URL(string: target)?.path(percentEncoded: false) }
+        guard !target.contains("://"), !target.hasPrefix("data:") else { return nil }
+        return target.removingPercentEncoding ?? target
+    }
+
+    /// A paragraph of nothing but host-image embeds shows the images themselves.
+    private static func embeddedImages(_ text: String) -> [String]? {
+        guard text.contains("!["), text.replacing(embed, with: "").allSatisfy(\.isWhitespace) else { return nil }
+        let paths = text.matches(of: embed).map { $0.1.isEmpty ? localImage(String($0.3)) : nil }
+        return paths.contains(nil) ? nil : paths.compactMap(\.self)
+    }
+
     private enum Segment {
         case prose(AttributedString)
         case code(language: String?, text: String)
         case table(MarkdownTable)
+        case images([String])
         case rule
     }
 
@@ -49,6 +83,11 @@ struct MarkdownText: View {
             prose = AttributedString()
         }
         for block in blocks {
+            if case .paragraph(let text) = block, let paths = embeddedImages(text) {
+                flush()
+                segments.append(.images(paths))
+                continue
+            }
             switch block {
             case .code(let language, let text): flush(); segments.append(.code(language: language, text: text))
             case .table(let table): flush(); segments.append(.table(table))

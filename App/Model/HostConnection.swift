@@ -147,6 +147,15 @@ final class HostConnection {
         }
     }
 
+    /// Unreachable after trying: failed, offline, or retrying after a failed attempt.
+    var isDown: Bool {
+        switch phase {
+        case .failed, .offline, .waiting: true
+        case .connecting(let attempt): attempt > 1
+        case .idle, .suspended, .resuming, .live: false
+        }
+    }
+
     // MARK: Read state
 
     /// What has been read on this phone; see `ReadState`. herdr's own "seen" belongs to the
@@ -374,6 +383,26 @@ final class HostConnection {
         Keychain.set(key.publicKey, for: profile.hostKeyAccount)
         rejectedHostKey = nil
         handle(.userRetry)
+    }
+
+    /// Starts herdr's server on the host (the configured session, else the default) over its
+    /// own SSH connection, then reconnects. Only from the user's tap on a stopped-herdr failure.
+    /// Returns why it didn't start.
+    func startHerdr() async -> String? {
+        do {
+            let ssh = try await dial(profile)
+            do {
+                try await HerdrClient(runner: ssh, herdrPath: Self.cachedHerdrPath(profile)).startServer(session: profile.session)
+                await ssh.close()
+            } catch {
+                await ssh.close()
+                throw error
+            }
+        } catch {
+            return failure(for: error).message
+        }
+        handle(.userRetry)
+        return nil
     }
 
     // MARK: Actions
@@ -691,9 +720,9 @@ final class HostConnection {
         case HerdrError.herdrNotFound:
             return ConnectionFailure("herdr isn't installed on \(profile.address), or isn't on the login shell's PATH.", retryable: false)
         case SessionError.notRunning(let name):
-            return ConnectionFailure("The herdr session “\(name)” isn't running. Start herdr on \(profile.address), then retry.", retryable: false)
+            return ConnectionFailure("The herdr session “\(name)” isn't running on \(profile.address).", retryable: false, herdrStopped: true)
         case SessionError.none:
-            return ConnectionFailure("No herdr session is running on \(profile.address). Start herdr there, then retry.", retryable: false)
+            return ConnectionFailure("herdr isn't running on \(profile.address).", retryable: false, herdrStopped: true)
         case TailnetError.signedOut:
             return ConnectionFailure("This iPhone is signed out of Tailscale.", retryable: false)
         case let error as CommandError:

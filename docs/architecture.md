@@ -159,7 +159,12 @@ One SSH connection per host multiplexes every channel. States: `idle`,
   session (the chosen one, else the last one opened) starts alongside
   `session list`, which then confirms it or picks another.
 - Configuration errors (auth, host key mismatch, herdr missing) stop retrying
-  and show the fix where the user is looking.
+  and show the fix where the user is looking. When herdr is installed but no
+  session (or not the configured one) is running, the card offers Start herdr:
+  over its own SSH channel, `/bin/sh` runs `nohup "$SHELL" -lc '<herdr>
+  [--session S] server'` detached (a private `mktemp` log, its tail shown if
+  the server exits within a second, then unlinked), polls `session list`
+  for up to 5 s, then reconnects. Only the user's tap starts it.
 
 ## Onboarding
 1. Tailscale: embedded TailscaleKit (in-app tsnet node, state in Application

@@ -162,19 +162,37 @@ struct FailureCard: View {
     let failure: ConnectionFailure
     var onEdit: (() -> Void)?
     @State private var confirmingKey = false
+    @State private var starting = false
+    @State private var startError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Can't connect to \(connection.profile.name)", systemImage: "bolt.horizontal.circle")
                 .font(.headline)
-            Text(failure.message)
+            Text(startError ?? failure.message)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             GlassEffectContainer {
                 HStack {
-                    Button("Retry") { connection.handle(.userRetry) }
+                    if failure.herdrStopped {
+                        Button {
+                            starting = true
+                            Task {
+                                startError = await connection.startHerdr()
+                                starting = false
+                            }
+                        } label: {
+                            if starting { ProgressView() } else { Text("Start herdr") }
+                        }
                         .buttonStyle(.glassProminent)
+                        .disabled(starting)
+                    }
+                    if failure.herdrStopped {
+                        Button("Retry") { connection.handle(.userRetry) }.buttonStyle(.glass)
+                    } else {
+                        Button("Retry") { connection.handle(.userRetry) }.buttonStyle(.glassProminent)
+                    }
                     if let presented = connection.rejectedHostKey {
                         Button("Trust New Key…") { confirmingKey = true }
                             .buttonStyle(.glass)
@@ -194,6 +212,7 @@ struct FailureCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.fill.quaternary, in: .rect(cornerRadius: 24))
         .padding()
+        .onChange(of: failure) { startError = nil }
     }
 
     private var pinnedFingerprint: String {
@@ -245,6 +264,7 @@ struct MessageComposer: View {
     @State private var importError: String?
     @State private var importTask: Task<Void, Never>?
     @State private var importID = UUID()
+    @State private var previewing: ImagePreviewSource?
 
     private var busy: Bool { sending || importing }
 
@@ -255,14 +275,25 @@ struct MessageComposer: View {
                     HStack {
                         ForEach(attachments) { attachment in
                             HStack(spacing: 6) {
-                                if let thumbnail = attachment.thumbnail {
-                                    Image(uiImage: thumbnail).resizable().scaledToFill()
-                                        .frame(width: 32, height: 32).clipped()
+                                // The picture and name open the preview; Remove stays its own button.
+                                Button {
+                                    previewing = .local(attachment.data, name: attachment.filename, id: attachment.id)
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if let thumbnail = attachment.thumbnail {
+                                            Image(uiImage: thumbnail).resizable().scaledToFill()
+                                                .frame(width: 32, height: 32).clipped()
+                                        }
+                                        VStack(alignment: .leading) {
+                                            Text(attachment.filename).lineLimit(1)
+                                            Text(attachment.state).font(.caption2).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .contentShape(.rect)
                                 }
-                                VStack(alignment: .leading) {
-                                    Text(attachment.filename).lineLimit(1)
-                                    Text(attachment.state).font(.caption2).foregroundStyle(.secondary)
-                                }
+                                .buttonStyle(.plain)
+                                .disabled(!attachment.isImage)
+                                .accessibilityHint(attachment.isImage ? "Shows the image" : "")
                                 Button {
                                     attachments.removeAll { $0.id == attachment.id }
                                 } label: { Image(systemName: "xmark") }
@@ -306,7 +337,9 @@ struct MessageComposer: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 11)
-                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
+                    // Not `.interactive()`: its touch handling takes taps from the + menu's
+                    // items where they overlap the field, all but their leading glyph.
+                    .glassEffect(.regular, in: .rect(cornerRadius: 22))
                     Button(action: onSend) {
                         Image(systemName: "arrow.up")
                             .font(.body.weight(.semibold)).frame(width: 30, height: 30)
@@ -320,6 +353,7 @@ struct MessageComposer: View {
         }
         // The field stays enabled while sending: disabling it would drop the keyboard.
         .photosPicker(isPresented: $showPhotos, selection: $photos, maxSelectionCount: 4, matching: .images)
+        .sheet(item: $previewing) { ImagePreview(source: $0, loader: nil) }
         .onChange(of: photos) { _, selection in
             guard !selection.isEmpty else { return }
             importTask?.cancel()

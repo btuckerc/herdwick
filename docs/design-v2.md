@@ -50,7 +50,10 @@ grouping applies it too. Cross-host order assumes the hosts' clocks agree.
    conversation; others open the terminal. The magnifier (or ⌘F) opens a search bar over title,
    workspace, folder, host and (with previews on) that line; the magnifier turns into ✕, which
    closes and clears it. While anything shared from another app is unsent, a "Shared · N" row
-   tops the list (see architecture.md).
+   tops the list (see architecture.md). With no rows, "No agents" (New Agent) appears only
+   once a host is live ("No agents on the connected hosts" while others aren't); while the
+   first attempts run, the per-host status lines are all it shows, and once every host is down
+   (failed, offline, or retrying after a failure) it shows "No hosts connected" with Add Host.
 2. **Conversation**: transcript rendered as chat; pending ask as native cards above the
    composer, on a material surface so the transcript doesn't show through when scrolled beneath;
    composer (`pane.send_input`, text + `enter`). Title = transcript title or agent,
@@ -174,7 +177,11 @@ time, capped at 20 MB even if the file grows mid-read), decoded by ImageIO strai
 size needed (360 px thumbnails in a bounded cache, 3000 px in the zoomable preview). The
 transcript isn't lazy, so a thumbnail row scrolled off screen drops its bitmap and takes it
 back from the cache (or the host) on return. A code span naming an image file, or a read of
-one that returned no images, opens it in the preview.
+one that returned no images, opens it in the preview. A reply paragraph of only image embeds
+(`![alt](shots/a.png)`, host paths resolved against the agent's folder) shows them as that
+thumbnail strip, always inline and never cached across hosts; an embed inside other text
+becomes a link to the preview, and web images stay plain links (never fetched by the app).
+A composer attachment opens the same preview from its chip before sending.
 
 Settings say only what a label can't: detail levels are checkmark Toggles in a menu (a Picker's
 tag spreads over a two-Text row), and Keep Uploads and Alerts While
@@ -225,7 +232,10 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
     `thinking` and `toolCall`s → one folded "N steps · <last summary>" row; a tool call merges
     with its `toolResult` by `toolCallId` (state, first 200 output lines).
   - `custom/tool_execution_start` → running step (replaced by its call); `compaction`,
-    displayed `custom_message`, assistant `errorMessage` → centred notices; `title`,
+    displayed `custom_message`, assistant `errorMessage` → centred notices. omp's
+    `async-result` `<system-notice>` is split by `details.jobs`: task results complete
+    subagents, and each finished background command becomes a "Finished <command>" step
+    carrying its output, where it arrived. Redacted (empty) thinking shows nothing; `title`,
     `title_change`, `session.title` → title; model/thinking/usage/credential/`session_init`
     records and `developer` messages → hidden.
   - Unknown record types survive as raw rows (a newer omp never silently loses content).

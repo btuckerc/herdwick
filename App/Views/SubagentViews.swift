@@ -155,7 +155,7 @@ struct SubagentConversationView: View {
         }
         .environment(\.previewImage) { previewing = $0 }
         .environment(\.imageLoader, ImageLoader(connection: connection, transcript: path))
-        .sheet(item: $previewing) { ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: path), cwd: nil) }
+        .sheet(item: $previewing) { ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: path)) }
         .defaultScrollAnchor(.bottom)
         .overlay {
             switch feed.state {

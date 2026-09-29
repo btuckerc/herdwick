@@ -3,16 +3,18 @@ import ImageIO
 import SwiftUI
 import UIKit
 
-/// An image to show full screen: ones embedded in the transcript, or a file on the host,
-/// fetched only when opened.
+/// An image to show full screen: ones embedded in the transcript, a file on the host,
+/// fetched only when opened, or one about to be sent.
 enum ImagePreviewSource: Identifiable {
     case embedded([TranscriptImage], index: Int)
     case file(String)
+    case local(Data, name: String, id: UUID)
 
     var id: String {
         switch self {
         case .embedded(let images, let index): "embedded:\(ObjectIdentifier(images[index]).hashValue)"
         case .file(let path): "file:\(path)"
+        case .local(_, _, let id): "local:\(id)"
         }
     }
 }
@@ -25,11 +27,12 @@ extension EnvironmentValues {
     @Entry var imageLoader: ImageLoader? = nil
 }
 
-/// Fetches an embedded image's bytes when it is shown: inline ones decode in place, omp
-/// blobs are read from the host beside the transcript.
+/// Fetches an image's bytes when it is shown: inline ones decode in place, omp blobs are read
+/// from the host beside the transcript, files the agent names relative to its folder.
 struct ImageLoader {
     let connection: HostConnection
     let transcript: String?
+    var cwd: String? = nil
 
     @MainActor func data(_ image: TranscriptImage) async throws -> Data {
         try Task.checkCancellation()
@@ -39,9 +42,22 @@ struct ImageLoader {
             }
             return data
         }
-        guard let client = connection.client, let transcript, let path = image.blobPath(transcript: transcript) else {
+        guard let transcript, let path = image.blobPath(transcript: transcript) else {
             throw FileUnreadable(path: "image")
         }
+        return try await read(path)
+    }
+
+    /// A file on the host: absolute, `~/…`, or relative to the agent's folder.
+    @MainActor func data(path: String) async throws -> Data {
+        guard path.hasPrefix("/") || path.hasPrefix("~") || cwd == nil else {
+            return try await read((cwd! as NSString).appendingPathComponent(path))
+        }
+        return try await read(path)
+    }
+
+    @MainActor private func read(_ path: String) async throws -> Data {
+        guard let client = connection.client else { throw FileUnreadable(path: path) }
         try await fetchGate.enter()
         defer { fetchGate.leave() }
         try Task.checkCancellation()
@@ -124,12 +140,12 @@ func downsample(_ data: Data, maxPixel: CGFloat) async -> CGImage? {
     return cache
 }()
 
-/// An embedded image, small, in the transcript; tap to open it. Holds its bitmap only while
-/// on screen: `visible` in the transcript, and within its strip. The transcript isn't lazy,
-/// so an off-screen row would otherwise keep it.
+/// An image, small, in the transcript; tap to open it. Holds its bitmap only while on screen:
+/// `visible` in the transcript, and within its strip. The transcript isn't lazy, so an
+/// off-screen row would otherwise keep it.
 struct TranscriptImageThumbnail: View {
-    let images: [TranscriptImage]
-    let index: Int
+    let source: ImagePreviewSource
+    let number: Int
     let visible: Bool
     @Environment(\.previewImage) private var previewImage
     @Environment(\.imageLoader) private var loader
@@ -137,7 +153,7 @@ struct TranscriptImageThumbnail: View {
     @State private var inStrip = false
 
     var body: some View {
-        Button { previewImage?(.embedded(images, index: index)) } label: {
+        Button { previewImage?(source) } label: {
             Group {
                 if let image {
                     Image(uiImage: image).resizable().scaledToFill()
@@ -149,46 +165,59 @@ struct TranscriptImageThumbnail: View {
             .clipShape(.rect(cornerRadius: 12))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Image \(index + 1)")
+        .accessibilityLabel("Image \(number)")
         .onScrollVisibilityChange(threshold: 0.01) { inStrip = $0 }
-        .task(id: visible && inStrip ? ObjectIdentifier(images[index]) : nil) {
+        .task(id: visible && inStrip ? source.id : nil) {
             guard visible, inStrip else { image = nil; return }
-            let source = images[index]
-            if let cached = thumbnails.object(forKey: source) { image = cached; return }
-            guard let loader, let data = try? await loader.data(source), !Task.isCancelled,
+            // Only embedded images are cached: a path names different files on different hosts.
+            let embedded: TranscriptImage? = if case .embedded(let images, let index) = source { images[index] } else { nil }
+            if let embedded, let cached = thumbnails.object(forKey: embedded) { image = cached; return }
+            guard let data = try? await load(), !Task.isCancelled,
                   let decoded = await downsample(data, maxPixel: 360), !Task.isCancelled else { return }
             let thumbnail = UIImage(cgImage: decoded)
-            thumbnails.setObject(thumbnail, forKey: source, cost: decoded.bytesPerRow * decoded.height)
+            if let embedded { thumbnails.setObject(thumbnail, forKey: embedded, cost: decoded.bytesPerRow * decoded.height) }
             image = thumbnail
+        }
+    }
+
+    private func load() async throws -> Data? {
+        switch source {
+        case .embedded(let images, let index): try await loader?.data(images[index])
+        case .file(let path): try await loader?.data(path: path)
+        case .local(let data, _, _): data
         }
     }
 }
 
-/// Images a message or tool result carries: thumbnails in Full detail, otherwise one label
-/// that shows them in place, so nothing is fetched until asked for. A thumbnail opens full screen.
+/// Images a message or tool result carries, or a reply embeds: thumbnails in Full detail,
+/// otherwise one label that shows them in place, so nothing is fetched until asked for. A
+/// thumbnail opens full screen.
 struct TranscriptImages: View {
-    let images: [TranscriptImage]
+    let sources: [ImagePreviewSource]
     @Environment(\.inlineImages) private var inline
     @Environment(\.previewImage) private var previewImage
     /// On screen in the transcript's scroll view (the strip's own scroll view doesn't count).
     @State private var visible = false
     @State private var expanded = false
 
+    init(images: [TranscriptImage]) { sources = images.indices.map { .embedded(images, index: $0) } }
+    init(paths: [String]) { sources = paths.map(ImagePreviewSource.file) }
+
     var body: some View {
         if inline || expanded {
             ScrollView(.horizontal) {
                 HStack(spacing: 6) {
-                    ForEach(images.indices, id: \.self) {
-                        TranscriptImageThumbnail(images: images, index: $0, visible: visible)
+                    ForEach(sources.indices, id: \.self) {
+                        TranscriptImageThumbnail(source: sources[$0], number: $0 + 1, visible: visible)
                     }
                 }
             }
             .scrollIndicators(.hidden)
-            .fixedSize(horizontal: images.count < 3, vertical: true)
+            .fixedSize(horizontal: sources.count < 3, vertical: true)
             .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
         } else {
             Button { expanded = true } label: {
-                Label(images.count == 1 ? "Image" : "\(images.count) images", systemImage: "photo")
+                Label(sources.count == 1 ? "Image" : "\(sources.count) images", systemImage: "photo")
                     .font(.caption)
             }
             .buttonStyle(.plain)
@@ -200,8 +229,8 @@ struct TranscriptImages: View {
 /// Full-screen, zoomable preview of one image or a set of embedded ones.
 struct ImagePreview: View {
     let source: ImagePreviewSource
-    let loader: ImageLoader
-    let cwd: String?
+    /// Reads transcript and host images; nil where only local ones are shown.
+    var loader: ImageLoader?
     @Environment(\.dismiss) private var dismiss
     @State private var page = 0
 
@@ -212,12 +241,14 @@ struct ImagePreview: View {
                 case .embedded(let images, _):
                     TabView(selection: $page) {
                         ForEach(images.indices, id: \.self) { index in
-                            PreviewPage(load: { await downsample(try await loader.data(images[index]), maxPixel: Self.screenPixels) }).tag(index)
+                            PreviewPage(load: { await downsample(try await host().data(images[index]), maxPixel: Self.screenPixels) }).tag(index)
                         }
                     }
                     .tabViewStyle(.page(indexDisplayMode: images.count > 1 ? .automatic : .never))
                 case .file(let path):
-                    PreviewPage(load: { try await fetch(path) })
+                    PreviewPage(load: { await downsample(try await host().data(path: path), maxPixel: Self.screenPixels) })
+                case .local(let data, _, _):
+                    PreviewPage(load: { await downsample(data, maxPixel: Self.screenPixels) })
                 }
             }
             .background(.black)
@@ -235,17 +266,16 @@ struct ImagePreview: View {
         switch source {
         case .embedded(let images, _): images.count > 1 ? "Image \(page + 1) of \(images.count)" : "Image"
         case .file(let path): (path as NSString).lastPathComponent
+        case .local(_, let name, _): name
         }
     }
 
     /// Sharp on any phone screen with room to zoom, but never the full bitmap of a huge image.
     private static let screenPixels: CGFloat = 3000
 
-    private func fetch(_ path: String) async throws -> CGImage? {
-        guard let client = loader.connection.client else { throw HerdrError.noResponse }
-        let absolute = path.hasPrefix("/") || path.hasPrefix("~") || cwd == nil ? path : (cwd! as NSString).appendingPathComponent(path)
-        let data = try await client.readFile(path: absolute)
-        return await downsample(data, maxPixel: Self.screenPixels)
+    private func host() throws -> ImageLoader {
+        guard let loader else { throw HerdrError.noResponse }
+        return loader
     }
 }
 

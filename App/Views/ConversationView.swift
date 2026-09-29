@@ -259,14 +259,14 @@ struct ConversationView: View {
         .environment(\.subagentNamed) { id in feed.conversation.subagents.first { $0.id == id } }
         .environment(\.previewImage) { previewing = $0 }
         .environment(\.inlineImages, (detailOverride ?? settings.detailLevel) == .full)
-        .environment(\.imageLoader, ImageLoader(connection: connection, transcript: location?.path))
+        .environment(\.imageLoader, ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd))
         .environment(\.openURL, OpenURLAction { url in
             guard let path = imageLinkPath(url) else { return .systemAction }
             previewing = .file(path)
             return .handled
         })
         .sheet(item: $previewing) {
-            ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: location?.path), cwd: agent?.cwd)
+            ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd))
         }
         .defaultScrollAnchor(.bottom)
         .onChange(of: feed.conversation.workingSubagents.count) { _, count in
@@ -1207,7 +1207,7 @@ private struct StepsRow: View {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(items) { item in StepLine(item: item, full: full) }
             }
-            .padding(.top, 6)
+            .padding(.vertical, 6)
         } label: {
             HStack(spacing: 8) {
                 if running { ProgressView().controlSize(.small) }

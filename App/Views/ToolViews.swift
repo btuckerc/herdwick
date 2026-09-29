@@ -46,7 +46,8 @@ struct ToolStepView: View {
         case .todo: "checklist"
         case .task: "person.2"
         case .plan: "list.bullet.clipboard"
-        case .generic: "wrench.and.screwdriver"
+        // A background command's delivered output (`Conversation` names it "job").
+        case .generic: tool.name == "job" ? "terminal" : "wrench.and.screwdriver"
         }
     }
 

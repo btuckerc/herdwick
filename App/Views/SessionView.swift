@@ -387,12 +387,26 @@ struct SessionView: View {
             if result.needsYou.isEmpty && result.sections.isEmpty && result.hidden.isEmpty && !query.isEmpty {
                 ContentUnavailableView.search(text: query)
             } else if result.needsYou.isEmpty && result.sections.isEmpty && result.hidden.isEmpty {
-                ContentUnavailableView {
-                    Label("No agents", systemImage: "sparkles")
-                } description: {
-                    Text("Start an agent in any folder on this host.")
-                } actions: {
-                    Button("New Agent", systemImage: "plus") { sheet = .newAgent(nil, workspace: nil) }
+                // "No agents" only from a host that answered; while the first attempts run the
+                // status lines above say so, and once every host is down, offer the way back.
+                if links.contains(where: \.isLive) {
+                    ContentUnavailableView {
+                        Label("No agents", systemImage: "sparkles")
+                    } description: {
+                        Text(links.allSatisfy(\.isLive) ? "Start an agent in any folder on this host." : "No agents on the connected hosts.")
+                    } actions: {
+                        Button("New Agent", systemImage: "plus") { sheet = .newAgent(nil, workspace: nil) }
+                            .labelStyle(.titleAndIcon)
+                    }
+                } else if links.allSatisfy(\.isDown) {
+                    ContentUnavailableView {
+                        Label("No hosts connected", systemImage: "network.slash")
+                    } description: {
+                        Text("Check that the hosts are on and reachable, or add another.")
+                    } actions: {
+                        Button("Add Host", systemImage: "plus") { sheet = .addHost }
+                            .labelStyle(.titleAndIcon)
+                    }
                 }
             }
             ForEach(links, id: \.identity) { link in
