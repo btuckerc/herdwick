@@ -9,13 +9,13 @@ Everything App Store Connect asks for that isn't a text file in `en-US/`.
 | Field | Value |
 |---|---|
 | Name | `Herdwick: Agents over SSH` (25/30). herdr is kept out of the name: it's a third-party product, and "SSH" and "Agents" are what people search for. Alternatives: `Herdwick: Coding Agents`, `Herdwick: Remote Agent Inbox` |
-| Subtitle | `Remote coding, chat & terminal` (30/30). Alternative: `Answer agents from your phone`. No third-party names here (guideline 2.3.7) |
-| Keywords | 100/100 bytes. Don't repeat words already in the name or subtitle (they're indexed); no third-party marks (Claude, Codex, Tailscale, herdr), no `tmux`/`mosh` (not what the app is). Rebalance if the name or subtitle changes |
+| Subtitle | `Read and answer coding agents` (29/30). Plain verbs, no slogan. No third-party names here (guideline 2.3.7) |
+| Keywords | 96/100 bytes. `terminal`, `remote` and `chat` moved here from the old subtitle. Don't repeat words already in the name or subtitle (they're indexed); no third-party marks (Claude, Codex, Tailscale, herdr), no `tmux`/`mosh` (not what the app is). Rebalance if the name or subtitle changes |
 | Primary / secondary category | Developer Tools / Utilities |
 | Price | Free |
 | Age rating | Answer Apple's questionnaire; 4+ is the expected result. Unrestricted web access: No (links open outside the app; the only in-app web view is Tailscale sign-in). In the review notes, say agent transcripts are private to the user's machine, not user-to-user chat or shared content |
 | Privacy policy URL | `https://btuckerc.dev/privacy/herdwick` (live; source in `btuckerc/site`, `src/pages/HerdwickPrivacy.jsx`) |
-| Marketing / support URL | `https://herdwick.app`, `/support`. The domain must be registered and the pages live before submission |
+| Support URL | `https://btuckerc.dev/herdwick/support` (source in `btuckerc/site`, `src/pages/HerdwickSupport.jsx`). No marketing URL (optional; herdwick.app isn't registered) |
 | Copyright | `2026 Tucker Craig` |
 
 ## App privacy

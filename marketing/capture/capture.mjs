@@ -72,6 +72,13 @@ async function captureScene(device, udid, docs, scene) {
   const args = launchArgs(config.defaults, config.devices[device].args ?? [], ['-HerdwickDemo', scene.scenario ?? 'studio'], scene.args);
   await launch(udid, docs, args);
   await waitReady(docs, `${device}/${scene.id}`);
+  // Real taps (axe, in points) for states only a touch reaches: an opened run, a sheet.
+  const taps = scene.taps?.[device] ?? [];
+  for (const [x, y] of taps) {
+    execFileSync('axe', ['tap', '-x', String(x), '-y', String(y), '--udid', udid], { stdio: 'ignore' });
+    await sleep(1200);
+  }
+  if (taps.length) await sleep(600);
   const file = join(out, device, `${scene.id}.png`);
   simctl('io', udid, 'screenshot', '--type=png', file);
   const [w, h] = pngSize(await readFile(file));

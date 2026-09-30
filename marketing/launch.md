@@ -31,19 +31,17 @@ Send both. Don't wait for replies; the listing uses descriptive text only.
 
 ## X
 
-> Your coding agents keep working after you close the laptop. Now you can answer them.
+> Answer your coding agents from your phone. Herdwick is a free iPhone and iPad app for
+> herdr on your own Mac or Linux machines.
 >
-> Herdwick is a native iOS client for herdr: every agent on your machines in one inbox,
-> the one that needs you on top. Read its conversation, answer its question, or drop into
-> the live terminal.
->
-> SSH or Tailscale built in. No account.
+> Read conversations, review diffs and use the live terminal. Connect over SSH or sign in
+> with Tailscale. No account.
 
 Attach the 1080×1920 launch video, or screenshots 1 and 3. Put the App Store link in a reply.
 
 ## Show HN
 
-Title: `Show HN: Herdwick – iOS client for herdr, answer blocked coding agents anywhere`
+Title: `Show HN: Herdwick – an iOS client for herdr to answer your coding agents`
 
 > herdr is an open-source terminal workspace that tracks coding agents (Claude Code, Codex,
 > opencode) across panes and knows when one is blocked. Herdwick is a native iPhone and
@@ -66,16 +64,15 @@ Title: `Show HN: Herdwick – iOS client for herdr, answer blocked coding agents
 
 ## Reddit, herdr Discord
 
-> Built an iOS client for herdr with Tailscale built in. An agent gets blocked, you open
-> its conversation, see what it did and answer the question in place. The terminal is one
-> tap away. Free, no account. Feedback welcome.
+> I built an iOS client for herdr, with Tailscale built in. When an agent is waiting on you,
+> open its conversation, see what it did and answer it there. The live terminal is always
+> there too. Free, no account. Feedback welcome.
 
 Attach the 20 s preview as a GIF or video.
 
 ## Press blurb
 
-> Herdwick is a free, native iPhone and iPad client for herdr, the open-source terminal
-> workspace for coding agents. It shows every agent running on a developer's machines in
-> one inbox, puts the one that needs input first, shows its conversation and live
-> terminal, and lets the developer answer from anywhere, over SSH or a built-in Tailscale
-> connection. No account, no analytics.
+> Herdwick is a free iPhone and iPad app for herdr, the open-source terminal workspace for
+> coding agents. It shows the agents on your own Mac or Linux machines, the ones waiting on
+> you first. Read their conversations, review diffs and answer them. Connect over SSH or
+> sign in with Tailscale. No account, no analytics.

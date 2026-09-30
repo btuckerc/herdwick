@@ -8,18 +8,17 @@
   },
   "defaults": ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-appearance", "dark", "-theme.dark", "herdwick-night", "-fontSize", "14", "-inboxView", "agents"],
   "scenes": [
-    {"id": "agents", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "agents"]},
-    {"id": "workspaces", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "workspaces"]},
-    {"id": "machines", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "agents", "-inboxView", "machines"]},
-    {"id": "conversation", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p2"]},
-    {"id": "conversation-ask", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p1"]},
-    {"id": "subagents", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p5", "-showWorkingSubagents", "YES"]},
-    {"id": "pane-reply", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "terminal:p1", "-HerdwickDraft", "Run the migrations first, then deploy"]},
-    {"id": "tailscale", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "tailscale"]},
-    {"id": "onboarding", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "onboarding"]},
+    {"id": "agents-light", "devices": ["iphone"], "args": ["-HerdwickScene", "agents", "-appearance", "light"]},
+    {"id": "conversation-ask-light", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p1", "-appearance", "light"]},
+    {"id": "loop", "scenario": "loop", "devices": ["iphone"], "args": ["-HerdwickScene", "pane:p5", "-detailLevel", "folded"]},
+    {"id": "loop-light", "scenario": "loop", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p5", "-detailLevel", "folded", "-appearance", "light"]},
+    {"id": "loop-diff", "scenario": "loop", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p5", "-detailLevel", "folded"], "taps": {"iphone": [[170, 533]], "ipad": [[412, 1008]]}},
+    {"id": "loop-catchup", "scenario": "loop", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p5", "-detailLevel", "folded", "-HerdwickSeen", "c17"]},
+    {"id": "machines", "devices": ["iphone"], "args": ["-HerdwickScene", "agents", "-inboxView", "machines"]},
+    {"id": "tailscale", "devices": ["iphone"], "args": ["-HerdwickScene", "tailscale"]},
     {"id": "theme-day", "devices": ["iphone"], "args": ["-HerdwickScene", "terminal:p2", "-appearance", "light", "-theme.light", "herdwick-day"]},
     {"id": "theme-mocha", "devices": ["iphone"], "args": ["-HerdwickScene", "terminal:p2", "-theme.dark", "catppuccin-mocha"]},
-    {"id": "theme-gruvbox", "devices": ["iphone"], "args": ["-HerdwickScene", "terminal:p2", "-theme.dark", "gruvbox-dark"]}
+    {"id": "terminal-review", "devices": ["ipad"], "args": ["-HerdwickScene", "terminal:p2", "-HerdwickDraft", "Also cover the empty-range case"]}
   ],
   "preview": {"scenario": "preview", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "agents"]}
 }

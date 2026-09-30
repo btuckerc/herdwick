@@ -1,1 +1,1 @@
-Read agent conversations and answer questions from your phone. Connect to your own herdr hosts over SSH, with optional Tailscale sign-in.
+Your coding agents on your phone. See which ones need you, read what they did, and answer. Connects to your own herdr hosts over SSH or Tailscale. No account.

@@ -1,32 +1,31 @@
-Your coding agent needs an answer. Send it from your phone.
-Herdwick connects to herdr on your own machines over SSH.
-Read agent conversations, review tool steps and reply from iPhone or iPad.
+Answer your coding agents from your phone.
+Herdwick connects to herdr on your own Mac or Linux machines over SSH. See what your agents did and reply from iPhone or iPad.
 
 ONE INBOX
-See agents across your saved hosts. The ones that need you come first.
+Every agent on your saved hosts, in one list. The ones waiting on you come first.
 
 READ THE CONVERSATION
-View transcripts from omp, Claude Code and Codex as chat. Expand tool steps, plans and diffs. Open the terminal for other agents or unavailable transcripts.
+Conversations from omp, Claude Code and Codex show as a chat. Tool steps fold into one line; open it for detail. Edits show as diffs, line by line. Other agents, and transcripts that aren't available, open in the terminal. A line marks what's new since you last looked.
 
-ANSWER IN PLACE
-Choose an answer to a supported question or permission prompt, or write a reply. The terminal is always available.
+ANSWER
+Tap an option on a supported question or permission prompt, or type a reply. The terminal is always there.
 
 USE THE TERMINAL
-Live output, a message composer and keys for Esc, Tab, arrows, Enter and Ctrl-C. Optional typing mode takes control and resizes the host pane.
+Live output, a message box and keys for Esc, Tab, arrows, Enter and Ctrl-C. Typing mode is optional; it takes control and resizes the pane on your host.
 
 CONNECT YOUR MACHINES
-Use SSH with a device-generated key or password. Tailscale sign-in and a machine picker are built in; Tailscale SSH requires host and tailnet configuration. No extra Herdwick service to install.
+Use SSH with a key made on your device, or a password. Tailscale sign-in and a machine picker are built in; Tailscale SSH needs setup on your host and tailnet. Nothing to install for Herdwick on your host beyond herdr.
 
 KEEP YOUR PLACE
-The last session snapshot stays visible while Herdwick reconnects. Choose from seven terminal themes, with separate light and dark settings.
+While Herdwick reconnects, your last view stays on screen. Pick from seven terminal themes, set separately for light and dark.
 
 TRY THE DEMO
-Explore a scripted host before connecting your own. No Herdwick account required.
+Look around a scripted demo host before you connect your own. No Herdwick account needed.
 
-YOUR CONNECTION
-The SSH private key stays in the device Keychain. Messages and attachments go to your host, not a Herdwick server. Optional Tailscale use is subject to its privacy policy.
+PRIVACY
+Your SSH private key stays in the device Keychain. Messages and attachments go to your host, not to a Herdwick server. No analytics. If you use Tailscale, its privacy policy applies.
 
 REQUIREMENTS
-Requires iOS 26 or later and a reachable Mac or Linux host running herdr. Coding agents run on your host, not on your phone.
+iOS 26 or later, and a Mac or Linux host running herdr that you can reach. Your agents run on the host, not on your phone.
 
 Herdwick is independent and is not affiliated with or endorsed by the herdr project or Tailscale Inc. Tailscale is a registered trademark of Tailscale Inc.

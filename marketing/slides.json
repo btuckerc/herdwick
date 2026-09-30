@@ -1,41 +1,83 @@
 {
-  "version": 3,
-  "palette": {"canvas": "#1B1D1F", "plane": "#2A2D30", "edge": "#5B6166", "rule": "#3A3F44", "text": "#DCD7CD", "bright": "#F4F0E8", "muted": "#8E8A82", "gold": "#E8C27A", "green": "#9CC48A", "blue": "#7FA7D9"},
-  "panorama": {
-    "iphone": {
-      "size": [1320, 2868], "radius": 82, "pool": 1600, "thread": 604, "cta": 2730,
-      "header": {"x": 104, "y": 120, "width": 1112, "eyebrow": 30, "head": 142, "sub": 38},
-      "full": {"x": 198, "y": 660, "w": 924},
-      "detail": {"screen": {"x": 72, "y": 690, "w": 780}, "callout": {"x": 300, "y": 1080, "w": 960}},
-      "trio": [{"x": -80, "y": 1060, "w": 540}, {"x": 330, "y": 800, "w": 660}, {"x": 860, "y": 1060, "w": 540}],
-      "bridge": {"x": 1080, "y": 1570, "w": 480, "crop": [0.03, 0.12, 0.94, 0.30]}
-    },
-    "ipad": {
-      "size": [2064, 2752], "radius": 54, "pool": 1900, "thread": 590, "cta": 2670,
-      "header": {"x": 144, "y": 140, "width": 1776, "eyebrow": 34, "head": 120, "sub": 44},
-      "full": {"x": 300, "y": 650, "w": 1464},
-      "detail": {"screen": {"x": 300, "y": 650, "w": 1464}, "callout": {"x": 152, "y": 2180, "w": 1760}},
-      "bridge": {"x": 1840, "y": 1570, "w": 448, "crop": [0.03, 0.12, 0.94, 0.30]}
-    }
+  "version": 4,
+  "palette": {"cream": "#EFEBE3", "sage": "#6F8F72", "charcoal": "#3B3936", "gold": "#E2B04A"},
+  "grounds": {
+    "cream": {"stops": ["#F6F2EA", "#E9E2D4"], "light": "rgba(255,255,255,0.55)", "line": "rgba(92,78,52,0.16)", "goldLevel": 9, "goldOpacity": 0.55, "grain": 0.22, "ink": "#24221F", "sub": "rgba(36,34,31,0.66)", "pill": "rgba(36,34,31,0.07)", "ring": "rgba(0,0,0,0.08)", "shadow": "74,58,32", "shadowAlpha": 0.28},
+    "meadow": {"stops": ["#E8EDE1", "#C9D6C3"], "light": "rgba(255,255,255,0.5)", "line": "rgba(44,72,48,0.17)", "goldLevel": 11, "goldOpacity": 0.6, "grain": 0.22, "ink": "#1E2A21", "sub": "rgba(30,42,33,0.68)", "pill": "rgba(30,42,33,0.07)", "ring": "rgba(0,0,0,0.08)", "shadow": "36,60,40", "shadowAlpha": 0.3},
+    "sage": {"stops": ["#8CA88C", "#65856A"], "light": "rgba(255,250,235,0.28)", "line": "rgba(255,255,255,0.2)", "goldLevel": 8, "goldOpacity": 0.75, "grain": 0.2, "ink": "#FBF8F1", "sub": "rgba(251,248,241,0.8)", "pill": "rgba(251,248,241,0.14)", "ring": "rgba(255,255,255,0.14)", "shadow": "18,36,22", "shadowAlpha": 0.42},
+    "slate": {"stops": ["#3A403E", "#232826"], "light": "rgba(255,244,220,0.07)", "line": "rgba(240,235,225,0.11)", "goldLevel": 10, "goldOpacity": 0.5, "grain": 0.25, "ink": "#F2EEE6", "sub": "rgba(242,238,230,0.68)", "pill": "rgba(242,238,230,0.09)", "ring": "rgba(255,255,255,0.13)", "shadow": "0,0,0", "shadowAlpha": 0.55},
+    "night": {"stops": ["#2B2825", "#141312"], "light": "rgba(255,236,200,0.07)", "line": "rgba(240,235,225,0.1)", "goldLevel": 12, "goldOpacity": 0.55, "grain": 0.25, "ink": "#F2EEE6", "sub": "rgba(242,238,230,0.66)", "pill": "rgba(242,238,230,0.09)", "ring": "rgba(255,255,255,0.13)", "shadow": "0,0,0", "shadowAlpha": 0.6}
+  },
+  "devices": {
+    "iphone": {"size": [1320, 2868], "radius": 0.125, "bezel": 0.017, "island": [518, 42, 284, 110], "seed": 1920,
+      "header": {"x": 110, "y": 230, "width": 1100, "head": 136, "sub": 46}},
+    "ipad": {"size": [2064, 2752], "radius": 0.028, "bezel": 0.011, "seed": 2752,
+      "header": {"x": 172, "y": 190, "width": 1720, "head": 124, "sub": 50}}
   },
   "stills": {
     "iphone": [
-      {"id": "inbox", "layout": "full", "capture": "agents", "eyebrow": "Inbox", "headline": "Your agent\nneeds you.", "subline": "Answer from your phone.", "bridge": {"capture": "conversation", "crop": [0.03, 0.38, 0.94, 0.30]}},
-      {"id": "conversation", "layout": "detail", "capture": "conversation", "crop": [0.03, 0.39, 0.94, 0.52], "eyebrow": "Conversation", "headline": "Read the\nconversation.", "subline": "Messages, tool steps, plans and diffs.", "bridge": {"capture": "conversation-ask"}},
-      {"id": "answer", "layout": "detail", "capture": "conversation-ask", "crop": [0.012, 0.645, 0.976, 0.265], "callout": {"y": 1420}, "eyebrow": "Questions", "headline": "Answer without\nthe terminal.", "subline": "Choose an option or write a reply."},
-      {"id": "subagents", "layout": "full", "capture": "subagents", "eyebrow": "Subagents", "headline": "Delegated work,\nin the thread.", "subline": "Follow each subagent as it reports back.", "bridge": {"capture": "workspaces"}},
-      {"id": "machines", "layout": "full", "capture": "machines", "eyebrow": "Machines", "headline": "Every host.\nOne inbox.", "subline": "Agents across your saved machines.", "bridge": {"capture": "pane-reply"}},
-      {"id": "terminal", "layout": "detail", "capture": "pane-reply", "crop": [0, 0.855, 1, 0.11], "callout": {"x": 180, "y": 2180, "w": 1140}, "eyebrow": "Terminal", "headline": "The terminal\nis still here.", "subline": "Live output. Esc, Tab, arrows, Ctrl-C."},
-      {"id": "themes", "layout": "trio", "captures": ["theme-mocha", "theme-day", "theme-gruvbox"], "eyebrow": "Themes", "headline": "Seven themes,\nlight and dark.", "subline": "A palette for each appearance."},
-      {"id": "connect", "layout": "full", "capture": "tailscale", "calloutCapture": "onboarding", "crop": [0.02, 0.35, 0.96, 0.275], "callout": {"x": 104, "y": 1960, "w": 1112}, "eyebrow": "Connect", "headline": "Your machines,\nover SSH.", "subline": "Keys, passwords or Tailscale sign-in.", "cta": "Explore a demo host first. No Herdwick account needed."}
+      {"id": "inbox", "ground": "cream", "brand": true, "headerY": 150, "headline": "Coding agents\non your phone", "subline": "Agents waiting on you are at the top.",
+        "layers": [
+          {"device": "agents-light", "x": 170, "y": 830, "w": 1000, "rotate": -1.5},
+          {"zoom": "agents-light", "crop": [0.03, 0.163, 0.94, 0.105], "x": 60, "y": 1130, "w": 1200}
+        ]},
+      {"id": "answer", "ground": "cream", "headline": "Answer your\nagent", "subline": "Tap an option or type a reply.",
+        "layers": [
+          {"device": "conversation-ask-light", "x": 330, "y": 730, "w": 980},
+          {"zoom": "conversation-ask-light", "crop": [0.015, 0.497, 0.97, 0.395], "x": 110, "y": 1640, "w": 1200}
+        ]},
+      {"id": "progress", "ground": "meadow", "headline": "Read what\nit did", "subline": "Steps fold into one line. Open it for detail.",
+        "layers": [
+          {"device": "loop-light", "x": 150, "y": 760, "w": 1020},
+          {"zoom": "loop-light", "crop": [0, 0.5411, 1, 0.1133], "x": 40, "y": 1930, "w": 1240}
+        ]},
+      {"id": "diffs", "ground": "sage", "headline": "Review the\ndiffs", "subline": "Open any edit and read it line by line.",
+        "layers": [
+          {"device": "loop-diff", "x": 70, "y": 760, "w": 1000, "rotate": 1},
+          {"zoom": "loop-diff", "crop": [0, 0.6046, 0.95, 0.145], "x": 30, "y": 2020, "w": 1260}
+        ]},
+      {"id": "catch-up", "ground": "slate", "headerY": 2120, "headline": "See what's new\nsince last time", "subline": "A line marks where you left off.",
+        "layers": [
+          {"device": "loop-catchup", "x": 110, "y": -500, "w": 1100},
+          {"zoom": "loop-catchup", "crop": [0, 0.502, 1, 0.1524], "x": 40, "y": 677, "w": 1240}
+        ]},
+      {"id": "machines", "ground": "slate", "headline": "Connect all\nyour machines", "subline": "Over SSH, or sign in with Tailscale.",
+        "layers": [
+          {"device": "machines", "x": 40, "y": 790, "w": 820, "rotate": -2},
+          {"device": "tailscale", "x": 270, "y": 1150, "w": 990, "rotate": 2}
+        ]},
+      {"id": "terminal", "ground": "night", "headline": "Use the live\nterminal", "subline": "Keys for Esc, Tab, arrows and Ctrl-C.", "cta": "Try the demo host. No account needed.",
+        "layers": [
+          {"device": "theme-day", "x": 30, "y": 1060, "w": 720, "rotate": -3},
+          {"device": "theme-mocha", "x": 490, "y": 900, "w": 790, "rotate": 2}
+        ]}
     ],
     "ipad": [
-      {"id": "inbox", "layout": "full", "capture": "agents", "eyebrow": "Inbox", "headline": "Your agent needs you.", "subline": "Answer from your iPad.", "bridge": {"capture": "conversation", "crop": [0.02, 0.72, 0.96, 0.22]}},
-      {"id": "conversation", "layout": "detail", "capture": "conversation", "crop": [0, 0.715, 1, 0.22], "callout": {"y": 1150}, "eyebrow": "Conversation", "headline": "Conversation, with context.", "subline": "Messages, tool steps, plans and diffs.", "bridge": {"capture": "conversation-ask", "crop": [0.02, 0.6, 0.96, 0.28]}},
-      {"id": "answer", "layout": "detail", "capture": "conversation-ask", "crop": [0, 0.76, 1, 0.175], "callout": {"y": 1250}, "eyebrow": "Questions", "headline": "Answer without the terminal.", "subline": "Choose an option or write a reply."},
-      {"id": "subagents", "layout": "full", "capture": "subagents", "eyebrow": "Subagents", "headline": "Delegated work, in the thread.", "subline": "Follow each subagent as it reports back.", "bridge": {"capture": "machines"}},
-      {"id": "machines", "layout": "full", "capture": "machines", "eyebrow": "Machines", "headline": "Every host. One inbox.", "subline": "Connect over SSH or with Tailscale sign-in.", "bridge": {"capture": "pane-reply"}},
-      {"id": "terminal", "layout": "detail", "capture": "pane-reply", "crop": [0, 0.9, 1, 0.09], "eyebrow": "Terminal", "headline": "The terminal is still here.", "subline": "Seven themes, light and dark.", "cta": "Explore a demo host first. No Herdwick account needed."}
+      {"id": "inbox", "ground": "cream", "brand": true, "headerY": 150, "headline": "Coding agents on your iPad", "subline": "Agents waiting on you are at the top.",
+        "layers": [
+          {"device": "loop-light", "x": 330, "y": 720, "w": 1900},
+          {"zoom": "loop-light", "crop": [0.004, 0.163, 0.29, 0.05], "x": 110, "y": 1097, "w": 860}
+        ]},
+      {"id": "answer", "ground": "cream", "headerY": 2380, "headline": "Answer your agent", "subline": "Tap an option or type a reply.",
+        "layers": [
+          {"device": "conversation-ask-light", "x": 212, "y": 100, "w": 1640},
+          {"zoom": "conversation-ask-light", "crop": [0.315, 0.703, 0.68, 0.24], "x": 520, "y": 1500, "w": 1500}
+        ]},
+      {"id": "progress", "ground": "meadow", "headline": "Read what it did", "subline": "Steps fold up. A line marks what's new.",
+        "layers": [
+          {"device": "loop-catchup", "x": -200, "y": 560, "w": 1900},
+          {"zoom": "loop-catchup", "crop": [0.31, 0.668, 0.68, 0.115], "x": 120, "y": 2190, "w": 1824}
+        ]},
+      {"id": "diffs", "ground": "sage", "headline": "Review the diffs", "subline": "Open any edit and read it line by line.",
+        "layers": [
+          {"device": "loop-diff", "x": 172, "y": 640, "w": 1720},
+          {"zoom": "loop-diff", "crop": [0.312, 0.505, 0.62, 0.093], "x": 120, "y": 1720, "w": 1824}
+        ]},
+      {"id": "terminal", "ground": "night", "headline": "Use the live terminal", "subline": "Keys for Esc, Tab, arrows and Ctrl-C.", "cta": "Try the demo host. No account needed.",
+        "layers": [
+          {"device": "terminal-review", "x": 172, "y": 720, "w": 1720},
+          {"zoom": "terminal-review", "crop": [0.31, 0.9, 0.69, 0.1], "x": 120, "y": 2250, "w": 1824}
+        ]}
     ]
   },
   "preview": {
@@ -44,17 +86,18 @@
     "captions": [
       {"start": 0.0, "end": 2.9, "text": "Your agent needs you."},
       {"start": 3.0, "end": 5.9, "text": "Read what it did."},
-      {"start": 6.0, "end": 12.9, "text": "Answer from your phone."},
-      {"start": 13.0, "end": 16.9, "text": "Every agent. One inbox."},
+      {"start": 6.0, "end": 12.9, "text": "Answer its question."},
+      {"start": 13.0, "end": 16.9, "text": "All agents in one inbox."},
       {"start": 17.0, "end": 21.0, "text": "Reconnects on its own."}
     ]
   },
   "social": {
-    "headline": "Your agent\nneeds you.",
-    "tagline": "Herdwick. Your coding agents, away from your desk.",
-    "captures": {"main": "conversation", "callout": "conversation-ask", "crop": [0.012, 0.645, 0.976, 0.13]},
-    "press": ["agents", "conversation", "conversation-ask"],
-    "brand": "Your agents.\nAway from your desk.",
-    "endCard": {"title": "Herdwick", "line": "Get Herdwick on the App Store"}
+    "headline": "Coding agents\non your phone",
+    "tagline": "Read and answer them on iPhone and iPad.",
+    "captures": {"main": "agents-light", "callout": "conversation-ask-light", "crop": [0.015, 0.497, 0.97, 0.395]},
+    "press": ["agents-light", "conversation-ask-light", "loop"],
+    "brand": "Coding agents\non your phone",
+    "story": "I made another app",
+    "endCard": {"title": "Herdwick", "line": "Free on the App Store"}
   }
 }

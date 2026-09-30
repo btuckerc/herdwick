@@ -20,6 +20,7 @@ Both run on the Mini (`MINI=<host>` overrides `mini`) and copy their results bac
    boots the simulator, overrides the status bar (9:41, full battery), reinstalls the app
    and launches each scene with `-HerdwickDemo <scenario>` (the scene's `scenario`, default
    `studio`) and the scene's arguments. It waits for the app to write `Documents/demo-ready`,
+   plays the scene's `taps` for that device (points, via `axe`; e.g. opening a run's diff),
    then takes the screenshot and checks its size. The preview launches with
    `-HerdwickHold YES`, starts recording, releases the hold by writing `Documents/demo-go`,
    and records the scenario's timeline plus 1.5 s.
@@ -28,11 +29,14 @@ Both run on the Mini (`MINI=<host>` overrides `mini`) and copy their results bac
    macOS): lays captures into HTML at the exact output size, renders them in Chrome, then
    strips alpha with ImageMagick. Videos go through ffmpeg. Layout and copy live in
    `slides.json`. `node render.mjs stills|previews|social|press` renders only those parts.
-   Stills are one panorama per device (`slides.json` › `panorama`): a single canvas with
-   a grid, colour pools and a gold thread, where a fragment of the next slide's screen
-   straddles each seam. It is rendered once to `build/work/panorama-<device>.png` and cut
-   into slides, so the seams line up. Each slide picks a `layout` (`full`, `detail`,
-   `trio`), and `crop`/`callout` regions are fractions of the capture.
+   Each still is its own composition (`slides.json` › `stills`): a `ground` (`grounds`: a
+   gradient from cream through meadow and sage to slate and night, generated fell contour
+   lines with one picked out in gold, paper grain), the headline block, then `layers` in
+   order: a `device` (a capture in a thin bezel at `x`, `y`, `w`, optional `rotate`) or a
+   `zoom` (a `crop` of a capture, as fractions, raised on a card; at most 1.5× the
+   capture's pixels). A zoom sits over its source region and must cover it. One landscape
+   runs across each device's strip, so contours continue from slide to slide. Social
+   cards, the press hero, the launch videos and the end card use the same grounds.
 4. **Validate** (`compose/validate.mjs`): checks pixel sizes, no alpha, and the App Preview
    video specs (H.264, 30 fps, 15–30 s, stereo AAC).
 
@@ -59,6 +63,7 @@ uses a larger terminal font), then the scene's own; later values win.
 | `appstore/en-US/<device>/preview.mp4` | App Previews (886×1920 iPhone, 1200×1600 iPad) |
 | `appstore/en-US/iphone-69/preview-poster.png` | Poster frame, 5 s in |
 | `social/og-1200x630.png`, `x-card-1600x900.png` | Link cards |
+| `social/story-1080x1920.png` | Instagram story: a personal note (`social.story`) and the name over the inbox, text clear of the top and bottom 250 px |
 | `social/launch-1080x1920.mp4`, `launch-1920x1080.mp4` | Launch videos |
 | `press/hero-3840x2160.png`, `icon-2048.png` | Press kit |
 
@@ -73,4 +78,5 @@ the trademark rules for mentioning herdr and Tailscale. `launch.md` has the laun
 - Only real captures, with text overlays and framing. No mocked UI (guideline 2.3.4 for
   previews).
 - No Apple, herdr or Tailscale logos. Tailscale is named in plain text only.
-- Fonts in `compose/fonts` are OFL (`OFL.txt`).
+- Fonts in `compose/fonts` are OFL (`OFL.txt`): Inter Tight and JetBrains Mono, the
+  variable fonts from google/fonts.

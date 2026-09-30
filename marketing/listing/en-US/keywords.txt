@@ -1,1 +1,1 @@
-console,shell,cli,session,workspace,monitor,command,prompt,reply,permission,server,connection,mobile
+terminal,remote,chat,console,shell,cli,session,workspace,monitor,command,prompt,reply,permission

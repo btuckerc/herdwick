@@ -15,6 +15,11 @@
   on the Mini; see `docs/architecture.md` › Build.
 - Relay: `scripts/mini/deploy-relay.sh` (runs `wrangler deploy` on the Mini with its stored
   Cloudflare login). Never deploy from a laptop copy; the Mini's login is the canonical one.
+- App Store: `scripts/mini/app-store.sh status|metadata|media|submit` (App Store Connect API
+  from the Mini: listing text from `marketing/listing`, age rating, price, availability, review
+  info, screenshots and previews, build and submission). App Privacy isn't in the API:
+  `scripts/mini/app-privacy.sh` (fastlane with an Apple ID session; when it has lapsed the user
+  runs `ssh -t mini '~/src/herdwick/scripts/mini/apple-login.sh'` for a 2FA code).
 - Demo in the simulator: `xcrun simctl terminate <udid> dev.btuckerc.herdwick`, then
   `xcrun simctl launch <udid> dev.btuckerc.herdwick -HerdwickDemo studio` (screen points =
   screenshot pixels ÷ 3 on iPhone, ÷ 2 on iPad). Check iPad (split view) too for navigation changes.

@@ -1,1 +1,1 @@
-Remote coding, chat & terminal
+Read and answer coding agents

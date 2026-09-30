@@ -226,6 +226,14 @@ keyboard accessory (sticky ctrl) replaces the key bar.
   API-made Apple Distribution identity and App Store profiles
   (`scripts/mini/app-store-profiles.mjs`, rerun after adding a target or a
   capability), so no Apple ID has to be signed in to Xcode.
+- `scripts/mini/app-store.sh` runs `app-store.mjs` on the Mini through the same key (`asc.mjs`
+  is the shared client): `metadata` writes `marketing/listing` (text, categories,
+  `age_rating.json`, review notes and the Mini-only contact in `~/.herdwick-signing/review.env`,
+  free price, every territory but mainland China), `media` replaces changed screenshots and
+  previews from `marketing/build/out` and waits for Apple to process them, `submit` attaches the
+  newest processed build of `MARKETING_VERSION` and submits it; approval releases it. App Privacy
+  (`app_privacy_details.json`) goes through fastlane's Apple ID session (`app-privacy.sh`,
+  signed in by `apple-login.sh`), since the API has no endpoint for it.
 - A new target or capability, in order: register its explicit bundle id in the developer
   portal (Identifiers) with its capabilities; App Groups must also be pointed at
   `group.dev.btuckerc.herdwick` there (Configure), which the App Store Connect API can't do.
