@@ -73,8 +73,8 @@ grouping applies it too. Cross-host order assumes the hosts' clocks agree.
    The menu is its own view compared by value and holds nothing that changes per reply: a
    visible menu that SwiftUI rebuilds jumps back to its top, and the conversation re-renders
    with every streamed record.
-   Find searches the loaded messages only (its field says so), steps newest-first and switches to
-   Full detail when a match is folded away. While omp works the composer's + menu offers Send
+   Find searches the loaded messages only (its field says so), steps newest-first, shows Folded
+   while a match is one Digest hides, and opens the run holding a match. While omp works the composer's + menu offers Send
    After This Run (typed into omp's editor, then Ctrl+Q queues it as a follow-up).
 3. **Terminal**: existing SwiftTerm surface pushed from the conversation or a shell row; observe
    by default, typing mode (takeover) opt-in. The fallback for anything we can't structure.
@@ -115,7 +115,9 @@ workspace, else the first; with none, the home folder. Changing it lists every w
 view (All Hosts groups them by host and session) and Choose Folder…, a one-level remote folder
 browser (`HerdrClient.folders`, NUL-framed, dot folders hidden, repositories marked with a
 one-tap Use) that opens next to the selected workspace's folder; a typed path is a fallback in
-its menu. An existing workspace gets a new tab that inherits its folder; a folder that exactly
+its menu. An existing workspace gets a new tab in its folder (its worktree checkout, else its
+first tab's), passed explicitly: left to herdr, the tab starts wherever the workspace's focused
+process is, so an agent that changed directory drags new tabs along. A folder that exactly
 one workspace's panes report reuses that workspace, any other folder gets a new workspace
 (labelled by herdr with the folder name). The terminal button beside Start opens a plain shell
 in the same place instead. Created panes skip the busy check and wait out startup files; a
@@ -150,8 +152,9 @@ The composer attaches files and images, uploaded to the host and cleaned up afte
 retention (1 hour/day/week, default a day). Its + menu inserts saved snippets (Settings ›
 Messages › Snippets) into the draft; a snippet is never sent by itself. The on-screen Return adds a line unless "On-screen
 Return Sends" is on; on a hardware keyboard Return and ⌘↩ send, ⇧↩ or ⌥↩ adds a line.
-Conversation detail is Full, Folded (default) or Digest: one saved preference, set in Settings
-or any conversation's More menu (Find may show Full until its Done). The transcript follows its newest
+Conversation detail is Folded (default) or Digest: one saved preference, set in Settings
+or any conversation's More menu (Find may show Folded until its Done). A third level, Full (every
+run open), was retired: opening a run now opens its diffs, and a stored "full" reads as Folded. The transcript follows its newest
 message through replies, the composer resizing and the keyboard until you scroll away;
 scrolling back to the end, or sending, resumes following.
 Sending clears the draft at once and keeps the field focused (disabling it resigned the
@@ -162,26 +165,101 @@ a pane-keyed draft moves to the agent session once it's known, and a pane that s
 another conversation shows that one's draft), so it survives leaving the conversation and
 relaunching. A new thread shows one quiet line, "Send a
 message to get started.", only once its transcript is live and empty and nothing is being
-sent. "Working…" holds its row at the end for the whole turn and only fades while a step
-spins in its own row, so tool steps starting and finishing don't shift the transcript.
-A message to or from a subagent (`agent://` peer) links to that subagent's thread.
+sent.
+
+One line over the composer says what's happening, in the card slot (asks, permission prompts
+and Needs You take it first). It is bare, a `QuietHeader` in the transcript's own column, in
+the bottom inset (`safeAreaInset`; a `safeAreaBar` would blur the scroll edge but stops the
+transcript's text being selectable on iOS 26, so the inset brings its own 16 pt fade of the
+background above it): no chip of its own. While the agent or any
+of its subagents works, it's the Now line: the newest running call ("Waiting on npm run
+bench", "Running npm test +1"), then "BenchCouncil working" or "3 subagents working" and
+"1 in background", or just "Working…"; derived only from the transcript's running calls,
+working subagents and background commands, and gone offline. Tapping it opens Now: working
+subagents (with elapsed time; each opens its thread), running calls and background commands in
+full. It replaced the transcript's "Working…" row and the Working Subagents tray and setting.
+While it shows, the transcript leaves the present to it: a run's line says only what finished,
+and a run of nothing but running calls appears once one settles.
+Otherwise, on return to a conversation, it's the catch-up line: "Since 9:41 · 3 edits · 2
+replies · 1 error" (red errors), counted after the last item the reader saw at the end
+(`ReadCursors`: the newest item with a transcript-given id, saved per conversation like drafts
+while the end is on screen, pruned after 30 days). Tapping it scrolls to the same line in the
+transcript, a hairline before the first new item; that line coming into view, or sending,
+dismisses the pinned one. The demo takes the seen
+item from `-HerdwickSeen`.
+
+Motion is scarce and short. Disclosures (runs, steps, More/Less) snap open; only the chevron
+turns (180 ms ease-in-out), and opening a line stops following the latest, so the line stays
+under the finger while content grows below it (the bottom anchor for size changes holds only
+while following and not mid-gesture). Cards over the composer (asks, prompts, Needs You, the
+pinned line) appear in place without travel. Status overlays (connecting badge, New Activity)
+fade in 150 ms; the badge waits 0.5 s. User-requested moves (host swipe, New Activity's scroll)
+are 240 ms ease-in-out, never springs; the host push is scoped to the host's content so the
+navigation reset doesn't ride along. Nothing animates streaming, reordering or reflow (no
+list-wide animation on the inbox). Reduce Motion drops translation (host switch fades), the
+chevron's turn, the scroll animations and the Now dot's pulse. Sheets and navigation are the system's.
+
+Two voices: the user's bubble and the agent's prose (`.body`). Everything else (step runs,
+tool steps, messages between agents, subagent results, notices, answered questions) shares one
+quiet grammar (`QuietHeader`): a `.subheadline` secondary line with a trailing chevron that
+turns down to open it in place, or goes to a subagent's thread; bodies are `.subheadline`,
+literal commands, output and diffs `.caption.monospaced()` and unboxed. No icons, cards, success
+green, spinners or timers (the Now line's pulsing dot is the one live mark); red means a failure:
+a step's line starts "Failed:", a count reads "1 error". A run's line (up to two lines) counts
+what it did, however few the calls, errors first in red, then changes ("1 error · 6 edits ·
+3 reads · 2 commands · 1 search · 1 message · 2 images"; one call reads "1 edit", its file on
+the step inside, and the failed step inside names itself), and while running says what it's
+doing ("Waiting on npm run bench…", commands by name without flags). Only calls with no noun (a
+stopped process, a wait) keep their title. Beside its chevron a tertiary count says how many
+lines opening it shows (`StepRun.steps`) when the counts don't add up to it (thinking, waits).
+Opening a run opens its edits' diffs (and a lone call's detail) with it: one tap to the change.
+A diff, command or search output, or written file sits in a box at most 320 pt tall that scrolls by itself
+(`CappedScroll`; a diff scrolls both ways), so a long one never pushes the step's and run's
+headers out of reach; only output past 500 lines waits for "Show all". An opened command shows itself whole only
+when its line may have cut it. Messages between agents read "From X" and
+"To X" (a brief shows its "Change" section first), results "X finished · 2m05s"; each shows two
+lines, More the rest. A reply or result answering a lone brief (`answeredBriefs()`: the only
+brief sent to that agent since it last spoke) carries the brief, under "Asked" when opened,
+and the brief leaves its run; two briefs before one answer stay where they were rather than
+guess which was answered. The More menu's Changes lists each file the tools recorded edits or
+writes to, with each call's diff or written text, newest first: never a net diff, and a
+shell's own changes aren't there.
 
 Images: transcripts hold them by reference (`TranscriptImage`, a class compared by identity).
 omp stores them as blobs (`"data": "blob:sha256:<hex>"` at `~/.omp/agent/blobs/<hex>`, found
 beside the transcript's `sessions` folder); Claude and Codex inline base64, kept undecoded.
-User messages carry them above the bubble (clear of its selectable text): in Full detail as
-120 pt thumbnails, otherwise one "Image"/"N images" label that shows them in place. A tool
-step that returned images gets a photo icon and shows them when its row is expanded (always in
-Full), with no separate label; a thumbnail opens the preview. Bytes are read from the host only when shown (`readFile`, two at a
+User messages carry them above the bubble (clear of its selectable text): one "Image"/"N
+images" label that shows them in place as 120 pt thumbnails. A tool
+step that returned images shows them when its row is expanded, with no
+separate label; its run's line counts them, and the More menu's Images opens every tool image in the
+whole session as a grid, newest first. Unloaded history is listed on the host
+(`transcriptToolImages`: one awk pass returning only image-bearing tool-result lines, inline
+base64 swapped for a `hwline:<line>:<ordinal>` reference fetched one image at a time; an 80 MB
+omp session with 737 images answers in 0.08 s with 390 KB). The loaded images show at once and
+keep their cached thumbnails; a failed listing leaves them with "Loaded messages only". A
+thumbnail opens the preview. Bytes are read from the host only when shown (`readFile`, two at a
 time, capped at 20 MB even if the file grows mid-read), decoded by ImageIO straight to the
-size needed (360 px thumbnails in a bounded cache, 3000 px in the zoomable preview). The
-transcript isn't lazy, so a thumbnail row scrolled off screen drops its bitmap and takes it
-back from the cache (or the host) on return. A code span naming an image file, or a read of
-one that returned no images, opens it in the preview. A reply paragraph of only image embeds
+size needed (thumbnails at their tile's pixel size in a bounded cache, 3000 px in the zoomable
+preview). The transcript isn't lazy, so a thumbnail row scrolled off screen drops its bitmap and takes it
+back from the cache (or the host) on return. A reply paragraph of only image embeds
 (`![alt](shots/a.png)`, host paths resolved against the agent's folder) shows them as that
-thumbnail strip, always inline and never cached across hosts; an embed inside other text
-becomes a link to the preview, and web images stay plain links (never fetched by the app).
-A composer attachment opens the same preview from its chip before sending.
+thumbnail strip, always inline and never cached across hosts; web images stay plain links
+(never fetched by the app). A composer attachment opens the same preview from its chip before sending.
+The Images grid fills the width with square tiles (about 110 pt, 4 pt apart); a tile is
+hit-tested by its own square, never its cropped overflow. The preview's bar shares the
+original bytes as a named file (`Image 2.png`) and saves them to Photos; a long press on any
+thumbnail offers Save to Photos too. Saving asks for add-only access on first use
+(`NSPhotoLibraryAddUsageDescription`); a denial offers Settings, and a save confirms with a
+brief "Saved to Photos".
+
+Mentioned files open without the agent linking them a certain way (`FileLinks`): a code span,
+a word in prose with a `/` or an image extension (not a URL; a bare `a.swift` could be Node.js),
+an inline embed, a Markdown link with no scheme or `file:`, a read's path, or a terminal line
+naming an image or text file becomes a link, a line reference (`:42`, `#L10-L20`, omp's read
+selectors) dropped. A bare name resolves to the newest path a tool read,
+wrote, edited or printed (`Conversation.touchedFile`; a full path only to itself, a URL never), reusing that read's images without asking
+the host. Images open in the zoomable preview; text and source in a file viewer (first 3000
+lines of at most 2 MB, Markdown rendered, shareable).
 
 Settings say only what a label can't: detail levels are checkmark Toggles in a menu (a Picker's
 tag spreads over a two-Text row), and Keep Uploads and Alerts While
@@ -229,10 +307,10 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
     headings, lists and task lists, quotes, code, tables that scroll sideways; inline via
     `AttributedString`; the prose between code blocks, tables and rules is one `Text`, so a
     selection runs across paragraphs and list items),
-    `thinking` and `toolCall`s → one folded "N steps · <last summary>" row; a tool call merges
+    `thinking` and `toolCall`s → one folded run row (above); a tool call merges
     with its `toolResult` by `toolCallId` (state, first 200 output lines).
   - `custom/tool_execution_start` → running step (replaced by its call); `compaction`,
-    displayed `custom_message`, assistant `errorMessage` → centred notices. omp's
+    displayed `custom_message`, assistant `errorMessage` → notices (errors red). omp's
     `async-result` `<system-notice>` is split by `details.jobs`: task results complete
     subagents, and each finished background command becomes a "Finished <command>" step
     carrying its output, where it arrived. Redacted (empty) thinking shows nothing; `title`,
@@ -259,6 +337,10 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
   arrives while you're scrolled back stays unread. A read finish shows as Idle; reading a
   blocked agent drops the dot, never the orange. Agents first seen start read. We never call
   `agent.focus`/tab focus: that would move the user's desk.
+- A sent message shows as the user's bubble from the tap, not once the agent writes it down
+  (seconds, and a new thread has no transcript until then). It leaves when a later user
+  message in the transcript holds its text (whitespace aside; attachments add paths), or when
+  a turn ends without a match; a failed send takes it back to the composer.
 - Sending while an omp agent works queues the message as steering: it shows dimmed under the
   conversation, "Queued · Tap to Edit", until the transcript records it. Tapping the newest
   sends omp's Alt+Up (restore the last queued message to its editor), checks omp's editor on

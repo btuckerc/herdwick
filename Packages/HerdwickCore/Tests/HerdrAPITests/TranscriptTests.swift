@@ -226,8 +226,9 @@ struct AgentTranscriptTests {
 
     @Test func agentWriteIsPeerMessageAndItsResultIsAbsorbed() {
         let call = #"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"toolCall","id":"write-1","name":"write","arguments":{"path":"agent://Helper","content":"A reply"}}]}}"#
+        let started = #"{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"write-1","toolName":"write"}}"#
         let result = #"{"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"write-1","content":"sent"}}"#
-        let resultConversation = conversation([call, result])
+        let resultConversation = conversation([call, started, result])
         #expect(resultConversation.items == [.peerMessage(id: "write-1", peer: "Helper", text: "A reply", outbound: true)])
     }
     @Test func digestPreservesAsksAndLastFailedToolWhileOtherLevelsStayUnfiltered() {
@@ -235,7 +236,6 @@ struct AgentTranscriptTests {
         #expect(waiting.items(at: .digest).contains { if case .ask = $0 { true } else { false } })
         let failed = conversation([Line.bash, Line.bashStart, Line.bashResult, Line.user])
         #expect(failed.items(at: .digest).contains { if case .tool(let tool) = $0 { tool.state == .failed } else { false } })
-        #expect(failed.items(at: .full) == failed.items)
         #expect(failed.items(at: .folded) == failed.items)
     }
 
@@ -245,5 +245,116 @@ struct AgentTranscriptTests {
         guard case .raw(_, let type, let text) = items.first else { Issue.record("raw row missing"); return }
         #expect(type == "hologram")
         #expect(text == future)
+    }
+}
+
+/// Background work in omp's director loops: `bash` with `async`, `wait`, and the later delivery.
+@Suite("Steps") struct StepTests {
+    private static let bench = #"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"toolCall","id":"b1","name":"bash","arguments":{"command":"npm run bench","async":true}}]}}"#
+    private static let benchResult = #"{"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"b1","toolName":"bash","content":[{"type":"text","text":"Backgrounded as job bg_1."}],"details":{"async":{"state":"running","jobId":"bg_1","type":"bash"}}}}"#
+    private static let wait = #"{"type":"message","id":"a2","message":{"role":"assistant","content":[{"type":"toolCall","id":"w1","name":"wait","arguments":{}}]}}"#
+    private static let waitResult = ###"{"type":"message","id":"r2","message":{"role":"toolResult","toolCallId":"w1","toolName":"wait","content":[{"type":"text","text":"## Completed (1)"}],"details":{"op":"wait","jobs":[{"id":"bg_1","type":"bash","status":"completed","label":"npm run bench","resultText":"p99=4.2ms"}]}}}"###
+    private static let delivery = #"{"type":"custom_message","customType":"async-result","content":"<system-notice>Background job bg_1 has completed.\np99=4.2ms</system-notice>","details":{"jobs":[{"jobId":"bg_1","type":"bash","label":"npm run bench"}]}}"#
+
+    private func jobs(_ c: Conversation) -> [ToolActivity] {
+        c.items.compactMap { if case .tool(let tool) = $0, tool.name == "job" { tool } else { nil } }
+    }
+
+    @Test func waitNamesBackgroundWorkAndItsResultIsTheOnlyDeliveryShownOnce() {
+        let waiting = conversation([Self.bench, Self.benchResult, Self.wait])
+        #expect(waiting.waitingOn == ["npm run bench"])
+        #expect(StepRun(waiting.items, waitingOn: waiting.waitingOn).running == "Waiting on npm run bench")
+
+        // The wait can be the only place the output arrives…
+        let waited = conversation([Self.bench, Self.benchResult, Self.wait, Self.waitResult])
+        #expect(waited.waitingOn.isEmpty)
+        #expect(jobs(waited).map(\.output) == ["p99=4.2ms"])
+        // …and omp's own delivery after it doesn't show it twice, whichever comes first.
+        #expect(jobs(conversation([Self.bench, Self.benchResult, Self.wait, Self.waitResult, Self.delivery])).count == 1)
+        #expect(jobs(conversation([Self.bench, Self.benchResult, Self.wait, Self.delivery, Self.waitResult])).count == 1)
+    }
+
+    @Test func aBackgroundedTaskIsASubagentNotABackgroundCommand() {
+        let call = #"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"toolCall","id":"t1","name":"task","arguments":{"tasks":[{"name":"Council"}]}}]}}"#
+        let result = #"{"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"t1","toolName":"task","content":[{"type":"text","text":"Spawned agent `Council`."}],"details":{"async":{"state":"running","jobId":"Council","type":"task"}}}}"#
+        #expect(conversation([call, result]).backgroundCommands.isEmpty)
+        #expect(conversation([Self.bench, Self.benchResult]).backgroundCommands == ["npm run bench"])
+    }
+
+    @Test func undeliveredBriefIsAnError() {
+        let call = #"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"toolCall","id":"m1","name":"write","arguments":{"path":"agent://Gone","content":"Hi"}}]}}"#
+        let result = #"{"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"m1","toolName":"write","content":[{"type":"text","text":"No agent named Gone."}],"isError":true}}"#
+        #expect(conversation([call, result]).items.last == .notice(id: "m1-undelivered", text: "Not delivered to Gone: No agent named Gone.", kind: .error))
+    }
+
+    @Test func runLabelCountsWhatItDidWithErrorsLeading() {
+        func tool(_ name: String, _ summary: String, _ state: ToolActivity.State = .succeeded) -> ConversationItem {
+            .tool(ToolActivity(id: UUID().uuidString, name: name, summary: summary, state: state))
+        }
+        let mixed = StepRun([tool("read", "src/a.swift"), tool("grep", "TODO"), tool("edit", "src/a.swift"), tool("edit", "src/a.swift"),
+                             tool("bash", "swift test", .failed), tool("bash", "swift build"),
+                             .peerMessage(id: "p", peer: "Helper", text: "Go", outbound: true)])
+        #expect(mixed.failure == "1 error")
+        #expect(mixed.label == "2 edits · 1 read · 1 command · 1 search · 1 message")
+        // Every line is counted (the failed call as the error), so no separate step count.
+        #expect(!mixed.showsSteps)
+        // One call or a few read the same way as many: counts, never a file or command name.
+        let lone = StepRun([tool("edit", "src/a.swift")])
+        #expect(lone.label == "1 edit")
+        #expect(!lone.showsSteps)
+        #expect(StepRun([tool("bash", "swift build"), .thinking(id: "t", text: "hm")]).label == "1 command")
+        #expect(StepRun([tool("read", "a.swift"), tool("read", "b.swift"), tool("grep", "x")]).label == "2 reads · 1 search")
+        // A wait a message interrupted, a process stopped and waits alone aren't failures, edits or news.
+        let control = StepRun([tool("wait", "wait", .failed), tool("write", "proc://tail/kill"), tool("wait", "wait")])
+        #expect(control.failure == nil)
+        #expect(control.label == "Stopped tail")
+        // A running command reads by its name, not its flags and redirections.
+        #expect(StepRun([tool("read", "a.swift"), tool("eval", "Plot p99", .running),
+                         tool("bash", "npm run bench -- --rps 2000 > /tmp/soak.log", .running)]).running == "Running npm run bench +1")
+    }
+
+    @Test func onlyALoneBriefPairsWithTheNextWordFromThatAgent() {
+        func brief(_ id: String, _ peer: String) -> ConversationItem { .peerMessage(id: id, peer: peer, text: "Review", outbound: true) }
+        func reply(_ id: String, _ peer: String) -> ConversationItem { .peerMessage(id: id, peer: peer, text: "GO", outbound: false) }
+        let result = ConversationItem.subagentResult(id: "r", activity: SubagentActivity(id: "Lock", name: "Lock", state: .completed, summary: "Done"))
+        let answered = [brief("b1", "Council"), brief("b2", "Lock"), reply("x1", "Council"), result,
+                        // Two briefs before one answer, and an answer to nothing, stay apart.
+                        brief("b3", "Council"), brief("b4", "Council"), reply("x2", "Council"), reply("x3", "Council")].answeredBriefs()
+        #expect(answered.mapValues(\.id) == ["x1": "b1", "r": "b2"])
+    }
+
+    @Test func catchUpCountsWhatFollowedTheLastSeenItem() {
+        let said = #"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Starting."}]}}"#
+        let write = #"{"type":"message","id":"a2","message":{"role":"assistant","content":[{"type":"toolCall","id":"w1","name":"write","arguments":{"path":"src/b.swift","content":"x"}}]}}"#
+        let wrote = #"{"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"w1","toolName":"write","content":[{"type":"text","text":"Wrote."}]}}"#
+        let test = #"{"type":"message","id":"a3","message":{"role":"assistant","content":[{"type":"toolCall","id":"t1","name":"bash","arguments":{"command":"swift test"}}]}}"#
+        let failed = #"{"type":"message","id":"r2","message":{"role":"toolResult","toolCallId":"t1","toolName":"bash","content":[{"type":"text","text":"1 failure"}],"isError":true}}"#
+        let c = conversation([said, write, wrote, test, failed])
+        let up = c.catchUp(after: "a1")
+        #expect([up?.items, up?.edits, up?.replies, up?.failures, up?.images] == [2, 1, 0, 1, 0])
+        #expect(c.catchUp(after: "t1") == nil)
+        #expect(c.editCount == 1)
+        #expect(c.recordedEdits.map(\.path) == ["src/b.swift"])
+    }
+
+    @Test func aNamedFileResolvesToTheNewestPathATouchedIt() {
+        let read = #"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"/tmp/old/a.png"}}]}}"#
+        let copy = #"{"type":"message","id":"a2","message":{"role":"assistant","content":[{"type":"toolCall","id":"c2","name":"bash","arguments":{"command":"scp mini:/tmp/shots/a.png '/tmp/shots/a.png'"}}]}}"#
+        let copied = #"{"type":"message","id":"r2","message":{"role":"toolResult","toolCallId":"c2","toolName":"bash","content":[{"type":"text","text":"/tmp/shots/notes.md"}]}}"#
+        let write = #"{"type":"message","id":"a3","message":{"role":"assistant","content":[{"type":"toolCall","id":"c3","name":"write","arguments":{"path":"src/Views/b.swift","content":"x"}}]}}"#
+        let fetch = #"{"type":"message","id":"a4","message":{"role":"assistant","content":[{"type":"toolCall","id":"c4","name":"bash","arguments":{"command":"curl -O https://example.com/c.png"}}]}}"#
+        let ranged = #"{"type":"message","id":"a5","message":{"role":"assistant","content":[{"type":"toolCall","id":"c5","name":"read","arguments":{"path":"src/Views/d.swift:42-60"}}]}}"#
+        let c = conversation([read, copy, copied, write, fetch, ranged])
+        #expect(c.touchedFile("a.png")?.path == "/tmp/shots/a.png")
+        #expect(c.touchedFile("/tmp/old/a.png")?.path == "/tmp/old/a.png")
+        // A full path is only itself, never a longer path ending in it.
+        #expect(c.touchedFile("/shots/a.png") == nil)
+        #expect(c.touchedFile("notes.md")?.path == "/tmp/shots/notes.md")
+        #expect(c.touchedFile("Views/b.swift")?.path == "src/Views/b.swift")
+        // A URL isn't a file on the host; a read's line selector isn't part of its path.
+        #expect(c.touchedFile("c.png") == nil)
+        #expect(c.touchedFile("d.swift")?.path == "src/Views/d.swift")
+        #expect(c.touchedFile("b.png") == nil)
+        #expect(c.touchedFile("s/b.swift") == nil)
     }
 }

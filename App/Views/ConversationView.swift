@@ -27,17 +27,21 @@ struct ConversationView: View {
     /// The permission or approval prompt on the agent's screen while it is blocked.
     @State private var screenPrompt: ScreenPrompt?
     @State private var choosing: String?
-    /// Messages omp is holding until the agent next takes input; the last can be unsent.
-    @State private var queued: [QueuedSend] = []
+    /// Sent messages the transcript doesn't have yet, shown from the tap on. omp holds some
+    /// (steering, follow-ups) until the agent next takes input; the last of those can be unsent.
+    @State private var pending: [PendingSend] = []
     @State private var unsending = false
-    /// Find's temporary switch to Full for a folded-away match; Done or a chosen level clears it.
+    /// Find's temporary switch to Folded for a match Digest hides; Done or a chosen level clears it.
     @State private var detailOverride: DetailLevel?
+    /// The match Find last went to; the run holding it opens.
+    @State private var findTarget: String?
     /// The saved preference, shared with Settings.
     private var detailSelection: Binding<DetailLevel> {
         Binding(get: { settings.detailLevel }, set: { settings.detailLevel = $0; detailOverride = nil })
     }
     @State private var sentCount = 0
     @FocusState private var composerFocused: Bool
+    @State private var keyboardDismissals = 0
     /// The newest content is on screen; only then does a finished agent count as read.
     @State private var atLatest = true
     /// Keep the newest content in view through every layout change (a reply arriving, the
@@ -50,8 +54,16 @@ struct ConversationView: View {
     /// Where this conversation's unsent text is kept; nil in the demo and until the agent is known.
     @State private var draftID: String?
     @State private var previewing: ImagePreviewSource?
+    @State private var photoSaver = PhotoSaver()
     @State private var confirmStop = false
     @State private var showsSessionDetails = false
+    @State private var showsImages = false
+    @State private var showsChanges = false
+    @State private var showsNow = false
+    /// Where the reader left this conversation before this visit; fixed until they leave.
+    @State private var arrival: ReadCursors.Mark?
+    /// The "Since 9:41" line sits over the composer until tapped or a message is sent.
+    @State private var catchUpPinned = true
     /// Usage over the whole transcript, totalled on the host as Session Details opens on a
     /// partly loaded conversation; nil when not needed or not counted.
     @State private var wholeUsage: TranscriptUsage?
@@ -100,6 +112,30 @@ struct ConversationView: View {
             .sheet(item: $resuming) { item in
                 NewAgentSheet(links: [connection], preferred: connection, resume: item) { scene.navigationPath.append($0) }
             }
+            .sheet(isPresented: $showsImages) {
+                ImageGrid(loaded: feed.conversation.toolImages, whole: wholeImages,
+                          loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd))
+            }
+            .sheet(isPresented: $showsChanges) { ChangesSheet(edits: feed.conversation.recordedEdits) }
+            .sheet(isPresented: $showsNow) { nowSheet }
+            .onChange(of: DraftStore.id(host: connection.identity, agent: agent), initial: true) { _, id in arrive(id) }
+            // The cursor moves only while the end is on screen: reading is what moves it.
+            .onChange(of: showsLatest ? feed.conversation.lastStableID : nil) { _, item in
+                guard demo == nil, let item, let id = DraftStore.id(host: connection.identity, agent: agent) else { return }
+                ReadCursors.save(item, for: id)
+            }
+    }
+
+    /// Where this visit starts from. The demo is never saved; `-HerdwickSeen` stands in, last
+    /// read at 9:16 today so the line agrees with the captures' 9:41 status bar.
+    private func arrive(_ id: String?) {
+        catchUpPinned = true
+        if let demo {
+            let seen = Calendar.current.date(bySettingHour: 9, minute: 16, second: 0, of: .now) ?? .now
+            arrival = demo.launch?.seen.map { ReadCursors.Mark(item: $0, seen: seen) }
+        } else {
+            arrival = id.flatMap(ReadCursors.load)
+        }
     }
 
     /// This pane's agent on the ended shelf, once herdr no longer runs it.
@@ -253,27 +289,30 @@ struct ConversationView: View {
     private var scroller: some View {
         ScrollView { transcript }
         .scrollPosition($position)
-        .environment(\.openSubagent) { activity in
+        .environment(\.openSubagent, EnvironmentAction { activity in
             if let route = subagentRoute(activity) { openSubagent(route) }
-        }
-        .environment(\.subagentNamed) { id in feed.conversation.subagents.first { $0.id == id } }
-        .environment(\.previewImage) { previewing = $0 }
-        .environment(\.inlineImages, (detailOverride ?? settings.detailLevel) == .full)
+        })
+        .environment(\.subagentNamed, EnvironmentAction { id in feed.conversation.subagents.first { $0.id == id } })
+        .environment(\.previewImage, EnvironmentAction { previewing = $0 })
+        .modifier(SavesPhotos(saver: photoSaver))
+        .environment(\.reachedCatchUp, EnvironmentAction { catchUpPinned = false })
+        .environment(\.opensInPlace, EnvironmentAction { followsLatest = false })
+        .environment(\.findTarget, findTarget)
         .environment(\.imageLoader, ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd))
-        .environment(\.openURL, OpenURLAction { url in
-            guard let path = imageLinkPath(url) else { return .systemAction }
-            previewing = .file(path)
-            return .handled
+        .modifier(FileLinks(loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd)) { [feed] name in
+            feed.conversation.touchedFile(name)
         })
         .sheet(item: $previewing) {
             ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd))
         }
-        .defaultScrollAnchor(.bottom)
+        // Size changes are anchored below, only while following; a role-less anchor here would pin them too.
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(.bottom, for: .alignment)
         .onChange(of: feed.conversation.workingSubagents.count) { _, count in
             connection.workingSubagents[paneID] = count
         }
-        .onChange(of: feed.conversation.items.count) { settleQueue() }
-        .onChange(of: agent?.agentStatus) { settleQueue() }
+        .onChange(of: feed.conversation.items.count) { settlePending(turnEnded: false) }
+        .onChange(of: agent?.agentStatus, statusChanged)
         .onScrollGeometryChange(for: TailGeometry.self) { geometry in
             TailGeometry(geometry)
         } action: { old, new in
@@ -289,26 +328,17 @@ struct ConversationView: View {
             followsLatest = TailGeometry(context.geometry).nearBottom
             if followsLatest { position.scrollTo(edge: .bottom) }
         }
-        .onChange(of: sentCount) {
-            followsLatest = true
-            position.scrollTo(edge: .bottom)
-        }
-        // Not mid-gesture: re-anchoring to the bottom as content streams in would drag a flick back.
-        .defaultScrollAnchor(userScrolling ? nil : .bottom, for: .sizeChanges)
+        .onChange(of: sentCount) { jumpToLatest() }
+        // Only while following, and not mid-gesture: re-anchoring to the bottom as content streams
+        // in would drag a flick back, and would push a line opened in place up off its finger.
+        .defaultScrollAnchor(followsLatest && !userScrolling ? .bottom : nil, for: .sizeChanges)
         .scrollDismissesKeyboard(.interactively)
         .overlay { placeholder }
         .connectingBadge(connection)
         .safeAreaInset(edge: .top) {
-            VStack(spacing: 0) {
-                if find != nil { findBar }
-                if settings.showWorkingSubagents {
-                    WorkingSubagentsTray(activities: feed.conversation.workingSubagents) { activity in
-                        if let route = subagentRoute(activity) { openSubagent(route) }
-                    }
-                    .animation(.smooth, value: feed.conversation.workingSubagents)
-                }
-            }
+            if find != nil { findBar }
         }
+        // An inset, not `safeAreaBar`: under a bar the transcript's text can't be selected (iOS 26).
         .safeAreaInset(edge: .bottom) { bottomBar }
         .navigationTitle(feed.title ?? feed.conversation.title ?? agent?.conversationTitle ?? paneID)
         .navigationSubtitle(subtitle)
@@ -330,7 +360,8 @@ struct ConversationView: View {
                 && (watching || agent?.agentStatus == .working)
             let details = sessionDetails
             ConversationMenu(
-                detail: settings.detailLevel, canRetry: canRetry, canStop: canStop,
+                detail: settings.detailLevel, canRetry: canRetry, images: feed.conversation.imageCount > 0 || wholeImages != nil,
+                changes: feed.conversation.editCount > 0, canStop: canStop,
                 liveActivity: offersActivity ? (watching ? .hide : .show) : nil,
                 session: details?.title, sessionHasDetails: details?.body.isEmpty == false,
                 mute: agent?.agentSession.map { .init(address: address, reference: $0.value) },
@@ -344,6 +375,8 @@ struct ConversationView: View {
         switch action {
         case .sessionDetails: Task { await showSessionDetails() }
         case .detail(let level): detailSelection.wrappedValue = level
+        case .images: showsImages = true
+        case .changes: showsChanges = true
         case .find:
             find = (find?.query ?? "", 0)
             findFocused = true
@@ -408,7 +441,7 @@ struct ConversationView: View {
                 .labelStyle(.iconOnly).disabled(matches.isEmpty)
             Button("Later", systemImage: "chevron.down") { step(1) }
                 .labelStyle(.iconOnly).disabled(matches.isEmpty)
-            Button("Done") { find = nil; findFocused = false; detailOverride = nil }
+            Button("Done") { find = nil; findFocused = false; detailOverride = nil; findTarget = nil }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -425,11 +458,12 @@ struct ConversationView: View {
         reveal(matches[matches.count - 1 - current.index])
     }
 
-    /// Scrolls to a match, first unfolding the transcript when the current detail hides it.
+    /// Scrolls to a match, first showing it: Folded when Digest hides it, and its run opened.
     private func reveal(_ id: String?) {
         guard let id else { return }
         let detail = detailOverride ?? settings.detailLevel
-        if !feed.conversation.items(at: detail).contains(where: { $0.id == id }) { detailOverride = .full }
+        if !feed.conversation.items(at: detail).contains(where: { $0.id == id }) { detailOverride = .folded }
+        findTarget = id
         followsLatest = false
         Task { @MainActor in position.scrollTo(id: id, anchor: .center) }
     }
@@ -464,6 +498,14 @@ struct ConversationView: View {
         showsSessionDetails = true
     }
 
+    /// Lists every tool image in the file when earlier history isn't loaded; nil when the
+    /// loaded ones are all there are (or the host can't be asked).
+    private var wholeImages: (@MainActor () async throws -> [TranscriptImage])? {
+        guard feed.hasEarlier, connection.isLive, let client = connection.client,
+              let location, location.format != .codex else { return nil }
+        return { try await client.transcriptToolImages(path: location.path, format: location.format) }
+    }
+
     private func press(_ keys: [String], failure: String) async {
         do { try await connection.sendKeys(keys, pane: paneID) } catch { sendError = "\(failure) \(error.localizedDescription)" }
     }
@@ -481,7 +523,6 @@ struct ConversationView: View {
 
     private var transcript: some View {
         let detail = detailOverride ?? settings.detailLevel
-        let status = agent?.agentStatus
         // Not lazy: a lazy stack pinned to the bottom estimates the heights of rows it
         // hasn't drawn, and a new message re-anchors onto those estimates, which left the
         // screen blank until the next reply.
@@ -501,25 +542,19 @@ struct ConversationView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
             }
-            TranscriptRows(feed: feed, detail: detail, finished: status == .done || status == .idle)
+            TranscriptRows(feed: feed, detail: detail, arrival: arrival, nowPinned: pinnedNow != nil)
                 .equatable()
-            ForEach(queued) { message in
-                QueuedBubble(text: message.text, canUnsend: message.id == queued.last?.id && !unsending) {
-                    Task { await unsend(message) }
+            ForEach(unarrived) { message in
+                if message.held {
+                    QueuedBubble(text: message.text, canUnsend: message.id == pending.last(where: \.held)?.id && !unsending && !sending) {
+                        Task { await unsend(message) }
+                    }
+                } else {
+                    UserBubble(text: message.text, images: [])
                 }
             }
             if let plan = openPlan {
                 TodoCard(tool: plan)
-            }
-            // Reserved for the whole turn: a running step spins in its own row, so this
-            // only fades out then, and the tail's height (which follow-latest tracks)
-            // changes only when the turn starts or ends.
-            if agent?.agentStatus == .working, feed.state == .live {
-                let stepRunning = feed.conversation.items(at: detail).contains { if case .tool(let tool) = $0 { tool.state == .running } else { false } }
-                WorkingRow()
-                    .opacity(stepRunning ? 0 : 1)
-                    .accessibilityHidden(stepRunning)
-                    .animation(.snappy(duration: 0.15), value: stepRunning)
             }
         }
         .padding(.horizontal, 16)
@@ -568,9 +603,9 @@ struct ConversationView: View {
                 NavigationLink("Open Terminal", value: Route.terminal(connection.address(paneID: paneID)))
                 if let harness = agent?.agent { IntegrationOffer(connection: connection, harness: harness) }
             }
-        } else if feed.state == .loading, !feed.isOfflineCopy, connection.snapshot != nil, !connection.isConnecting {
+        } else if feed.state == .loading, !feed.isOfflineCopy, connection.snapshot != nil, !connection.isConnecting, pending.isEmpty {
             ProgressView()
-        } else if feed.state == .live, feed.conversation.items.isEmpty, queued.isEmpty, !sending, sentCount == 0 {
+        } else if feed.state == .live, feed.conversation.items.isEmpty, pending.isEmpty, !sending, sentCount == 0 {
             // A quiet hint, gone the moment a message is on its way; the transcript file
             // only appears once the agent has the first message.
             Text("Send a message to get started.")
@@ -596,24 +631,117 @@ struct ConversationView: View {
                 }
                 .cardBackground()
                 .id(ask.toolCallId)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
             } else if locatedRef == agent?.agentSession, blocked || planReview, let prompt = screenPrompt {
                 PermissionCard(prompt: prompt, choosing: choosing, paneID: paneID, terminalAddress: connection.address(paneID: paneID)) { label in
                     Task { await choose(label, on: prompt) }
                 }
                 .cardBackground()
-                .transition(.move(edge: .bottom).combined(with: .opacity))
             } else if blocked {
                 NeedsYouBanner(paneID: paneID, terminalAddress: connection.address(paneID: paneID)).cardBackground()
+            } else if let now = pinnedNow {
+                PinnedLine(label: Text(now.label), live: true, action: now.opens ? { showsNow = true } : nil)
+            } else if catchUpPinned, let arrival, let catchUp = feed.conversation.catchUp(after: arrival.item) {
+                PinnedLine(label: CatchUpLine.summary(catchUp, since: arrival.seen)) {
+                    catchUpPinned = false
+                    followsLatest = false
+                    position.scrollTo(id: CatchUpLine.id, anchor: .top)
+                }
             }
             MessageComposer(draft: $draft, attachments: $attachments, sending: sending || shareImportTaskID != nil, focus: $composerFocused,
-                            actions: composerActions) { Task { await sendDraft() } }
+                            actions: composerActions, dismissals: keyboardDismissals) { Task { await sendDraft() } }
                 .disabled(!connection.isLive || agent == nil || feed.isOfflineCopy)
+        }
+        // An ask or permission card replaces typing: put the keyboard away so the card has the room.
+        .onChange(of: pendingAsk != nil || (locatedRef == agent?.agentSession && (blocked || planReview) && screenPrompt != nil)) { _, prompting in
+            if prompting { keyboardDismissals += 1 }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .animation(.smooth, value: pendingAsk?.toolCallId)
-        .animation(.smooth, value: screenPrompt)
+        // An inset gets no scroll edge effect, so the bar brings its own: the transcript fades out
+        // just above it instead of running under the Now line.
+        .background {
+            Rectangle().fill(.background)
+                .mask {
+                    VStack(spacing: 0) {
+                        LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 16)
+                        Color.black
+                    }
+                }
+                .padding(.top, -16)
+                .ignoresSafeArea(edges: .bottom)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// The Now line, when asks, prompts and Needs You leave the slot over the composer free.
+    /// While it shows, the transcript leaves what's running to it.
+    private var pinnedNow: (label: String, opens: Bool)? {
+        guard pendingAsk == nil, !blocked, !(planReview && screenPrompt != nil) else { return nil }
+        return nowLine
+    }
+
+    /// What's running, in one line: the newest call, then working subagents and background
+    /// commands. Shown while the agent works or its subagents do; nothing when offline.
+    private var nowLine: (label: String, opens: Bool)? {
+        guard connection.isLive, !feed.isOfflineCopy, feed.state == .live, locatedRef == agent?.agentSession else { return nil }
+        let conversation = feed.conversation
+        let subagents = conversation.workingSubagents
+        guard agent?.agentStatus == .working || !subagents.isEmpty else { return nil }
+        let tools = conversation.runningTools
+        let background = conversation.backgroundCommands
+        var parts = [StepRun(tools.map { .tool($0) }, waitingOn: conversation.waitingOn).running].compactMap { $0 }
+        // A wait's line already names what it waits on.
+        if tools.last?.name != "wait" {
+            if subagents.count == 1 { parts.append("\(subagents[0].name) working") }
+            if subagents.count > 1 { parts.append("\(subagents.count) subagents working") }
+            if !background.isEmpty { parts.append("\(background.count) in background") }
+        }
+        return (parts.isEmpty ? "Working…" : parts.joined(separator: " · "), !(tools.isEmpty && subagents.isEmpty && background.isEmpty))
+    }
+
+    /// Everything the Now line counts: subagents open their threads.
+    private var nowSheet: some View {
+        let conversation = feed.conversation
+        return NavigationStack {
+            List {
+                if !conversation.workingSubagents.isEmpty {
+                    Section("Subagents") {
+                        ForEach(conversation.workingSubagents) { activity in
+                            Button {
+                                showsNow = false
+                                if let route = subagentRoute(activity) { openSubagent(route) }
+                            } label: {
+                                LabeledContent([activity.name, activity.agentType].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")) {
+                                    if let date = activity.spawnedAt { Text(date, style: .relative).monospacedDigit() }
+                                }
+                            }
+                            .foregroundStyle(.primary)
+                        }
+                    }
+                }
+                // A wait is listed by what it waits on.
+                let running = conversation.runningTools.filter { $0.name != "wait" }
+                if !running.isEmpty {
+                    Section("Running") {
+                        ForEach(running, id: \.id) { tool in
+                            Text(tool.kind == .command ? tool.summary : tool.runningTitle)
+                                .font(tool.kind == .command ? .subheadline.monospaced() : .body)
+                        }
+                    }
+                }
+                if !conversation.backgroundCommands.isEmpty {
+                    Section("In Background") {
+                        ForEach(Array(conversation.backgroundCommands.enumerated()), id: \.offset) { _, command in
+                            Text(command).font(.subheadline.monospaced())
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Now")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showsNow = false } } }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     private func sendDraft() async {
@@ -628,19 +756,36 @@ struct ConversationView: View {
         defer { sending = false }
         // Cleared before delivery so the keyboard stays up and anything typed meanwhile is kept.
         draft = ""
+        let shown = show(text, usersBefore: usersBefore, held: queues)
         do {
             try await deliverDraft(text, attachments: attachments, connection: connection, pane: paneID,
                                    agent: true, retention: settings.attachmentRetention) { updated in
                 attachments = updated
             }
-            if queues { queued.append(QueuedSend(text: text, usersBefore: usersBefore)) }
             attachments = []
             sentCount += 1
             finishImport(packageID)
         } catch {
+            pending.removeAll { $0.id == shown }
             draft = restoringDraft(text, before: draft)
             sendError = "The message wasn't delivered completely. Your draft and attachments are still here. \(error.localizedDescription)"
         }
+    }
+
+    /// The message in the transcript from the tap on, not once the agent has written it down:
+    /// that can take seconds, and a new thread has no transcript at all until then.
+    private func show(_ text: String, usersBefore: Int, held: Bool) -> PendingSend.ID? {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let message = PendingSend(text: text, usersBefore: usersBefore, held: held)
+        pending.append(message)
+        jumpToLatest()
+        return message.id
+    }
+
+    private func jumpToLatest() {
+        followsLatest = true
+        catchUpPinned = false
+        position.scrollTo(edge: .bottom)
     }
 
     private var composerActions: [ComposerAction] {
@@ -659,18 +804,20 @@ struct ConversationView: View {
         sending = true
         defer { sending = false }
         draft = ""
+        let shown = show(text, usersBefore: usersBefore, held: true)
         do {
             guard OmpEditor.draft(inScreen: try await client.readPane(paneID, session: session).text) == nil else {
+                pending.removeAll { $0.id == shown }
                 draft = restoringDraft(text, before: draft)
                 sendError = "omp has unsent text in its editor. Clear it in the terminal first."
                 return
             }
             try await connection.sendText(text, pane: paneID, submit: false)
             try await connection.sendKeys(["ctrl+q"], pane: paneID)
-            queued.append(QueuedSend(text: text, usersBefore: usersBefore))
             sentCount += 1
             finishImport(packageID)
         } catch {
+            pending.removeAll { $0.id == shown }
             draft = restoringDraft(text, before: draft)
             sendError = "The message wasn't queued. Your draft is still here. \(error.localizedDescription)"
         }
@@ -680,25 +827,35 @@ struct ConversationView: View {
         feed.conversation.items.compactMap { if case .user(_, let text, _) = $0 { text } else { nil } }
     }
 
-    /// A queued message leaves once the transcript has it, or once the turn ends (omp sends
-    /// what it held, or someone at the desk took it back).
-    private func settleQueue() {
-        guard !queued.isEmpty else { return }
-        if let status = agent?.agentStatus, status == .idle || status == .done {
-            queued.removeAll()
-            return
-        }
+    /// Filtered as the transcript updates, so the real bubble never shows beside its stand-in.
+    private var unarrived: [PendingSend] {
+        guard !pending.isEmpty else { return [] }
         let users = userTexts
-        queued.removeAll { message in
-            users.dropFirst(message.usersBefore).contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == message.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return pending.filter { !$0.arrived(in: users) }
+    }
+
+    /// A sent message leaves once the transcript has it. A held one also leaves when the agent
+    /// is idle (omp sent what it held, or someone at the desk took it back); any other, when a
+    /// turn ends without the transcript matching it, except the one still being delivered.
+    private func settlePending(turnEnded: Bool) {
+        guard !pending.isEmpty else { return }
+        let idle = agent?.agentStatus == .idle || agent?.agentStatus == .done
+        let delivering = sending ? pending.last?.id : nil
+        let users = userTexts
+        pending.removeAll { message in
+            message.arrived(in: users) || (message.held && idle) || (turnEnded && message.id != delivering)
         }
+    }
+
+    private func statusChanged(_ old: AgentStatus?, _ new: AgentStatus?) {
+        settlePending(turnEnded: old == .working && (new == .idle || new == .done))
     }
 
     /// omp's Alt+Up puts its last queued message back in its editor; that text moves to the
     /// composer here and omp's editor is cleared. If the agent took the message first, the
     /// editor stays empty and the transcript shows it as sent.
-    private func unsend(_ message: QueuedSend) async {
-        guard message.id == queued.last?.id, !unsending, let client = connection.client,
+    private func unsend(_ message: PendingSend) async {
+        guard message.id == pending.last(where: \.held)?.id, !unsending, let client = connection.client,
               let session = connection.activeSession else { return }
         unsending = true
         defer { unsending = false }
@@ -711,7 +868,7 @@ struct ConversationView: View {
             try await connection.sendKeys(["alt+up"], pane: paneID)
             try await Task.sleep(for: .milliseconds(300))
             let after = try await client.readPane(paneID, session: session)
-            queued.removeAll { $0.id == message.id }
+            pending.removeAll { $0.id == message.id }
             guard OmpEditor.draft(inScreen: after.text) != nil else { return }
             // With text in its editor, Ctrl+C clears it and leaves the turn running.
             try await connection.sendKeys(["ctrl+c"], pane: paneID)
@@ -760,12 +917,14 @@ struct ConversationView: View {
         guard !Task.isCancelled else { return }
         guard let ref = agent?.agentSession else { return }
         if locatedRef != ref {
+            // A new thread gets its session (or a new one) with the first message, which stays
+            // shown; counts against another thread's messages would be wrong, so those go.
+            if !userTexts.isEmpty { pending = [] }
             locatedRef = ref
             location = nil
             locateFailure = nil
             feed = ConversationFeed()
             screenPrompt = nil
-            queued = []
         }
         guard let client = connection.client, let session = connection.activeSession else {
             // Offline: a reported path is enough to paint a kept copy.
@@ -876,10 +1035,14 @@ struct ConversationMenu: View, Equatable {
         let reference: String
     }
     enum LiveActivity { case show, hide }
-    enum Action { case detail(DetailLevel), find, retry, stop, liveActivity, sessionDetails, explain }
+    enum Action { case detail(DetailLevel), find, images, changes, retry, stop, liveActivity, sessionDetails, explain }
 
     let detail: DetailLevel
     let canRetry: Bool
+    /// The agent's tools returned images, or earlier history might hold some.
+    let images: Bool
+    /// The loaded transcript records a successful edit or file write.
+    let changes: Bool
     let canStop: Bool
     let liveActivity: LiveActivity?
     /// The model's name (or "Session"); nil when the transcript records none of it.
@@ -891,7 +1054,7 @@ struct ConversationMenu: View, Equatable {
     let act: (Action) -> Void
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.detail == rhs.detail && lhs.canRetry == rhs.canRetry && lhs.canStop == rhs.canStop
+        lhs.detail == rhs.detail && lhs.canRetry == rhs.canRetry && lhs.images == rhs.images && lhs.changes == rhs.changes && lhs.canStop == rhs.canStop
             && lhs.liveActivity == rhs.liveActivity && lhs.session == rhs.session
             && lhs.sessionHasDetails == rhs.sessionHasDetails && lhs.mute == rhs.mute
             && lhs.status == rhs.status
@@ -901,6 +1064,8 @@ struct ConversationMenu: View, Equatable {
         Menu {
             DetailLevelOptions(selection: Binding(get: { detail }, set: { act(.detail($0)) }))
             Button("Find in Conversation") { act(.find) }
+            if images { Button("Images") { act(.images) } }
+            if changes { Button("Changes") { act(.changes) } }
             if canRetry {
                 Section { Button("Retry Last Turn") { act(.retry) } }
             }
@@ -950,91 +1115,150 @@ struct ConversationMenu: View, Equatable {
 private struct TranscriptRows: View, Equatable {
     let feed: ConversationFeed
     let detail: DetailLevel
-    let finished: Bool
+    let arrival: ReadCursors.Mark?
+    let nowPinned: Bool
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.feed === rhs.feed && lhs.detail == rhs.detail && lhs.finished == rhs.finished
+        lhs.feed === rhs.feed && lhs.detail == rhs.detail && lhs.arrival == rhs.arrival && lhs.nowPinned == rhs.nowPinned
     }
 
     var body: some View {
-        let items = feed.conversation.items(at: detail)
-        let finalAssistantID = items.reversed().first { if case .assistant = $0 { true } else { false } }?.id
-        ForEach(ConversationRow.rows(items, full: detail == .full,
-                                     lastAssistantID: detail == .digest && finished ? finalAssistantID : nil,
-                                     subagents: { feed.conversation.subagents(spawnedBy: $0) })) { row in
+        let conversation = feed.conversation
+        let items = conversation.items(at: detail)
+        ForEach(ConversationRow.rows(items,
+                                     waitingOn: conversation.waitingOn,
+                                     answered: items.answeredBriefs(),
+                                     since: since(items),
+                                     nowPinned: nowPinned,
+                                     subagents: { conversation.subagents(spawnedBy: $0) })) { row in
             row.view.id(row.id)
         }
     }
+
+    /// The catch-up line goes before the first shown item after the one last seen.
+    private func since(_ shown: [ConversationItem]) -> ConversationRow.Since? {
+        guard let arrival, let catchUp = feed.conversation.catchUp(after: arrival.item) else { return nil }
+        let all = feed.conversation.items
+        guard let seen = all.lastIndex(where: { $0.id == arrival.item }) else { return nil }
+        let ids = Set(shown.map(\.id))
+        guard let first = all[(seen + 1)...].first(where: { ids.contains($0.id) }) else { return nil }
+        return .init(before: first.id, catchUp: catchUp, seen: arrival.seen)
+    }
 }
 
-/// Transcript items as the chat shows them: runs of tool calls and thinking fold into
-/// one "steps" row so the words stay readable.
+/// Transcript items as the chat shows them: runs of tool calls, thinking and briefs sent to
+/// other agents fold into one "steps" row so the words stay readable.
 enum ConversationRow: Identifiable {
-    case item(ConversationItem, finished: Bool)
-    case steps([ConversationItem], full: Bool)
+    /// Where the reader left off, and what came after.
+    struct Since {
+        let before: String
+        let catchUp: CatchUp
+        let seen: Date
+    }
+
+    case item(ConversationItem)
+    /// Another agent's reply or result, with the lone brief this agent sent it before.
+    case answer(ConversationItem, brief: String)
+    case steps([ConversationItem], StepRun)
     /// The step that spawned subagents, shown as their status instead of a tool row.
     case subagents(callID: String, [SubagentActivity])
+    case since(Since)
 
     var id: String {
         switch self {
-        case .item(let item, _): item.id
-        case .steps(let items, let full): "steps-" + (items.first?.id ?? "") + (full ? "-full" : "")
+        case .item(let item), .answer(let item, _): item.id
+        case .steps(let items, _): "steps-" + (items.first?.id ?? "")
         case .subagents(let callID, _): "subagents-" + callID
+        case .since: CatchUpLine.id
         }
     }
 
-    static func rows(_ items: [ConversationItem], full: Bool = false,
-                     lastAssistantID: String? = nil,
+    /// `answered`: briefs by the id of the reply that answers them (`answeredBriefs()`); those
+    /// leave their run and open under the reply instead.
+    static func rows(_ items: [ConversationItem],
+                     waitingOn: [String] = [],
+                     answered: [String: ConversationItem] = [:],
+                     since: Since? = nil,
+                     nowPinned: Bool = false,
                      subagents: (String) -> [SubagentActivity] = { _ in [] }) -> [ConversationRow] {
         var rows: [ConversationRow] = []
         var run: [ConversationItem] = []
+        let paired = Set(answered.values.map(\.id))
+        func flush() {
+            guard !run.isEmpty else { return }
+            var step = StepRun(run, waitingOn: waitingOn)
+            // The pinned Now line says what's running: a run with nothing settled waits to show.
+            if nowPinned, step.running != nil {
+                step = step.settled()
+                if step.label.isEmpty, step.failure == nil { run = []; return }
+            }
+            rows.append(.steps(run, step))
+            run = []
+        }
         for item in items {
+            if let since, item.id == since.before {
+                flush()
+                rows.append(.since(since))
+            }
             switch item {
             case .tool(let tool):
                 let children = subagents(tool.id)
                 if children.isEmpty {
                     run.append(item)
                 } else {
-                    if !run.isEmpty { rows.append(.steps(run, full: full)); run = [] }
+                    flush()
                     rows.append(.subagents(callID: tool.id, children))
                 }
-            case .thinking, .raw:
+            case .peerMessage(let id, _, _, true) where paired.contains(id):
+                continue
+            // A brief to another agent is part of the work; what comes back stands alone.
+            case .thinking, .raw, .peerMessage(_, _, _, true):
                 run.append(item)
             default:
-                if !run.isEmpty { rows.append(.steps(run, full: full)); run = [] }
-                rows.append(.item(item, finished: item.id == lastAssistantID))
+                flush()
+                if case .peerMessage(_, _, let brief, true)? = answered[item.id] {
+                    rows.append(.answer(item, brief: brief))
+                } else {
+                    rows.append(.item(item))
+                }
             }
         }
-        if !run.isEmpty { rows.append(.steps(run, full: full)) }
+        flush()
         return rows
     }
 
     @MainActor @ViewBuilder
     var view: some View {
         switch self {
-        case .item(.user(_, let text, let images), _): UserBubble(text: text, images: images)
-        case .item(.assistant(_, let text), let finished):
-            HStack(alignment: .firstTextBaseline) {
-                MarkdownText(text: text)
-                if finished { Image(systemName: "checkmark.circle").font(.caption).foregroundStyle(.secondary) }
-            }
-        case .item(.ask(let ask), _): if ask.answer != nil { AnsweredAsk(ask: ask) }
-        case .item(.notice(_, let text, _), _): NoticeRow(text: text)
-        case .item(.peerMessage(_, let peer, let text, let outbound), _):
-            PeerMessageCard(peer: peer, text: text, outbound: outbound)
-        case .steps(let items, let full): StepsRow(items: items, full: full)
+        case .item(.user(_, let text, let images)): UserBubble(text: text, images: images)
+        case .item(.assistant(_, let text)): MarkdownText(text: text)
+        case .item(.ask(let ask)): if ask.answer != nil { AnsweredAsk(ask: ask) }
+        case .item(.notice(_, let text, let kind)): NoticeRow(text: text, failed: kind == .error)
+        case .item(.peerMessage(_, let peer, let text, _)): AgentMessage(title: "From \(peer)", peer: peer, text: text)
+        case .answer(.peerMessage(_, let peer, let text, _), let brief): AgentMessage(title: "From \(peer)", peer: peer, text: text, brief: brief)
+        case .steps(let items, let run): StepsRow(items: items, run: run)
         case .subagents(_, let activities): SubagentGroupRow(activities: activities)
-        case .item(.subagentResult(_, let activity), _): SubagentResultRow(activity: activity)
-        case .item: EmptyView()
+        case .item(.subagentResult(_, let activity)): SubagentResultRow(activity: activity)
+        case .answer(.subagentResult(_, let activity), let brief): SubagentResultRow(activity: activity, brief: brief)
+        case .since(let since): CatchUpLine(catchUp: since.catchUp, seen: since.seen)
+        case .item, .answer: EmptyView()
         }
     }
 }
 
-struct QueuedSend: Identifiable {
+struct PendingSend: Identifiable {
     let id = UUID()
     let text: String
     /// User messages in the transcript when this was sent; only later ones can be it.
     let usersBefore: Int
+    /// omp holds it until the agent next takes input.
+    let held: Bool
+
+    /// A later user message holds its text, whitespace aside (attachments add paths around it).
+    func arrived(in users: [String]) -> Bool {
+        let key = text.filter { !$0.isWhitespace }
+        return users.dropFirst(usersBefore).contains { $0.filter { !$0.isWhitespace }.contains(key) }
+    }
 }
 
 /// A sent message omp hasn't taken yet. The newest one can be tapped back into the composer.
@@ -1094,92 +1318,169 @@ private struct UserBubble: View {
     }
 }
 
-private struct PeerMessageCard: View {
+/// Another agent's words: what it sent this one, a brief this one sent it, or its result.
+/// A quiet header over two lines of the text; opening it shows the rest and, for one of this
+/// agent's subagents, a link to its thread.
+struct AgentMessage: View {
+    let title: String
     let peer: String
+    var failed = false
     let text: String
-    let outbound: Bool
+    /// What this agent asked it first (a lone brief the reply answers), shown when opened.
+    var brief: String? = nil
+    /// Shown until opened when the text starts with something better skipped (a brief's headings).
+    var gist: String? = nil
+    /// The subagent itself when the caller has it; else it's looked up by `peer`.
+    var activity: SubagentActivity? = nil
+    @State private var expanded = false
+    @State private var truncated = false
     @Environment(\.openSubagent) private var openSubagent
     @Environment(\.subagentNamed) private var subagentNamed
-    @State private var expanded = false
 
     var body: some View {
-        HStack {
-            if outbound { Spacer(minLength: 44) }
-            VStack(alignment: outbound ? .trailing : .leading, spacing: 6) {
-                header
-                Text(MarkdownText.inline(text))
-                    .lineLimit(expanded ? nil : 8).textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if text.split(separator: "\n").count > 8 {
-                    Button(expanded ? "Show less" : "Show more") { expanded.toggle() }
-                        .font(.caption)
-                }
+        let thread: (() -> Void)? = openSubagent.flatMap { open in (activity ?? subagentNamed?(peer)).map { found in { open(found) } } }
+        let shown = expanded ? text : gist ?? text
+        let opens = expanded || truncated || shown != text || thread != nil || brief != nil
+        VStack(alignment: .leading, spacing: 2) {
+            QuietHeader(isExpanded: expanded, action: opens ? { expanded.toggle() } : nil) {
+                failed ? Text(title).foregroundStyle(.red) : Text(title)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: outbound ? .trailing : .leading)
-            .background(.fill.tertiary, in: .rect(cornerRadius: 16))
-            .overlay { RoundedRectangle(cornerRadius: 16).stroke(outbound ? Color.accentColor.opacity(0.35) : .clear) }
-            if !outbound { Spacer(minLength: 44) }
+            if !shown.isEmpty {
+                Text(MarkdownText.inline(shown))
+                    .font(.subheadline)
+                    .lineLimit(expanded ? nil : 2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .background {
+                        // The whole text fits the clamped frame only when nothing was cut.
+                        if !expanded {
+                            ViewThatFits(in: .vertical) {
+                                Text(MarkdownText.inline(shown)).font(.subheadline).fixedSize(horizontal: false, vertical: true).hidden()
+                                    .onAppear { truncated = false }
+                                Color.clear.onAppear { truncated = true }
+                            }
+                        }
+                    }
+            }
+            if expanded, let brief {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Asked").font(.subheadline).foregroundStyle(.secondary)
+                    ClampedText(text: brief, font: .subheadline, lines: 6, style: .secondary)
+                        .textSelection(.enabled)
+                }
+                .padding(.top, 8)
+            }
+            if expanded, let thread {
+                Button("Open Thread", action: thread)
+                    .font(.subheadline)
+                    .buttonStyle(.borderless)
+                    .padding(.top, 4)
+            }
         }
+        // The header's line has room above its text; the same below the body.
+        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// A message to or from one of this agent's subagents opens that subagent's thread.
-    @ViewBuilder
-    private var header: some View {
-        let label = Label("\(outbound ? "to" : "from") \(peer)", systemImage: "bubble.left.and.bubble.right")
-            .font(.caption)
-        if let openSubagent, let activity = subagentNamed?(peer) {
-            Button { openSubagent(activity) } label: {
-                HStack(spacing: 4) {
-                    label
-                    Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
-                }
-                .contentShape(.rect)
+    /// A brief's lines under its "Change" heading when it has one (task briefs do), else its
+    /// first lines that aren't headings.
+    static func gist(_ text: String) -> String {
+        let lines = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let body = lines.firstIndex { $0.hasPrefix("#") && $0.localizedCaseInsensitiveContains("change") }
+            .map { lines[($0 + 1)...] } ?? lines[...]
+        return body.filter { !$0.hasPrefix("#") }.prefix(2).joined(separator: " ")
+    }
+}
+
+/// The one line every step, run, message and status between the agents' words starts with:
+/// quiet text and a trailing chevron. With `isExpanded` it opens the line in place and turns
+/// down; without, it goes somewhere else. No action, no chevron. What it opens snaps in, as a
+/// Settings disclosure does; only the chevron turns, so nothing slides past its neighbours.
+struct QuietHeader<Label: View>: View {
+    var isExpanded: Bool? = nil
+    /// Run labels get two lines; everything else one.
+    var lines = 1
+    /// How many lines opening it shows, beside the chevron, when the label doesn't say.
+    var count: Int? = nil
+    let action: (() -> Void)?
+    @ViewBuilder let label: Label
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.opensInPlace) private var opensInPlace
+
+    var body: some View {
+        let line = HStack(spacing: 0) {
+            label.font(.subheadline).foregroundStyle(.secondary).lineLimit(lines)
+            Spacer(minLength: 4)
+            if let count {
+                Text(count, format: .number).font(.footnote).monospacedDigit().foregroundStyle(.tertiary)
+                    .accessibilityLabel("\(count) steps")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.tint)
-            .accessibilityHint("Opens the subagent's thread")
+            if action != nil {
+                Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(isExpanded == true ? 90 : 0))
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isExpanded)
+                    .frame(width: 32, height: 28)
+            }
+        }
+        .frame(minHeight: 28)
+        .contentShape(.rect)
+        if let action {
+            Button {
+                if isExpanded != nil { opensInPlace?(()) }
+                action()
+            } label: { line }
+                .buttonStyle(.plain)
+                .accessibilityValue(isExpanded.map { $0 ? "Expanded" : "Collapsed" } ?? "")
         } else {
-            label.foregroundStyle(.secondary)
+            line
+        }
+    }
+}
+
+/// `DisclosureGroup` with a `QuietHeader`: the stock chevron is heavy and primary-coloured.
+struct QuietDisclosure: DisclosureGroupStyle {
+    var lines = 1
+    var count: Int? = nil
+
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            QuietHeader(isExpanded: configuration.isExpanded, lines: lines, count: count, action: {
+                configuration.isExpanded.toggle()
+            }) { configuration.label }
+            if configuration.isExpanded { configuration.content }
         }
     }
 }
 
 private struct NoticeRow: View {
     let text: String
+    let failed: Bool
 
     var body: some View {
-        Text(text)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(2)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity)
+        ClampedText(text: text, font: .subheadline, lines: 2)
+            .foregroundStyle(failed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
+/// A question the agent asked and what was answered, in the steps' quiet voice.
 private struct AnsweredAsk: View {
     let ask: AskActivity
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(ask.questions, id: \.id) { question in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(question.question).font(.subheadline.weight(.medium))
-                    if let answer = ask.answer, !answer.cancelled {
-                        Label(reply(to: question, in: answer), systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                    }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(question.question).foregroundStyle(.secondary)
+                    if let answer = ask.answer, !answer.cancelled { Text(reply(to: question, in: answer)) }
                 }
             }
-            if ask.answer?.cancelled == true {
-                Label("Dismissed", systemImage: "xmark.circle").foregroundStyle(.secondary)
-            }
+            if ask.answer?.cancelled == true { Text("Dismissed").foregroundStyle(.secondary) }
         }
         .font(.subheadline)
-        .padding(14)
+        .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.fill.tertiary, in: .rect(cornerRadius: 18))
     }
 
     /// This question's own answer; older records only carry the combined list.
@@ -1190,79 +1491,117 @@ private struct AnsweredAsk: View {
     }
 }
 
-/// Tool calls and thinking between two messages, folded to one line until opened.
+/// Tool calls, thinking and briefs between two messages, folded to one line until opened.
+/// The line leads with a failure, then says what's running, or else what the run did.
 private struct StepsRow: View {
     let items: [ConversationItem]
-    let full: Bool
-    @State private var expanded: Bool
-
-    init(items: [ConversationItem], full: Bool) {
-        self.items = items
-        self.full = full
-        _expanded = State(initialValue: full)
-    }
+    let run: StepRun
+    @State private var expanded = false
+    @Environment(\.findTarget) private var findTarget
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(items) { item in StepLine(item: item, full: full) }
+            VStack(alignment: .leading, spacing: 6) {
+                // Opening the run is the ask: an edit's diff, or a lone call's detail, shows at once.
+                ForEach(items) { item in StepLine(item: item, opens: items.count == 1).id(item.id) }
             }
-            .padding(.vertical, 6)
+            .padding(.bottom, 6)
         } label: {
-            HStack(spacing: 8) {
-                if running { ProgressView().controlSize(.small) }
-                else { Image(systemName: "gearshape.2").foregroundStyle(.secondary) }
-                Text(summary + (failedCount > 0 ? " · \(failedCount) failed" : "")).lineLimit(1)
-            }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+            label
         }
-        .tint(.secondary)
+        .disclosureGroupStyle(QuietDisclosure(lines: 2, count: run.showsSteps ? run.steps : nil))
+        // Find opens the run holding its match (a brief sent from inside it).
+        .onChange(of: findTarget, initial: true) { _, target in
+            if let target, items.contains(where: { $0.id == target }) { expanded = true }
+        }
     }
 
-    private var tools: [ToolActivity] {
-        items.compactMap { if case .tool(let tool) = $0 { tool } else { nil } }
-    }
-    private var failedCount: Int { tools.filter { $0.state == .failed }.count }
-    private var running: Bool { tools.contains { $0.state == .running } }
-    private var summary: String {
-        guard let last = tools.last else { return "Thinking" }
-        return tools.count == 1 ? last.summary : "\(tools.count) steps · \(last.summary)"
+    private var label: Text {
+        let rest = run.running.map { "\($0)…" } ?? run.label
+        guard let failure = run.failure else { return Text(rest) }
+        let failed = Text(failure).foregroundStyle(.red)
+        return rest.isEmpty ? failed : Text("\(failed) · \(rest)")
     }
 }
 
 private struct StepLine: View {
     let item: ConversationItem
-    let full: Bool
-    @State private var showsOutput = false
-
-    init(item: ConversationItem, full: Bool = false) {
-        self.item = item
-        self.full = full
-    }
+    let opens: Bool
 
     var body: some View {
         switch item {
         case .tool(let tool):
-            ToolStepView(tool: tool, expanded: full)
+            ToolStepView(tool: tool, expanded: opens || tool.kind == .edit)
         case .thinking(_, let text):
-            Text(text).font(.caption.italic()).foregroundStyle(.secondary)
-                .lineLimit(showsOutput ? nil : 3).onTapGesture { showsOutput.toggle() }
+            ClampedText(text: text, font: .subheadline, lines: 2, style: .secondary)
         case .raw(_, let type, let text):
-            Text("\(type): \(text)").font(.caption2.monospaced())
-                .foregroundStyle(.tertiary).lineLimit(2)
+            Text("\(type): \(text)").font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2)
+        case .peerMessage(_, let peer, let text, _):
+            AgentMessage(title: "To \(peer)", peer: peer, text: text, gist: AgentMessage.gist(text))
         default: EmptyView()
         }
     }
 }
 
-private struct WorkingRow: View {
+/// The one line pinned over the composer: what's running now, or what came since the last look.
+/// Bare, like the run lines it stands in for (same column, same chevron); a slow pulsing dot
+/// marks the Now line and holds still under Reduce Motion.
+private struct PinnedLine: View {
+    let label: Text
+    var live = false
+    let action: (() -> Void)?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text("Working…").font(.footnote)
+        HStack(spacing: 6) {
+            if live {
+                Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(.tint)
+                    .symbolEffect(.pulse, options: .speed(0.5), isActive: !reduceMotion)
+                    .accessibilityHidden(true)
+            }
+            QuietHeader(action: action) { label }
         }
-        .foregroundStyle(.secondary)
+        .padding(.horizontal, 4)
+    }
+}
+
+extension EnvironmentValues {
+    /// The reader scrolled the catch-up line into view, so its pinned copy can go.
+    @Entry var reachedCatchUp: EnvironmentAction<Void, Void>? = nil
+    /// The item Find went to, so the run holding it opens.
+    @Entry var findTarget: String? = nil
+    /// A line opens or closes in place: the transcript stops following its end, so the line
+    /// stays put and what it opens grows below it instead of pushing it up.
+    @Entry var opensInPlace: EnvironmentAction<Void, Void>? = nil
+}
+
+/// Where the reader left off: "Since 9:41 · 3 edits · 2 replies · 1 failure" over a hairline,
+/// before the first item they haven't seen.
+struct CatchUpLine: View {
+    nonisolated static let id = "since-last-look"
+    let catchUp: CatchUp
+    let seen: Date
+    @Environment(\.reachedCatchUp) private var reached
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Self.summary(catchUp, since: seen).font(.subheadline).foregroundStyle(.secondary).layoutPriority(1)
+            Rectangle().fill(.separator).frame(height: 1)
+        }
+        .frame(minHeight: 28)
+        .onScrollVisibilityChange { visible in if visible { reached?(()) } }
+    }
+
+    static func summary(_ catchUp: CatchUp, since seen: Date) -> Text {
+        let time = Calendar.current.isDateInToday(seen)
+            ? seen.formatted(date: .omitted, time: .shortened)
+            : seen.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        let counts = [(catchUp.edits, "edit", "edits"), (catchUp.replies, "reply", "replies"), (catchUp.images, "image", "images")]
+            .filter { $0.0 > 0 }.map { "\($0.0) \($0.0 == 1 ? $0.1 : $0.2)" }
+        let lead = Text((["Since \(time)"] + (counts.isEmpty && catchUp.failures == 0 ? ["New messages"] : counts)).joined(separator: " · "))
+        guard catchUp.failures > 0 else { return lead }
+        let failures = Text(catchUp.failures == 1 ? "1 error" : "\(catchUp.failures) errors").foregroundStyle(.red)
+        return Text("\(lead) · \(failures)")
     }
 }
 
@@ -1484,6 +1823,7 @@ struct ClampedText: View {
 
     @State private var expanded = false
     @State private var truncated = false
+    @Environment(\.opensInPlace) private var opensInPlace
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1502,9 +1842,10 @@ struct ClampedText: View {
                 }
             if truncated || expanded {
                 Button(expanded ? "Less" : "More") {
-                    withAnimation(.snappy) { expanded.toggle() }
+                    opensInPlace?(())
+                    expanded.toggle()
                 }
-                .font(.caption.weight(.semibold))
+                .font(.subheadline)
                 .buttonStyle(.borderless)
             }
         }

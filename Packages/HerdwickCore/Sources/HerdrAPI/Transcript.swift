@@ -19,13 +19,13 @@ public enum TranscriptFormat: String, Sendable, Codable {
     }
 }
 
-/// How much of a conversation a thread shows.
-/// - full: every step expanded as it happens.
-/// - folded: runs of steps fold into one "N steps" row (the default).
+/// How much of a conversation a thread shows. A stored "full" (the old everything-open level)
+/// no longer decodes and reads as the default.
+/// - folded: runs of steps fold into one line each (the default).
 /// - digest: the user's messages, the assistant's turning-point thoughts, asks, peer messages
 ///   and the final reply; steps only as a live "working" or a failed last step.
 public enum DetailLevel: String, Sendable, CaseIterable, Identifiable {
-    case full, folded, digest
+    case folded, digest
     public var id: Self { self }
 }
 
@@ -505,6 +505,24 @@ public struct Conversation: Sendable {
     private var toolIndex: [String: Int] = [:]
     private var subagentIndex: [String: Int] = [:]
     private var serial = 0
+    /// Background jobs whose output already has a row, so a `wait` and omp's later delivery don't both add one.
+    private var shownJobs: Set<String> = []
+    /// Commands the agent sent to the background whose output hasn't come back, oldest first.
+    private var backgroundJobs: [(id: String, command: String)] = []
+    /// Those commands, for what's running now.
+    public var backgroundCommands: [String] { backgroundJobs.map(\.command) }
+    /// What a `wait` is for: subagents still working, then background commands, oldest first.
+    public var waitingOn: [String] {
+        subagentActivities.filter { $0.state == .working }.map(\.name) + backgroundJobs.map(\.command)
+    }
+    /// Images the tools returned (screenshots, viewed files), kept as a count so asking is free.
+    public private(set) var imageCount = 0
+    /// Edits and file writes that succeeded, kept as a count so asking is free.
+    public private(set) var editCount = 0
+    /// Those images, newest first.
+    public var toolImages: [TranscriptImage] {
+        items.reversed().flatMap { item -> [TranscriptImage] in if case .tool(let tool) = item { tool.images.reversed() } else { [] } }
+    }
     /// Claude's task list, in creation order.
     private var tasks: [(id: String, subject: String, state: TodoItem.State)] = []
     public private(set) var records: [TranscriptRecord] = []
@@ -587,6 +605,9 @@ public struct Conversation: Sendable {
         subagentActivities.removeAll(keepingCapacity: true)
         tasks.removeAll(keepingCapacity: true)
         usageByID.removeAll(keepingCapacity: true)
+        shownJobs.removeAll(keepingCapacity: true)
+        backgroundJobs.removeAll(keepingCapacity: true)
+        imageCount = 0; editCount = 0
         serial = 0; modelID = nil; thinkingLevel = nil; usage = nil
         proposal = nil; pendingPlanReview = nil
         for index in activeRecords { applyRecord(records[index]) }
@@ -672,11 +693,7 @@ public struct Conversation: Sendable {
         case .peerMessage(let id, let peer, let text, let outbound):
             append(.peerMessage(id: id.isEmpty ? nextID("peer") : id, peer: peer, text: text, outbound: outbound))
         case .jobsFinished(let jobs):
-            // A row where the output arrived, labelled with the command that started it.
-            for job in jobs {
-                let id = nextID("job")
-                append(.tool(ToolActivity(id: id, name: "job", summary: "Finished \(job.label)", state: .succeeded, output: Self.capped(job.output))), tool: id)
-            }
+            for job in jobs { showJob(id: job.id, label: job.label, output: job.output) }
         case .subagentEvent(let activity):
             guard !activity.id.isEmpty else { break }
             if let i = subagentActivities.firstIndex(where: { $0.id == activity.id }) {
@@ -694,8 +711,20 @@ public struct Conversation: Sendable {
     }
 
     public func item(id: String) -> ConversationItem? { toolIndex[id].map { items[$0] } }
+    /// This turn's calls still running, oldest first; an older turn's never-answered call isn't.
+    public var runningTools: [ToolActivity] {
+        var running: [ToolActivity] = []
+        for item in items.reversed() {
+            if case .user = item { break }
+            if case .tool(let tool) = item, tool.state == .running { running.append(tool) }
+        }
+        return running.reversed()
+    }
+    /// Digest is a check-in: what the agent said and asked, messages both ways, results,
+    /// errors, what's running, command output that came back and images, plus this turn's failures.
     public func items(at level: DetailLevel) -> [ConversationItem] {
         guard level == .digest else { return items }
+        let turnStart = items.lastIndex { if case .user = $0 { true } else { false } } ?? 0
         var keep = Set<Int>()
         for (index, item) in items.enumerated() {
             switch item {
@@ -703,14 +732,17 @@ public struct Conversation: Sendable {
                 keep.insert(index)
             case .notice(_, _, let kind) where kind == .compaction || kind == .error:
                 keep.insert(index)
-            case .tool(let tool) where tool.state == .running && index == items.count - 1:
+            case .tool(let tool) where tool.name == "job" || !tool.images.isEmpty:
+                keep.insert(index)
+            // An old turn's never-answered call would otherwise spin here forever.
+            case .tool(let tool) where index > turnStart && (tool.state == .running || (tool.state == .failed && tool.name != "wait")):
                 keep.insert(index)
             default: break
             }
         }
-        if let lastToolIndex = items.lastIndex(where: { if case .tool = $0 { true } else { false } }),
-           case .tool(let tool) = items[lastToolIndex], tool.state == .failed {
-            keep.insert(lastToolIndex)
+        if let lastTool = items.lastIndex(where: { if case .tool = $0 { true } else { false } }),
+           case .tool(let tool) = items[lastTool], tool.state == .failed {
+            keep.insert(lastTool)
         }
         var nextTurn: Int?
         var nextAssistant: Int?
@@ -720,14 +752,22 @@ public struct Conversation: Sendable {
             default: break
             }
             guard case .assistant(_, let text) = items[index] else { continue }
-            let isFinalAssistant = nextAssistant == nil
-            let paragraphs = text.components(separatedBy: "\n\n").filter { !$0.isEmpty }.count
-            let markdownStructure = text.split(separator: "\n").contains { $0.hasPrefix("#") || $0.hasPrefix("- ") || $0.hasPrefix("* ") || $0.range(of: #"^\d+\. "#, options: .regularExpression) != nil }
-            if isFinalAssistant || paragraphs >= 2 || markdownStructure { keep.insert(index) }
+            if nextAssistant == nil || Self.isUpdate(text) { keep.insert(index) }
             if let nextTurn, nextAssistant == nil || nextAssistant! > nextTurn { keep.insert(index) }
             nextAssistant = index
         }
         return items.enumerated().compactMap { keep.contains($0.offset) ? $0.element : nil }
+    }
+
+    /// Two paragraphs, a heading or a list: an update rather than narration between steps.
+    /// Runs over every reply on each Digest render, so no regex.
+    private static func isUpdate(_ text: String) -> Bool {
+        if text.contains("\n\n"), text.components(separatedBy: "\n\n").lazy.filter({ !$0.isEmpty }).count >= 2 { return true }
+        return text.split(separator: "\n").contains { line in
+            if line.hasPrefix("#") || line.hasPrefix("- ") || line.hasPrefix("* ") { return true }
+            let digits = line.prefix { $0.isASCII && $0.isNumber }
+            return !digits.isEmpty && line.dropFirst(digits.count).hasPrefix(". ")
+        }
     }
 
     private mutating func apply(_ message: TranscriptMessage) {
@@ -748,7 +788,8 @@ public struct Conversation: Sendable {
                 }
                 if call.name == "write", let path = object["path"] as? String,
                    path.hasPrefix("agent://"), let content = object["content"] as? String {
-                    append(.peerMessage(id: call.id, peer: String(path.dropFirst("agent://".count)), text: content, outbound: true))
+                    // Indexed like a tool call so omp's `tool_execution_start` for it adds no step.
+                    place(.peerMessage(id: call.id, peer: String(path.dropFirst("agent://".count)), text: content, outbound: true), tool: call.id)
                 } else if ["ask", "AskUserQuestion", "request_user_input"].contains(call.name), let questions = Self.questions(object) {
                     place(.ask(AskActivity(toolCallId: call.id, questions: questions)), tool: call.id)
                 } else if let spawned = Self.spawned(call.name, object, callId: call.id) {
@@ -765,11 +806,16 @@ public struct Conversation: Sendable {
             guard let callID = message.toolCallId, let index = toolIndex[callID] else { return }
             switch items[index] {
             case .tool(var tool):
+                if !message.isError, tool.state != .succeeded, tool.kind == .edit { editCount += 1 }
                 tool.state = message.isError ? .failed : .succeeded
                 tool.output = Self.capped(message.text)
                 tool.details = message.details
+                imageCount += message.images.count - tool.images.count
                 tool.images = message.images
                 if tool.name == "wait" { applyWait(message.details) }
+                // Only bash jobs: their completions are the ones read back (a `task` job is a
+                // subagent, already counted as one, and would never leave the list).
+                if tool.name == "bash", let job = Self.backgroundJob(message.details) { backgroundJobs.append((job, tool.summary)) }
                 if ["Agent", "Task"].contains(tool.name) { applyClaudeResult(tool, message) }
                 if tool.name == "spawn_agent", let childID = Self.object(message.text)["agent_id"] as? String,
                    let i = subagentActivities.firstIndex(where: { $0.spawnCallId == tool.id }) {
@@ -784,6 +830,8 @@ public struct Conversation: Sendable {
             case .ask(var ask):
                 ask.answer = Self.answer(message, questions: ask.questions)
                 items[index] = .ask(ask)
+            case .peerMessage(_, let peer, _, true) where message.isError:
+                append(.notice(id: callID + "-undelivered", text: "Not delivered to \(peer): \(message.text)", kind: .error))
             default:
                 break
             }
@@ -803,11 +851,21 @@ public struct Conversation: Sendable {
         }
         return nil
     }
+    /// A `wait` can be the only delivery of a background command's output ("recovered by this
+    /// snapshot"), so its finished commands get the same row omp's own delivery would add.
     private mutating func applyWait(_ details: String?) {
         let object = Self.object(details)
         for job in object["jobs"] as? [[String: Any]] ?? [] {
-            guard let id = job["id"] as? String, let status = job["status"] as? String, status != "running",
-                  let i = subagentActivities.firstIndex(where: { $0.id == id }) else { continue }
+            guard let id = job["id"] as? String, let status = job["status"] as? String, status != "running" else { continue }
+            guard let i = subagentActivities.firstIndex(where: { $0.id == id }) else {
+                if job["type"] as? String == "bash" {
+                    backgroundJobs.removeAll { $0.id == id }
+                    if let output = (job["resultText"] as? String) ?? (job["errorText"] as? String) {
+                        showJob(id: id, label: job["label"] as? String ?? id, output: output)
+                    }
+                }
+                continue
+            }
             if subagentActivities[i].state == .cancelled { continue }
             let text = (job["resultText"] as? String) ?? (job["errorText"] as? String)
             // The job text usually wraps the same <task-result>; its status ("cancelled") beats the job's ("failed").
@@ -825,6 +883,22 @@ public struct Conversation: Sendable {
             }
             emitResult(subagentActivities[i])
         }
+    }
+
+    /// A row where a background command's output arrived, labelled with the command, once per job.
+    private mutating func showJob(id: String, label: String, output: String) {
+        backgroundJobs.removeAll { $0.id == id }
+        guard shownJobs.insert(id).inserted else { return }
+        let row = nextID("job")
+        append(.tool(ToolActivity(id: row, name: "job", summary: "Finished \(label)", state: .succeeded,
+                                  output: Self.capped(output.trimmingCharacters(in: .whitespacesAndNewlines)))), tool: row)
+    }
+
+    /// omp's `{"async": {"state": "running", "jobId": …}}` on a command it moved to the background.
+    private static func backgroundJob(_ details: String?) -> String? {
+        guard let details, details.contains("\"async\"") else { return nil }
+        guard let async = object(details)["async"] as? [String: Any], async["state"] as? String == "running" else { return nil }
+        return async["jobId"] as? String
     }
     private mutating func applyClaudeResult(_ tool: ToolActivity, _ message: TranscriptMessage) {
         let details = Self.object(message.details)
@@ -886,7 +960,22 @@ public struct Conversation: Sendable {
         return (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
     }
 
+    /// The one line a person would want. omp's `eval` says what it's for in `title`; its
+    /// hashline `edit` names the file in the first line of `input` ("[path#TAG]").
     private static func summary(_ name: String, _ arguments: [String: Any]) -> String {
+        if name == "eval" {
+            if let title = arguments["title"] as? String, !title.isEmpty { return title }
+            return arguments["language"] as? String == "js" ? "Run JavaScript" : "Run Python"
+        }
+        if name == "edit", let input = arguments["input"] as? String, input.hasPrefix("["),
+           let end = input.firstIndex(where: { $0 == "#" || $0 == "]" || $0 == "\n" }), input[end] != "\n" {
+            return String(input[input.index(after: input.startIndex)..<end])
+        }
+        if name == "apply_patch", let patch = (arguments["input"] as? String) ?? (arguments["patch"] as? String),
+           let line = patch.split(separator: "\n").first(where: { $0.hasPrefix("*** ") && $0.contains(" File: ") }),
+           let range = line.range(of: " File: ") {
+            return String(line[range.upperBound...])
+        }
         for key in ["command", "cmd", "path", "file_path", "pattern", "query", "url", "description"] {
             if let value = arguments[key] as? String, !value.isEmpty {
                 return value.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? value

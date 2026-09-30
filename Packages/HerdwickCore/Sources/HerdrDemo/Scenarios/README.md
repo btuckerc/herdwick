@@ -82,6 +82,9 @@ ANSI colours are used so the user's theme recolours the screen.
   pane opens, a reply is typed and sent, the agent finishes, the list returns, and the link
   drops for 2.5 s and recovers.
 - `replied`: `studio` after the reply, with p1 done and its deploy output on screen.
+- `loop`: extends `studio`; `p5` becomes a long hill-climb loop ("Hill-climb the rate
+  limiter"): briefs to and replies from subagents, a NO-GO then GO council, edits, bench
+  images, and a background soak the agent is still waiting on.
 
 ## Conversation captures
 
@@ -93,7 +96,9 @@ No special capture script is needed; these run the actual conversation UI.
 | --- | --- |
 | Conversation / finished review | `-HerdwickScene pane:p2 -detailLevel folded` |
 | Conversation question and composer | `-HerdwickScene pane:p1 -detailLevel folded` |
-| Working tray and completed subagent | `-HerdwickScene pane:p5 -detailLevel folded -showWorkingSubagents YES` |
+| Working subagents (Now line) and completed subagent | `-HerdwickScene pane:p5 -detailLevel folded` |
+| Long agent loop (use `-HerdwickDemo loop`) | `-HerdwickScene pane:p5 -detailLevel folded` (or `digest`) |
+| Catch-up line ("Since 9:41 · …") | add `-HerdwickSeen <item id>` (e.g. `c17` in `loop`, `diff` on `pane:p2`) |
 | Machines | `-HerdwickScene agents -inboxView machines` |
 | Forced terminal, even with a transcript | `-HerdwickScene terminal:p1` |
 

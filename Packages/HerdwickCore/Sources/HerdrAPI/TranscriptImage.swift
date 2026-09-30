@@ -9,6 +9,9 @@ public final class TranscriptImage: Sendable, Hashable {
         /// SHA-256 hex of a blob under omp's `blobs` folder.
         case blob(String)
         case base64(String)
+        /// An inline image left in the transcript on the host: its 1-based line and its place
+        /// among that line's images (`HerdrClient.transcriptToolImages`).
+        case transcriptLine(Int, ordinal: Int)
     }
 
     public let source: Source

@@ -3,104 +3,34 @@ import SwiftUI
 
 extension EnvironmentValues {
     /// Pushes a subagent's read-only transcript; nil where drill-in isn't available.
-    @Entry var openSubagent: (@MainActor (SubagentActivity) -> Void)? = nil
+    @Entry var openSubagent: EnvironmentAction<SubagentActivity, Void>? = nil
     /// This conversation's subagent with the given id (an `agent://` peer), if any.
-    @Entry var subagentNamed: (@MainActor (String) -> SubagentActivity?)? = nil
+    @Entry var subagentNamed: EnvironmentAction<String, SubagentActivity?>? = nil
 }
 
-/// A compact, material tray for workers that have not reached a terminal state.
-struct WorkingSubagentsTray: View {
-    let activities: [SubagentActivity]
-    let onSelect: (SubagentActivity) -> Void
-
-    var body: some View {
-        if !activities.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Working now").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 4)
-                ForEach(activities) { activity in
-                    Button { onSelect(activity) } label: {
-                        HStack(spacing: 10) {
-                            ProgressView().controlSize(.small)
-                            Text(activity.name).lineLimit(1)
-                            if let type = activity.agentType, !type.isEmpty { Text("· \(type)").foregroundStyle(.secondary).lineLimit(1) }
-                            Spacer(minLength: 4)
-                            if let date = activity.spawnedAt {
-                                Text(date, style: .relative).font(.caption2.monospaced()).foregroundStyle(.secondary)
-                            }
-                        }
-                        .font(.subheadline)
-                        .padding(.horizontal, 16).padding(.vertical, 7)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.bottom, 6)
-            .background(.regularMaterial)
-            .transition(.move(edge: .top).combined(with: .opacity))
-        }
-    }
-}
-
+/// A subagent's result: "BenchCouncil finished · 2m05s" over two lines of what it said.
+/// `brief`: what this agent last asked it, shown when the result is opened.
 struct SubagentResultRow: View {
     let activity: SubagentActivity
-    @Environment(\.openSubagent) private var openSubagent
-    @State private var expanded = false
+    var brief: String? = nil
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Button { expanded.toggle() } label: {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        Image(systemName: symbol).foregroundStyle(color)
-                        Text(activity.name).font(.subheadline.weight(.medium)).lineLimit(1)
-                        if let type = activity.agentType, !type.isEmpty { Text("· \(type)").foregroundStyle(.secondary).lineLimit(1) }
-                        if let duration = activity.duration { Text("· \(duration)").foregroundStyle(.secondary).font(.caption.monospaced()) }
-                    }
-                    if let summary = activity.summary, !summary.isEmpty {
-                        Text(expanded ? summary : String(summary.prefix { $0 != "\n" }.prefix(120)))
-                            .font(.caption)
-                            .lineLimit(expanded ? nil : 1)
-                            .multilineTextAlignment(.leading)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if let openSubagent {
-                Button { openSubagent(activity) } label: {
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
-                        .frame(width: 32, height: 28).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Open \(activity.name)")
-            }
-        }
-        .padding(.vertical, 7)
-        .foregroundStyle(isCancelled ? .secondary : .primary)
+        AgentMessage(title: [activity.name + " " + state, activity.duration].compactMap { $0 }.joined(separator: " · "),
+                     peer: activity.name, failed: failed, text: activity.summary ?? "", brief: brief, activity: activity)
     }
 
-    private var isCancelled: Bool { if case .cancelled = activity.state { true } else { false } }
-    private var symbol: String {
+    private var failed: Bool { if case .failed = activity.state { true } else { false } }
+    private var state: String {
         switch activity.state {
-        case .working: "progress.indicator"
-        case .completed: "checkmark.circle"
-        case .failed: "xmark.octagon"
-        case .cancelled: "stop.circle"
-        }
-    }
-    private var color: Color {
-        switch activity.state {
-        case .working: .secondary
-        case .completed: .green
-        case .failed: .red
-        case .cancelled: .secondary
+        case .working: "working"
+        case .completed: "finished"
+        case .failed: "failed"
+        case .cancelled: "cancelled"
         }
     }
 }
 
+/// The call that spawned subagents: how many and how many still work; open it for each one.
 struct SubagentGroupRow: View {
     let activities: [SubagentActivity]
     @Environment(\.openSubagent) private var openSubagent
@@ -108,23 +38,17 @@ struct SubagentGroupRow: View {
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(activities) { activity in
-                    Button { openSubagent?(activity) } label: {
-                        HStack {
-                            Image(systemName: statusSymbol(activity.state))
-                            Text(activity.name).foregroundStyle(.primary)
-                            if let type = activity.agentType { Text("· \(type)").foregroundStyle(.secondary) }
-                            Spacer()
-                            Text(status(activity.state)).foregroundStyle(.secondary)
-                        }.font(.caption)
-                    }.buttonStyle(.plain)
+                    QuietHeader(action: openSubagent.map { open in { open(activity) } }) {
+                        Text([activity.name, activity.agentType, status(activity.state)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+                    }
                 }
-            }.padding(.top, 5)
+            }
         } label: {
-            Label(summary, systemImage: "person.2")
-                .font(.footnote).foregroundStyle(.secondary)
-        }.tint(.secondary)
+            Text(summary)
+        }
+        .disclosureGroupStyle(QuietDisclosure())
     }
 
     private var summary: String { "\(activities.count) subagents · " + (workingCount == 0 ? "all done" : "\(workingCount) working") }
@@ -132,9 +56,6 @@ struct SubagentGroupRow: View {
     private var workingCount: Int { activities.filter { if case .working = $0.state { true } else { false } }.count }
     private func status(_ state: SubagentActivity.State) -> String {
         switch state { case .working: "working"; case .completed: "done"; case .failed: "failed"; case .cancelled: "cancelled" }
-    }
-    private func statusSymbol(_ state: SubagentActivity.State) -> String {
-        switch state { case .working: "circle.dotted"; case .completed: "checkmark.circle"; case .failed: "xmark.octagon"; case .cancelled: "stop.circle" }
     }
 }
 
@@ -145,17 +66,22 @@ struct SubagentConversationView: View {
     let title: String
     @State private var feed = ConversationFeed()
     @State private var previewing: ImagePreviewSource?
+    @State private var photoSaver = PhotoSaver()
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
-                ForEach(ConversationRow.rows(feed.conversation.items,
+                ForEach(ConversationRow.rows(feed.conversation.items, answered: feed.conversation.items.answeredBriefs(),
                                              subagents: { feed.conversation.subagents(spawnedBy: $0) })) { row in row.view }
             }.padding(16)
         }
-        .environment(\.previewImage) { previewing = $0 }
+        .environment(\.previewImage, EnvironmentAction { previewing = $0 })
+        .modifier(SavesPhotos(saver: photoSaver))
         .environment(\.imageLoader, ImageLoader(connection: connection, transcript: path))
         .sheet(item: $previewing) { ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: path)) }
+        .modifier(FileLinks(loader: ImageLoader(connection: connection, transcript: path)) { [feed] name in
+            feed.conversation.touchedFile(name)
+        })
         .defaultScrollAnchor(.bottom)
         .overlay {
             switch feed.state {

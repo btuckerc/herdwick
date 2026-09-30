@@ -117,7 +117,6 @@ struct PaneView: View {
                 if !composerFocused || typing { restingSize = size }
                 viewHeight = size.height
             }
-            .animation(.smooth, value: terminal.hasFrame)
 
             controls
         }

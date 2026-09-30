@@ -54,7 +54,7 @@ extension View {
                         .transition(.opacity)
                 }
             }
-            .animation(connection.isConnecting ? .smooth.delay(0.5) : .smooth, value: connection.isConnecting)
+            .animation(.easeOut(duration: 0.15).delay(connection.isConnecting ? 0.5 : 0), value: connection.isConnecting)
             .allowsHitTesting(false)
         }
     }
@@ -72,6 +72,7 @@ struct HostTitle: View {
     var switchHost: ((Int) -> Void)?
 
     @State private var drag: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let stride: CGFloat = 170
 
     var body: some View {
@@ -138,7 +139,7 @@ struct HostTitle: View {
                     // The neighbour is now the title: keep it where the finger left it, then settle.
                     drag += CGFloat(direction) * stride
                 }
-                withAnimation(.smooth) { drag = 0 }
+                withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { drag = 0 }
             }
     }
 }
@@ -147,9 +148,9 @@ struct StatusDot: View {
     let status: AgentStatus
 
     var body: some View {
+        // Still: the symbol says working; a spinning one in every row was motion for its own sake.
         Image(systemName: status.symbol)
             .foregroundStyle(status.tint)
-            .symbolEffect(.rotate, isActive: status == .working)
             .font(.body)
             .frame(width: 24)
             .accessibilityLabel(status.label)
@@ -256,6 +257,8 @@ struct MessageComposer: View {
     var placeholder = "Message"
     /// Extra sends offered in the + menu (omp's "Send After This Run").
     var actions: [ComposerAction] = []
+    /// Bumped to put the keyboard away (an ask card arriving); the field's own focus is UIKit's.
+    var dismissals = 0
     let onSend: () -> Void
     @State private var photos: [PhotosPickerItem] = []
     @State private var showPhotos = false
@@ -332,7 +335,7 @@ struct MessageComposer: View {
                     .accessibilityLabel("Attach")
                     ComposerTextView(text: $draft, focus: focus, placeholder: placeholder,
                                      autocorrect: settings.composerAutocorrect,
-                                     returnKeySends: settings.returnKeySends) {
+                                     returnKeySends: settings.returnKeySends, dismissals: dismissals) {
                         if !busy { onSend() }
                     }
                     .padding(.horizontal, 16)

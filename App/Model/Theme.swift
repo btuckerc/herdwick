@@ -105,7 +105,6 @@ final class Settings {
     var composerAutocorrect: Bool { didSet { if composerAutocorrect != oldValue { defaults.set(composerAutocorrect, forKey: "composerAutocorrect") } } }
     /// The on-screen keyboard's Return sends instead of adding a line.
     var returnKeySends: Bool { didSet { if returnKeySends != oldValue { defaults.set(returnKeySends, forKey: "returnKeySends") } } }
-    var showWorkingSubagents: Bool { didSet { if showWorkingSubagents != oldValue { defaults.set(showWorkingSubagents, forKey: "showWorkingSubagents") } } }
     var attachmentRetention: AttachmentRetention { didSet { if attachmentRetention != oldValue { defaults.set(attachmentRetention.rawValue, forKey: "attachmentRetention") } } }
     /// One inbox for every saved host instead of the selected one.
     var allHosts: Bool { didSet { if allHosts != oldValue { defaults.set(allHosts, forKey: "allHosts") } } }
@@ -157,13 +156,14 @@ final class Settings {
         haptics = defaults.object(forKey: "haptics") as? Bool ?? true
         composerAutocorrect = defaults.object(forKey: "composerAutocorrect") as? Bool ?? false
         returnKeySends = defaults.object(forKey: "returnKeySends") as? Bool ?? false
-        showWorkingSubagents = defaults.object(forKey: "showWorkingSubagents") as? Bool ?? true
         attachmentRetention = AttachmentRetention(rawValue: defaults.string(forKey: "attachmentRetention") ?? "") ?? .day
         allHosts = defaults.object(forKey: "allHosts") as? Bool ?? false
         inboxView = InboxKind(rawValue: defaults.string(forKey: "inboxView") ?? "") ?? .agents
         inboxGrouping = InboxGrouping(rawValue: defaults.string(forKey: "inboxGrouping") ?? "") ?? .none
         inboxSort = InboxSort(rawValue: defaults.string(forKey: "inboxSort") ?? "") ?? .recent
         collapseIdle = defaults.object(forKey: "collapseIdle") as? Bool ?? false
+        // "full" was a third level, retired: it reads as Folded, and the key forgets it.
+        if defaults.string(forKey: "detailLevel") == "full" { defaults.set(DetailLevel.folded.rawValue, forKey: "detailLevel") }
         detailLevel = DetailLevel(rawValue: defaults.string(forKey: "detailLevel") ?? "") ?? .folded
         notifyNeedsYou = defaults.object(forKey: "notifyNeedsYou") as? Bool ?? false
         notifyFinished = defaults.object(forKey: "notifyFinished") as? Bool ?? false

@@ -13,7 +13,6 @@ struct TerminalText: View {
     @State private var lines: [String]?
     @State private var failure: String?
     @State private var query = ""
-    @State private var previewing: ImagePreviewSource?
 
     /// Lines of output read from the host, oldest first; the screen is the last of them.
     private static let limit = 2000
@@ -36,14 +35,7 @@ struct TerminalText: View {
             }
         }
         .searchable(text: $query, prompt: "Find in loaded output")
-        .environment(\.openURL, OpenURLAction { url in
-            guard let path = imageLinkPath(url) else { return .systemAction }
-            previewing = .file(path)
-            return .handled
-        })
-        .sheet(item: $previewing) {
-            ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: nil, cwd: cwd))
-        }
+        .modifier(FileLinks(loader: ImageLoader(connection: connection, transcript: nil, cwd: cwd)))
         .task { await load() }
     }
 
@@ -95,8 +87,8 @@ struct TerminalText: View {
 
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
-    /// Web links open in the browser; image paths open the host-file preview. Other paths stay
-    /// text: a remote path is never opened as a local file or run.
+    /// Web links open in the browser; image paths, and text paths with a `/`, open the host-file
+    /// preview. Other paths stay text: a remote path is never opened as a local file or run.
     static func linked(_ line: String) -> AttributedString {
         var result = AttributedString(line)
         let range = NSRange(line.startIndex..., in: line)
@@ -109,9 +101,9 @@ struct TerminalText: View {
         for word in line.split(whereSeparator: \.isWhitespace) {
             guard let span = line.range(of: word, range: searchStart..<line.endIndex) else { continue }
             searchStart = span.upperBound
-            let path = String(word).trimmingCharacters(in: CharacterSet(charactersIn: "'\"`()[]<>,;:"))
-            guard isImagePath(path), !path.contains("://"), let url = imageLink(path),
-                  let pathSpan = line.range(of: path, range: span), let target = Range(pathSpan, in: result),
+            let named = String(word).trimmingCharacters(in: CharacterSet(charactersIn: "'\"`()[]<>,;:"))
+            guard let path = namedFile(named), isImagePath(path) || path.contains("/"), let url = fileLink(path),
+                  let pathSpan = line.range(of: named, range: span), let target = Range(pathSpan, in: result),
                   result[target].link == nil else { continue }
             result[target].link = url
         }

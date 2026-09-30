@@ -8,6 +8,7 @@ struct SessionView: View {
     @Environment(SceneState.self) private var scene
     @Environment(Settings.self) private var settings
     @Environment(DemoDirector.self) private var demo: DemoDirector?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let connection: HostConnection
 
     @State private var sheet: Sheet?
@@ -80,7 +81,9 @@ struct SessionView: View {
     private var presented: some View {
         content
             .id(connection.profile.id)
-            .transition(.push(from: pushEdge))
+            .transition(reduceMotion ? .opacity : .push(from: pushEdge))
+            // Scoped to the host content: select also clears the navigation path, which shouldn't ride along.
+            .animation(reduceMotion ? .easeOut(duration: 0.15) : .easeInOut(duration: 0.24), value: connection.profile.id)
             .navigationTitle(allHosts ? "All Hosts" : connection.profile.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbar }
@@ -229,7 +232,7 @@ struct SessionView: View {
     private func switchHost(by offset: Int) {
         guard let target = neighbor(offset) else { return }
         pushEdge = offset > 0 ? .trailing : .leading
-        withAnimation(.smooth) { model.select(target.id, in: scene) }
+        model.select(target.id, in: scene)
         hostSelection += 1
     }
 
@@ -309,8 +312,7 @@ struct SessionView: View {
             .onChange(of: scene.searchPresented, initial: true) { _, shown in searchFocused = shown }
             .refreshable { await model.refresh() }
             .opacity(allHosts || connection.isLive ? 1 : 0.6)
-            .animation(.smooth, value: blockedCount)
-            .animation(.smooth, value: order)
+            // No list-wide animation: live status and order changes would slide every row at once.
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 // Strict: a few points down, the list keeps visible rows fixed and inserts above them unseen.
                 geometry.contentOffset.y <= -geometry.contentInsets.top + 8
@@ -326,24 +328,26 @@ struct SessionView: View {
                 // Scrolling in the same update as the reorder would target the old layout.
                 guard scrollToFirst, let first = order.first else { return }
                 scrollToFirst = false
-                withAnimation { proxy.scrollTo(first, anchor: .top) }
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) { proxy.scrollTo(first, anchor: .top) }
             }
             .overlay(alignment: .top) {
-                if newActivity {
-                    // Floats over the list rather than inserting a row, so nothing shifts.
-                    Button("New Activity", systemImage: "arrow.up") {
-                        // Shows the new order but stays held: scrollTo stops at the first row with the
-                        // header under the bar, short of the top where live reordering is visible.
-                        heldRanks = liveRanks
-                        scrollToFirst = true
+                Group {
+                    if newActivity {
+                        // Floats over the list rather than inserting a row, so nothing shifts.
+                        Button("New Activity", systemImage: "arrow.up") {
+                            // Shows the new order but stays held: scrollTo stops at the first row with the
+                            // header under the bar, short of the top where live reordering is visible.
+                            heldRanks = liveRanks
+                            scrollToFirst = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .padding(.top, 8)
+                        .transition(.opacity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.capsule)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
                 }
+                .animation(.easeOut(duration: 0.15), value: newActivity)
             }
-            .animation(.smooth, value: newActivity)
         }
     }
 

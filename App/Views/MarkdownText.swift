@@ -24,18 +24,42 @@ struct MarkdownText: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Code spans naming an image file (`shot.png`) link to the image preview, as do image
+    /// Code spans naming an image or text file (`shot.png`, `Views/a.swift:42`) link to its
+    /// preview, as do paths in prose (App/Views/a.swift), bare image names (shot.png) and image
     /// embeds (`![shot](shot.png)`) inside other text; remote ones stay plain links.
     static func inline(_ text: String) -> AttributedString {
         let text = text.contains("![") ? linkingEmbeds(text) : text
         var string = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
-        guard text.contains("`") else { return string }
-        for run in string.runs where run.inlinePresentationIntent?.contains(.code) == true && run.link == nil {
-            let path = String(string[run.range].characters)
-            if isImagePath(path), !path.contains(" "), let url = imageLink(path) { string[run.range].link = url }
+        if text.contains("`") {
+            for run in string.runs where run.inlinePresentationIntent?.contains(.code) == true && run.link == nil {
+                if let path = namedFile(String(string[run.range].characters)), let url = fileLink(path) { string[run.range].link = url }
+            }
         }
+        if text.contains("/") || text.contains(".") { linkingPaths(&string) }
         return string
+    }
+
+    /// A file named in prose: a word with a `/`, or with an image extension (a bare `a.swift`
+    /// could as well be Node.js), never a URL (`https://x/a.md` stays as it is).
+    private static func linkingPaths(_ string: inout AttributedString) {
+        let leading = CharacterSet(charactersIn: "([<\"'"), trailing = CharacterSet(charactersIn: ".,;:!?)]>\"'")
+        var links: [(Range<AttributedString.Index>, URL)] = []
+        for run in string.runs where run.link == nil && run.inlinePresentationIntent?.contains(.code) != true {
+            let text = String(string[run.range].characters)
+            // Walked forward once: each word's index starts from the last one's.
+            var index = run.range.lowerBound, previous = text.startIndex
+            for word in text.split(whereSeparator: \.isWhitespace) where word.contains(".") && !word.contains("://") {
+                var found = word
+                while let first = found.unicodeScalars.first, leading.contains(first) { found = found.dropFirst() }
+                while let last = found.unicodeScalars.last, trailing.contains(last) { found = found.dropLast() }
+                guard let path = namedFile(String(found)), found.contains("/") || isImagePath(path), let url = fileLink(path) else { continue }
+                index = string.characters.index(index, offsetBy: text.distance(from: previous, to: found.startIndex))
+                previous = found.startIndex
+                links.append((index..<string.characters.index(index, offsetBy: found.count), url))
+            }
+        }
+        for (range, url) in links { string[range].link = url }
     }
 
     /// `![alt](target "title")`, one level of parentheses in the target; group 1 is an escaping `\`.
@@ -47,7 +71,7 @@ struct MarkdownText: View {
             index.isMultiple(of: 2) ? String(part).replacing(embed) { match in
                 guard match.1.isEmpty else { return String(match.0) }
                 let target = String(match.3)
-                let link = localImage(target).flatMap(imageLink)?.absoluteString ?? target
+                let link = localImage(target).flatMap(fileLink)?.absoluteString ?? target
                 return "[\(match.2.isEmpty ? (target as NSString).lastPathComponent : String(match.2))](\(link))"
             } : String(part)
         }.joined(separator: "`")

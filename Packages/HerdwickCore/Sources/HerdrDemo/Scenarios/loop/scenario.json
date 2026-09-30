@@ -1,0 +1,9 @@
+{
+  "extends": "studio",
+  "transcripts": {
+    "p1": "../studio/transcripts/p1.jsonl",
+    "p2": "../studio/transcripts/p2.jsonl",
+    "p5": "transcripts/p5-loop.jsonl"
+  },
+  "childTranscripts": {}
+}

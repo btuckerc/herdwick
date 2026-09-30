@@ -44,7 +44,6 @@ struct SettingsView: View {
                         }
                         .tint(.secondary)
                     }
-                    Toggle("Show Working Subagents", isOn: $settings.showWorkingSubagents)
                     NavigationLink("Launch Presets") { PresetsEditor() }
                 }
 
@@ -348,7 +347,6 @@ struct DetailLevelOptions: View {
 
     static func title(_ level: DetailLevel) -> String {
         switch level {
-        case .full: "Full"
         case .folded: "Folded"
         case .digest: "Digest"
         }

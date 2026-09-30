@@ -234,7 +234,10 @@ struct NewAgentSheet: View {
                         pane = result.rootPane.id
                     } else {
                         workspace = known
-                        pane = try await client.createTab(workspaceID: id, label: nil, cwd: originalResumeDestination ? resume?.cwd : nil, session: session).rootPane.id
+                        // Always a folder: without one herdr starts the tab where the workspace's focused
+                        // process is, and an agent that changed directory takes that anywhere.
+                        let cwd = (originalResumeDestination ? resume?.cwd : nil) ?? link.folder(ofWorkspace: id)
+                        pane = try await client.createTab(workspaceID: id, label: nil, cwd: cwd, session: session).rootPane.id
                     }
                 case .folder(let path):
                     let result = try await client.createWorkspace(label: nil, cwd: path, session: session)
@@ -303,11 +306,14 @@ struct NewAgentSheet: View {
 }
 
 extension HostConnection {
-    /// The folder a workspace's panes are in, when they agree. herdr keeps no folder per
-    /// workspace; this is what its panes report now.
+    /// A workspace's folder: its worktree checkout, else its first tab's (herdr keeps no folder per
+    /// workspace, and names it after the one it was made in). Later tabs can be anywhere, since
+    /// herdr starts an unplaced tab where the focused process is.
     func folder(ofWorkspace id: String) -> String? {
-        let folders = Set(snapshot?.panes.filter { $0.workspaceID == id }.compactMap(\.cwd) ?? [])
-        return folders.count == 1 ? folders.first : nil
+        guard let snapshot else { return nil }
+        if let checkout = snapshot.workspaces.first(where: { $0.id == id })?.worktree?.checkoutPath { return checkout }
+        let first = snapshot.tabs.filter { $0.workspaceID == id }.min { $0.number < $1.number }
+        return snapshot.panes.first { $0.tabID == first?.id }?.cwd
     }
 
     /// The workspace already working in `folder`, if exactly one is; else a new one for it.
@@ -327,7 +333,7 @@ extension HostConnection {
     func detail(for place: NewAgentPlace, showHost: Bool) -> String? {
         let folder: String? = switch place {
         case .workspace(let id):
-            (snapshot?.workspaces.first { $0.id == id }?.worktree?.checkoutPath ?? self.folder(ofWorkspace: id)).map(homeRelative)
+            self.folder(ofWorkspace: id).map(homeRelative)
         case .folder(let path?): "New workspace · " + homeRelative(path)
         case .folder(nil): "New workspace · ~"
         }

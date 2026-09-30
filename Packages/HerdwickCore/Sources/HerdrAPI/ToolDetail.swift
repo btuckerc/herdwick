@@ -56,9 +56,9 @@ extension ToolDetail {
         case "exec_command": self = .shell(command: Self.command(args?["cmd"]), output: output, exitCode: exit)
         case "shell", "local_shell": self = .shell(command: Self.command(args?["command"] ?? args?["cmd"]), output: output, exitCode: exit)
         case "read", "Read":
-            let path = Self.string(args?[name == "Read" ? "file_path" : "path"]) ?? ""
+            let (path, selector) = Self.readTarget(Self.string(args?[name == "Read" ? "file_path" : "path"]) ?? "")
             let off = Self.int(args?["offset"]), lim = Self.int(args?["limit"])
-            self = .read(path: path, range: off.map { "\($0)–\($0 + (lim ?? 0))" })
+            self = .read(path: path, range: off.map { "\($0)–\($0 + (lim ?? 0))" } ?? selector)
         case "view_image": self = .read(path: Self.string(args?["path"]) ?? "", range: nil)
         case "edit":
             if let diff = Self.string(meta?["diff"]), let path = Self.string(meta?["path"] ?? args?["path"]) { self = .edit([Self.ompDiff(path: path, text: diff)]) }
@@ -76,7 +76,8 @@ extension ToolDetail {
             else { self = .generic(output: output) }
         case "write", "Write":
             let p = Self.string(args?[name == "Write" ? "file_path" : "path"]) ?? ""
-            self = .write(path: p, content: Self.string(args?["content"]) ?? "")
+            // omp's `proc://` writes are keystrokes to a background process, not a file.
+            self = p.hasPrefix("proc://") ? .generic(output: output) : .write(path: p, content: Self.string(args?["content"]) ?? "")
         case "grep", "Glob", "Grep", "find":
             self = .search(pattern: Self.string(args?[name == "Grep" || name == "grep" ? "pattern" : (name == "find" ? "query" : "pattern")]) ?? "", scope: Self.string(args?["path"]), output: output)
         case "web_search", "WebSearch": self = .web(target: Self.string(args?["query"]) ?? "", output: output)
@@ -103,6 +104,12 @@ extension ToolDetail {
         let parts = a.compactMap { $0 as? String }
         if parts.count >= 3 && (parts[0] == "bash" || parts[0].hasSuffix("/bash")) && parts[1] == "-lc" { return parts[2] }
         return parts.joined(separator: " ")
+    }
+    /// omp's read selectors (`a.swift:42`, `:50-100`, `:10+20`, `:-60`, `:raw`, `:img`, `:conflicts`,
+    /// combined) come off the path: the file is what resolves and opens, the selector its range.
+    static func readTarget(_ raw: String) -> (path: String, selector: String?) {
+        guard !raw.contains("://"), let match = raw.wholeMatch(of: #/(.+?)((?::(?:\d[\d,+\-]*|-\d+|raw|img|conflicts))+)/#) else { return (raw, nil) }
+        return (String(match.1), String(match.2.dropFirst()))
     }
     private static func todos(_ value: Any?) -> [TodoItem] {
         (value as? [[String: Any]] ?? []).compactMap { x in

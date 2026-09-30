@@ -11,11 +11,12 @@ import SwiftUI
 ///     -HerdwickDraft <text>                     composer text on the opened pane
 ///     -HerdwickDrop YES                         drop the link after the first snapshot (reconnect UI)
 ///     -HerdwickHold YES                         start the timeline only once Documents/demo-go exists
+///     -HerdwickSeen <item id>                   the opened pane was last read at that item (catch-up line)
 ///
 /// Once the scene has rendered, the app writes `Documents/demo-ready` for the capture script.
 /// `pane:` uses the agent's conversation when available; `terminal:` always shows the
 /// terminal. `pane:p1` shows the studio question, `pane:p2` its completed review,
-/// `pane:p5 -showWorkingSubagents YES` delegated work; `agents -inboxView machines`
+/// `pane:p5` delegated work; `agents -inboxView machines`
 /// shows Machines. Draft/send cues also drive the conversation composer.
 struct DemoLaunch: Equatable {
     enum Scene: Equatable {
@@ -47,6 +48,7 @@ struct DemoLaunch: Equatable {
     var draft: String?
     var dropAfterReady: Bool
     var holdClock: Bool
+    var seen: String?
 
     static let current: DemoLaunch? = {
         let defaults = UserDefaults.standard
@@ -56,7 +58,8 @@ struct DemoLaunch: Equatable {
             scene: defaults.string(forKey: "HerdwickScene").flatMap(Scene.init) ?? .agents,
             draft: defaults.string(forKey: "HerdwickDraft"),
             dropAfterReady: defaults.bool(forKey: "HerdwickDrop"),
-            holdClock: defaults.bool(forKey: "HerdwickHold")
+            holdClock: defaults.bool(forKey: "HerdwickHold"),
+            seen: defaults.string(forKey: "HerdwickSeen")
         )
     }()
 }

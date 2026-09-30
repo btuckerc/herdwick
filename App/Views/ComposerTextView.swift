@@ -8,6 +8,7 @@ struct ComposerTextView: UIViewRepresentable {
     let placeholder: String
     let autocorrect: Bool
     let returnKeySends: Bool
+    var dismissals = 0
     let onSend: () -> Void
 
     func makeUIView(context: Context) -> ComposerInput {
@@ -52,6 +53,14 @@ struct ComposerTextView: UIViewRepresentable {
             if wanted && !view.isFirstResponder { view.becomeFirstResponder() }
             if !wanted && view.isFirstResponder { view.resignFirstResponder() }
         }
+        if dismissals != context.coordinator.lastDismissals {
+            context.coordinator.lastDismissals = dismissals
+            // After this update: resigning inside it asks the hosting view to take first
+            // responder, which re-enters the graph update and never returns.
+            Task { @MainActor [weak view] in
+                if view?.isFirstResponder == true { view?.resignFirstResponder() }
+            }
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: ComposerInput, context: Context) -> CGSize? {
@@ -70,6 +79,7 @@ struct ComposerTextView: UIViewRepresentable {
         var reported = ""
         /// The last focus value seen from SwiftUI; UIKit's own editing never moves it.
         var lastFocus = false
+        var lastDismissals = 0
         init(_ parent: ComposerTextView) { self.parent = parent }
         func textViewDidChange(_ textView: UITextView) {
             reported = textView.text
