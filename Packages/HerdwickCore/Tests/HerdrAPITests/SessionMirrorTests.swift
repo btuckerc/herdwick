@@ -59,6 +59,7 @@ import Testing
 
 /// Answers `session.snapshot` after a short delay; `events.subscribe` acknowledges, then
 /// sends `backlog` events line by line while the first live snapshot is in flight, then ends.
+/// Requests arrive on a `BridgeLane`, which stays open; subscriptions on their own bridge.
 private final class ScriptedHost: CommandRunner {
     let backlog: Int
     let snapshots = Mutex(0)
@@ -66,21 +67,21 @@ private final class ScriptedHost: CommandRunner {
     init(backlog: Int) { self.backlog = backlog }
 
     func exec(_ command: String) async throws -> any ExecChannel {
-        ScriptedChannel(host: self)
+        ScriptedChannel(host: self, lane: command.contains("HERDWICK_REQUEST")).askingForEmbeddedRequest(command)
     }
 
-    fileprivate func respond(to request: [UInt8], output: AsyncThrowingStream<[UInt8], any Error>.Continuation) async {
-        struct Request: Decodable { var method: String }
-        guard let method = try? JSONDecoder().decode(Request.self, from: Data(request)).method else { return }
-        switch method {
+    fileprivate func respond(to line: [UInt8], lane: Bool, output: AsyncThrowingStream<[UInt8], any Error>.Continuation) async {
+        struct Request: Decodable { var id: String; var method: String }
+        guard let request = try? JSONDecoder().decode(Request.self, from: Data(line)) else { return }
+        switch request.method {
         case "session.snapshot":
             snapshots.withLock { $0 += 1 }
             try? await Task.sleep(for: .milliseconds(20))
-            output.yield(Array(#"{"id":"1","result":{"snapshot":{"version":"0","protocol":1,"workspaces":[],"tabs":[],"panes":[],"agents":[]}}}"#.utf8) + [0x0A])
-            output.finish()
+            output.yield(Array(#"{"id":"\#(request.id)","result":{"snapshot":{"version":"0","protocol":1,"workspaces":[],"tabs":[],"panes":[],"agents":[]}}}"#.utf8) + [0x0A])
+            if lane { output.yield(Array("\u{1E}0\n".utf8)) } else { output.finish() }
         case "events.subscribe":
             // Every scripted snapshot has no panes, so a pane subscription names one that is gone.
-            if String(decoding: request, as: UTF8.self).contains("pane_id") {
+            if String(decoding: line, as: UTF8.self).contains("pane_id") {
                 output.yield(Array(#"{"id":"events","error":{"code":"pane_not_found","message":"gone"}}"#.utf8) + [0x0A])
                 output.finish()
                 return
@@ -100,15 +101,25 @@ private final class ScriptedChannel: ExecChannel {
     let output: AsyncThrowingStream<[UInt8], any Error>
     private let continuation: AsyncThrowingStream<[UInt8], any Error>.Continuation
     private let host: ScriptedHost
+    private let lane: Bool
 
-    init(host: ScriptedHost) {
+    init(host: ScriptedHost, lane: Bool) {
         self.host = host
+        self.lane = lane
         (output, continuation) = AsyncThrowingStream.makeStream()
+    }
+
+    /// Like a host without perl: a request carried in the command line is asked for again.
+    func askingForEmbeddedRequest(_ command: String) -> Self {
+        if command.range(of: "herdwick_first=[0-9a-f]", options: .regularExpression) != nil {
+            continuation.yield(Array("\u{1E}r\n".utf8))
+        }
+        return self
     }
 
     func write(_ bytes: [UInt8]) async throws {
         let line = Array(bytes.prefix { $0 != 0x0A })
-        Task { [host, continuation] in await host.respond(to: line, output: continuation) }
+        Task { [host, lane, continuation] in await host.respond(to: line, lane: lane, output: continuation) }
     }
 
     func closeInput() async throws {}

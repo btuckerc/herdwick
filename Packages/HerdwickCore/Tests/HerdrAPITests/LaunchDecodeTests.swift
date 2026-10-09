@@ -3,6 +3,15 @@ import Testing
 @testable import HerdrAPI
 
 @Suite struct LaunchDecodeTests {
+    /// An agent started outside its shell's folder (herdr 0.9.1, live): `cwd` is the shell's.
+    @Test func agentWorksInItsForegroundFolder() throws {
+        let json = #"{"pane_id":"w6:p1","workspace_id":"w6","tab_id":"w6:t1","agent_status":"working","agent":"omp","focused":false,"cwd":"/home/tux/hearth","foreground_cwd":"/srv/workspaces/repos/s3-amoled"}"#
+        let agent = try JSONDecoder().decode(Agent.self, from: Data(json.utf8))
+        #expect(agent.workingDirectory == "/srv/workspaces/repos/s3-amoled")
+        let shellOnly = try JSONDecoder().decode(Agent.self, from: Data(json.replacingOccurrences(of: #","foreground_cwd":"/srv/workspaces/repos/s3-amoled""#, with: "").utf8))
+        #expect(shellOnly.workingDirectory == "/home/tux/hearth")
+    }
+
     @Test func worktreeCreationRetainsDestinationAndMetadata() throws {
         let bytes = Data(#"{"type": "worktree_created", "workspace": {"workspace_id": "w2", "number": 2, "label": "linked", "focused": false, "pane_count": 1, "tab_count": 1, "active_tab_id": "w2:t1", "agent_status": "unknown", "worktree": {"repo_key": "/tmp/herdwick-launch-bbjjmcwb/.git", "repo_name": "herdwick-launch-bbjjmcwb", "repo_root": "/tmp/herdwick-launch-bbjjmcwb", "checkout_path": "/tmp/herdwick-launch-bbjjmcwb/linked", "is_linked_worktree": true}}, "tab": {"tab_id": "w2:t1", "workspace_id": "w2", "number": 1, "label": "1", "focused": false, "pane_count": 1, "agent_status": "unknown"}, "root_pane": {"pane_id": "w2:p1", "terminal_id": "term_65c748a29cf062", "workspace_id": "w2", "tab_id": "w2:t1", "focused": false, "cwd": "/tmp/herdwick-launch-bbjjmcwb/linked", "foreground_cwd": "/tmp/herdwick-launch-bbjjmcwb/linked", "agent_status": "unknown", "scroll": {"offset_from_bottom": 0, "max_offset_from_bottom": 0, "viewport_rows": 40}, "revision": 0}, "worktree": {"path": "/tmp/herdwick-launch-bbjjmcwb/linked", "branch": "launch-test", "is_bare": false, "is_detached": false, "is_prunable": false, "is_linked_worktree": true, "open_workspace_id": "w2", "label": "herdwick-launch-bbjjmcwb"}}"#.utf8)
         let result = try JSONDecoder().decode(WorkspaceCreateResult.self, from: bytes)

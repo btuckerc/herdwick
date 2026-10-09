@@ -113,6 +113,10 @@ final class Settings {
     var inboxSort: InboxSort { didSet { if inboxSort != oldValue { defaults.set(inboxSort.rawValue, forKey: "inboxSort") } } }
     /// Fold idle, read agents into one "N Idle" row.
     var collapseIdle: Bool { didSet { if collapseIdle != oldValue { defaults.set(collapseIdle, forKey: "collapseIdle") } } }
+    /// The agent dock in conversations and agents' terminals.
+    var showsDock: Bool { didSet { if showsDock != oldValue { defaults.set(showsDock, forKey: "showsDock") } } }
+    /// The agent dock's order inside a conversation.
+    var dockOrder: DockOrder { didSet { if dockOrder != oldValue { defaults.set(dockOrder.rawValue, forKey: "dockOrder") } } }
     /// How much of a conversation shows; set in Settings or any conversation's More menu.
     var detailLevel: DetailLevel { didSet { if detailLevel != oldValue { defaults.set(detailLevel.rawValue, forKey: "detailLevel") } } }
     /// Alerts for agents that need you (with the badge) and for finished work.
@@ -129,6 +133,13 @@ final class Settings {
     var pushWhileAway: Bool { didSet { if pushWhileAway != oldValue { defaults.set(pushWhileAway, forKey: "pushWhileAway") } } }
     /// Text inserted into the composer from its + menu; never sent by itself.
     var snippets: [Snippet] { didSet { if snippets != oldValue { defaults.set(try? JSONEncoder().encode(snippets), forKey: "snippets") } } }
+    /// Dictation's dictionary: phrases speech recognition gets wrong, rewritten before they reach the draft.
+    var dictationReplacements: [WordReplacement] { didSet { if dictationReplacements != oldValue { defaults.set(try? JSONEncoder().encode(dictationReplacements), forKey: "dictationReplacements") } } }
+    /// Dictation's known terms, by line or comma: spelled as entered wherever they're heard.
+    var dictationTerms: String { didSet { if dictationTerms != oldValue { defaults.set(dictationTerms, forKey: "dictationTerms") } } }
+    var knownTerms: [String] { dictationTerms.split { $0 == "," || $0.isNewline }.map(String.init) }
+    /// The dictation card shows the words as they're heard; off, it shows only what it's doing.
+    var showsLiveTranscript: Bool { didSet { if showsLiveTranscript != oldValue { defaults.set(showsLiveTranscript, forKey: "showsLiveTranscript") } } }
     /// Named ways to start an agent: a kind plus literal extra arguments.
     var launchPresets: [LaunchPreset] { didSet { if launchPresets != oldValue { defaults.set(try? JSONEncoder().encode(launchPresets), forKey: "launchPresets") } } }
     /// A line of each conversation's newest message under its inbox row.
@@ -162,6 +173,8 @@ final class Settings {
         inboxGrouping = InboxGrouping(rawValue: defaults.string(forKey: "inboxGrouping") ?? "") ?? .none
         inboxSort = InboxSort(rawValue: defaults.string(forKey: "inboxSort") ?? "") ?? .recent
         collapseIdle = defaults.object(forKey: "collapseIdle") as? Bool ?? false
+        showsDock = defaults.object(forKey: "showsDock") as? Bool ?? true
+        dockOrder = DockOrder(rawValue: defaults.string(forKey: "dockOrder") ?? "") ?? .status
         // "full" was a third level, retired: it reads as Folded, and the key forgets it.
         if defaults.string(forKey: "detailLevel") == "full" { defaults.set(DetailLevel.folded.rawValue, forKey: "detailLevel") }
         detailLevel = DetailLevel(rawValue: defaults.string(forKey: "detailLevel") ?? "") ?? .folded
@@ -169,6 +182,9 @@ final class Settings {
         notifyFinished = defaults.object(forKey: "notifyFinished") as? Bool ?? false
         pushWhileAway = defaults.object(forKey: "pushWhileAway") as? Bool ?? false
         snippets = Self.decode([Snippet].self, "snippets") ?? []
+        dictationReplacements = Self.decode([WordReplacement].self, "dictationReplacements") ?? []
+        dictationTerms = defaults.string(forKey: "dictationTerms") ?? ""
+        showsLiveTranscript = defaults.object(forKey: "showsLiveTranscript") as? Bool ?? true
         launchPresets = Self.decode([LaunchPreset].self, "launchPresets") ?? []
         inboxPreviews = defaults.object(forKey: "inboxPreviews") as? Bool ?? true
         offlineTranscripts = defaults.object(forKey: "offlineTranscripts") as? Bool ?? false
@@ -213,12 +229,21 @@ enum InboxGrouping: String, CaseIterable, Identifiable {
     var label: String { switch self { case .none: "None"; case .host: "Host"; case .workspace: "Workspace"; case .status: "Status" } }
 }
 
-/// Order within a section. Recent: last message sent or received, newest first. Priority: "Needs You"
-/// pinned, then unread done, working, idle or read done, unknown; last message breaks ties.
+/// Order within a section, below "Needs You", which either way is pinned. Recent: last message
+/// sent or received, newest first. Priority: unread done, working, idle or read done, unknown;
+/// last message breaks ties.
 enum InboxSort: String, CaseIterable, Identifiable {
     case recent, priority
     var id: Self { self }
     var label: String { switch self { case .recent: "Recent"; case .priority: "Priority" } }
+}
+
+/// The agent dock's order. Status: what needs attention (needs you, then unread finishes, the
+/// longest waiting first), then working, then idle. Inbox: the Agents list's own sections and order.
+enum DockOrder: String, CaseIterable, Identifiable {
+    case status, inbox
+    var id: Self { self }
+    var label: String { switch self { case .status: "Attention, Working, Idle"; case .inbox: "Same as Inbox" } }
 }
 
 extension Color {

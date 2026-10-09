@@ -9,6 +9,11 @@ struct ComposerTextView: UIViewRepresentable {
     let autocorrect: Bool
     let returnKeySends: Bool
     var dismissals = 0
+    /// Dictation is under way: Return, ⌘Return and the Send action do nothing; Escape cancels it.
+    var sendsBlocked = false
+    var onDictate: () -> Void = {}
+    var onCancelDictation: () -> Void = {}
+    var handle: ComposerHandle?
     let onSend: () -> Void
 
     func makeUIView(context: Context) -> ComposerInput {
@@ -21,6 +26,7 @@ struct ComposerTextView: UIViewRepresentable {
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        handle?.input = view
         return view
     }
 
@@ -41,7 +47,11 @@ struct ComposerTextView: UIViewRepresentable {
             view.returnKeyType = key
             if view.isFirstResponder { view.reloadInputViews() }
         }
+        view.sendsBlocked = sendsBlocked
+        view.onDictate = onDictate
+        view.onCancelDictation = onCancelDictation
         view.onSend = onSend
+        handle?.input = view
         view.accessibilityLabel = placeholder
         view.basePlaceholder = placeholder
         view.placeholder.isHidden = !view.text.isEmpty
@@ -92,7 +102,7 @@ struct ComposerTextView: UIViewRepresentable {
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText replacement: String) -> Bool {
             guard parent.returnKeySends, replacement == "\n", textView.markedTextRange == nil,
                   (textView as? ComposerInput)?.insertingLiterally != true else { return true }
-            parent.onSend()
+            if !parent.sendsBlocked { parent.onSend() }
             return false
         }
     }
@@ -100,6 +110,9 @@ struct ComposerTextView: UIViewRepresentable {
 
 final class ComposerInput: UITextView {
     var onSend: (() -> Void)?
+    var onDictate: (() -> Void)?
+    var onCancelDictation: (() -> Void)?
+    var sendsBlocked = false
     var insertingLiterally = false
     let placeholder = UILabel()
     /// The caller's placeholder; a hardware keyboard adds the newline hint to it.
@@ -119,6 +132,7 @@ final class ComposerInput: UITextView {
             NotificationCenter.default.addObserver(self, selector: #selector(updatePlaceholder), name: name, object: nil)
         }
         accessibilityCustomActions = [UIAccessibilityCustomAction(name: "Send") { [weak self] _ in
+            guard self?.sendsBlocked == false else { return false }
             self?.onSend?()
             return true
         }]
@@ -136,20 +150,28 @@ final class ComposerInput: UITextView {
     override var keyCommands: [UIKeyCommand]? {
         let send = UIKeyCommand(title: "Send", action: #selector(sendCommand), input: "\r", modifierFlags: .command)
         let newline = UIKeyCommand(title: "New Line", action: #selector(newlineCommand), input: "\r", modifierFlags: .shift)
-        return (super.keyCommands ?? []) + [send, newline]
+        let dictate = UIKeyCommand(title: "Dictate", action: #selector(dictateCommand), input: "d", modifierFlags: [.command, .shift])
+        var commands = (super.keyCommands ?? []) + [send, newline, dictate]
+        // Only while dictating, so Escape keeps its usual meaning otherwise.
+        if sendsBlocked {
+            commands.append(UIKeyCommand(title: "Cancel Dictation", action: #selector(cancelDictationCommand), input: UIKeyCommand.inputEscape, modifierFlags: []))
+        }
+        return commands
     }
-    @objc private func sendCommand() { if markedTextRange == nil { onSend?() } }
+    @objc private func sendCommand() { if !sendsBlocked && markedTextRange == nil { onSend?() } }
     @objc private func newlineCommand() { insertLiteralNewline() }
+    @objc private func dictateCommand() { onDictate?() }
+    @objc private func cancelDictationCommand() { onCancelDictation?() }
 
     /// Hardware keyboard, whatever the on-screen key does: Return and ⌘Return send;
     /// ⇧Return and ⌥Return break the line.
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         guard let key = returnKey(presses) else { return super.pressesBegan(presses, with: event) }
         if key.modifierFlags.contains(.command) {
-            onSend?()
+            if !sendsBlocked { onSend?() }
         } else if !key.modifierFlags.isDisjoint(with: [.shift, .alternate]) {
             insertLiteralNewline()
-        } else {
+        } else if !sendsBlocked {
             onSend?()
         }
     }
@@ -168,6 +190,28 @@ final class ComposerInput: UITextView {
         return key
     }
 
+    /// Inserts at the selection as typing would (one undo step), spaced from the words around
+    /// it. A composition in progress (marked IME text) is committed first, so the words always
+    /// land now, before sending unlocks.
+    func insertDictation(_ text: String) {
+        guard !text.isEmpty else { return }
+        if markedTextRange != nil { unmarkText() }
+        guard let selection = selectedTextRange else { return }
+        var spaced = text
+        if character(from: selection.start, offset: -1).map({ !$0.isWhitespace }) == true { spaced = " " + spaced }
+        if character(from: selection.end, offset: 1).map({ !$0.isWhitespace && !$0.isPunctuation }) == true { spaced += " " }
+        insertingLiterally = true
+        insertText(spaced)
+        insertingLiterally = false
+    }
+
+    /// The character just before (-1) or after (1) a position, if any.
+    private func character(from position: UITextPosition, offset: Int) -> Character? {
+        guard let other = self.position(from: position, offset: offset),
+              let range = offset < 0 ? textRange(from: other, to: position) : textRange(from: position, to: other) else { return nil }
+        return self.text(in: range)?.first
+    }
+
     private func insertLiteralNewline() {
         insertingLiterally = true
         insertText("\n")
@@ -179,4 +223,10 @@ final class ComposerInput: UITextView {
         defer { insertingLiterally = false }
         super.paste(sender)
     }
+}
+
+/// The composer's field, for writing dictated text at its live selection rather than into
+/// a snapshot of the draft. Not observed: setting it never re-renders the composer.
+@MainActor final class ComposerHandle {
+    weak var input: ComposerInput?
 }

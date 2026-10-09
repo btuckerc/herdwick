@@ -3,9 +3,10 @@ import Foundation
 // A prompt an agent is showing in its terminal, read from `pane.read` visible text.
 //
 // Three shapes cover the agents herdr runs today, each checked against live captures:
-// - omp's `ask` box: `╭─ Ask ─╮`, a tab row (`fruits    Submit`) when there are several
-//   questions or checkboxes, radio U+F10C / box U+F096 / checked U+F14A, cursor U+F054,
-//   a "Review answers" page, and a `Custom answer:` box for "Other".
+// - omp's `ask` box: `╭─ Ask ─╮`, a tab row (`fruits    Submit`, wrapped over several lines
+//   in a narrow pane) when there are several questions or checkboxes, radio U+F10C / box
+//   U+F096 / checked U+F14A, cursor U+F054, a label too long for its row continued on the
+//   indented lines below it, a "Review answers" page, and a `Custom answer:` box for "Other".
 // - Claude Code's AskUserQuestion: a tab row (`←  ☐ Color  ☒ Toppings  ✔ Submit  →`, or
 //   just `☐ Pet`), numbered rows with `❯` on the cursor, `[ ]`/`[✔]` checkboxes and an
 //   unnumbered `Submit` row for multi-select, "Type something." for a custom answer, and a
@@ -125,10 +126,12 @@ extension ScreenPrompt {
 
         var header = lines[(top + 1)..<divider].map(boxed).filter { !$0.isEmpty }
         var tabs: [String] = []
-        if header.count >= 2, let first = header.first, first.hasSuffix("Submit") {
-            tabs = first.components(separatedBy: "  ").map { $0.trimmingCharacters(in: .whitespaces) }
+        // The tab row wraps onto as many lines as a narrow pane needs; only its last ends in "Submit".
+        if let last = header.dropLast().firstIndex(where: { $0 == "Submit" || $0.hasSuffix("  Submit") }) {
+            tabs = header[...last].flatMap { $0.components(separatedBy: "  ") }
+                .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty && $0 != "Submit" }
-            header.removeFirst()
+            header.removeFirst(last + 1)
         }
         let title = header.joined(separator: " ").normalizedSpace
         let body = lines[(divider + 1)..<end]

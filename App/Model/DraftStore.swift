@@ -2,8 +2,8 @@ import Foundation
 import HerdrAPI
 import UIKit
 
-/// Unsent composer text per conversation, kept across leaving the view and relaunches.
-/// Text only, in an atomic complete-protection file, dropped after two weeks.
+/// Composer drafts and unresolved send ledgers, across leaving the view and relaunches.
+/// Atomic complete-protection storage; only composer text expires after two weeks.
 /// A locked/unreadable file is never replaced with an empty store.
 @MainActor
 enum DraftStore {
@@ -18,15 +18,40 @@ enum DraftStore {
     private struct Entry: Codable, Sendable {
         var text: String
         var saved: Date
+        var pending: PendingLedger?
     }
 
     /// Prefers the agent's transcript session, which survives herdr reusing a pane id;
     /// otherwise the pane and agent name. Nil while the agent isn't known.
     static func id(host: SessionAddress, agent: Agent?) -> String? {
         guard let agent else { return nil }
-        let conversation = agent.agentSession.map { "session:\($0.agent):\($0.value)" }
-            ?? "pane:\(agent.paneID):\(agent.name ?? "")"
+        return id(host: host, ref: agent.agentSession, pane: agent.paneID, name: agent.name)
+    }
+
+    static func id(host: SessionAddress, ref: AgentSessionRef?, pane: String, name: String?) -> String {
+        let conversation = ref.map { "session:\($0.agent):\($0.value)" } ?? "pane:\(pane):\(name ?? "")"
         return [host.hostID.uuidString, host.session, conversation].joined(separator: "\u{1F}")
+    }
+
+    static func pending(_ id: String) -> PendingLedger { entries()?[id]?.pending ?? PendingLedger() }
+
+    static func savePending(_ pending: PendingLedger, for id: String) {
+        guard var all = entries() else { return }
+        var entry = all[id] ?? Entry(text: "", saved: .now)
+        entry.pending = pending.messages.isEmpty ? nil : pending
+        if entry.text.isEmpty, entry.pending == nil { all.removeValue(forKey: id) }
+        else { all[id] = entry }
+        persist(all)
+    }
+
+    static func movePending(from old: String, to new: String) {
+        let previous = pending(old)
+        guard !previous.messages.isEmpty else { return }
+        var next = pending(new)
+        next.messages = previous.messages + next.messages.filter { candidate in !previous.messages.contains { $0.id == candidate.id } }
+        next.matchedUserIDs.formUnion(previous.matchedUserIDs)
+        savePending(next, for: new)
+        savePending(PendingLedger(), for: old)
     }
 
     static func load(_ id: String) -> String? {
@@ -50,8 +75,9 @@ enum DraftStore {
         guard gainedSession else { return load(id) ?? "" }
         guard var all = entries() else { return current }
         let text = current.isEmpty ? all[id]?.text ?? "" : current
+        let pending = all[id]?.pending ?? all[previous]?.pending
         all.removeValue(forKey: previous)
-        if !text.isEmpty { all[id] = Entry(text: text, saved: .now) }
+        if !text.isEmpty || pending != nil { all[id] = Entry(text: text, saved: .now, pending: pending) }
         persist(all)
         return text
     }
@@ -66,9 +92,12 @@ enum DraftStore {
                              completion: (@Sendable (Bool) -> Void)?) -> Bool {
         guard var all = entries() else { return false }
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if all.removeValue(forKey: id) == nil, completion == nil { return true }
+            if var entry = all[id], entry.pending != nil {
+                entry.text = ""
+                all[id] = entry
+            } else if all.removeValue(forKey: id) == nil, completion == nil { return true }
         } else {
-            all[id] = Entry(text: text, saved: .now)
+            all[id] = Entry(text: text, saved: .now, pending: all[id]?.pending)
         }
         persist(all, completion: completion)
         return true
@@ -124,7 +153,7 @@ enum DraftStore {
                 try store(all)
                 UserDefaults.standard.removeObject(forKey: key)
             }
-            let live = all.filter { $0.value.saved.timeIntervalSinceNow > -lifetime }
+            let live = all.filter { $0.value.pending != nil || $0.value.saved.timeIntervalSinceNow > -lifetime }
             if live.count < all.count { try store(live) }
             cached = live
             return live

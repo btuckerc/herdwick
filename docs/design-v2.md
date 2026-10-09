@@ -12,7 +12,7 @@ One screen answers "who needs me, what do they want, answer it".
 | agent (pane with a detected agent) | a conversation |
 | workspace | caption on the conversation (label, branch) |
 | tab, pane, split, layout | hidden; shells (`unknown`) sit in a collapsed "Terminals" section |
-| `agent_status` | blocked → "Needs you" (pinned in Priority); a finish not yet read here → "Done" with an unread dot; working → typing dots; idle or a read finish → "Idle" |
+| `agent_status` | blocked → "Needs you" (pinned in Priority); a finish not yet read here → "Done" with an unread dot; working → "Working"; idle or a read finish → "Idle". Glyphs: filled silhouettes of a like weight, each its own shape: `exclamationmark.bubble.fill` (a question waiting), `checkmark.circle.fill`, `circle.dotted.circle.fill` (still, no spinner), `moon.zzz.fill`, `questionmark.circle.fill`; the Live Activity uses their outlines. Not a chat-bubble family: dots in a bubble read as the agent typing to you |
 
 Order (Recent, the default): one timeline by each conversation's last turn: the newest message
 the user sent (a prompt, or a steer mid-turn) or the moment the agent finished a turn, by the
@@ -40,7 +40,14 @@ grouping applies it too. Cross-host order assumes the hosts' clocks agree.
    Add Host, the host's herdr sessions, Edit host). Swipe it to move to the previous/next
    host (push transition); their names peek dimmed at the edges. In All Hosts the title reads
    "All Hosts · N hosts" and doesn't swipe. `.toolbarTitleMenu` was dropped because its label
-   flies away while the menu is open. Leading toolbar button: Search; trailing: Settings. Bottom bar: View
+   flies away while the menu is open. A host can be turned off without removing it (a laptop
+   that's shut, a machine only reachable at home): the Connect switch in its editor, or a swipe
+   in Settings › Hosts, where it then reads Off. An off host is never dialled, retried or woken by
+   a network change (`HostConnection.handle` drops every input). It drops out of All Hosts, the
+   title swipe, widgets and push, and stays in the Hosts sheet marked Off. Picking it there
+   shows "Is Off" with Turn On. Turning off the shown host moves the window to the first host
+   that's on; with none on, it stays and shows that state rather than onboarding.
+   Leading toolbar button: Search; trailing: Settings. Bottom bar: View
    options at the leading edge (one menu with titled View, Group and Sort sections; Group and
    Sort only for Agents) and "+" (New Agent) at the trailing edge. Row: status
    glyph, conversation title (terminal title minus the agent glyph prefix),
@@ -60,22 +67,66 @@ grouping applies it too. Cross-host order assumes the hosts' clocks agree.
    subtitle = status text in colour + workspace. While the host is (re)connecting, this and a
    subagent's thread also show the link status ("Reconnecting in 4s") as a small material badge
    mid-screen, faded in after 0.5 s so brief blips don't flash it. Toolbar: Terminal, then (spaced apart) a More
-   (`ellipsis`) menu with detail level, Find in Conversation, Retry Last Turn (omp Alt+R, only
-   after a turn ended in an error), Stop Run (omp, Claude and Codex, while working; confirmed,
-   sends Esc), Show Live Activity, the session's
-   model with Session Details (an alert: thinking level, tokens and estimated cost; omp's own
+   (`ellipsis`) menu: first a row of places side by side (a `ControlGroup`: Find, then Images and
+   Changes when there are any), so a slip lands on a visibly different neighbour, not the next
+   look-alike text line; then iconed, named submenus: View (Folded/Digest), Session (the
+   session's model with Session Details, Show Live Activity, "Why <status>?"), Mute
+   Notifications; then Retry Last Turn (omp Alt+R, only after a turn ended in an error) and Stop
+   Run (omp, Claude and Codex, while working; confirmed, sends Esc) last, each in a section of
+   its own; `.menuOrder(.fixed)`. Session Details is an alert: thinking level, tokens and estimated cost; omp's own
    estimate, Claude and Codex record none; with earlier messages unloaded, opening it first
    totals the whole file on the host in one `awk` pass (`HerdrClient.sessionUsage`: omp and
    Claude assistant usage, Claude once per API message id, Codex's latest cumulative
    `token_count`) and shows "Whole session", since an alert's text is fixed once shown; past
-   3 s or on failure, the loaded messages' totals with "Loaded messages only"), Mute Notifications (1 hour
-   or until unmuted; see Attention) and "Why <status>?" (herdr's `agent.explain`, read-only).
+   3 s or on failure, the loaded messages' totals with "Loaded messages only". Mute is 1 hour
+   or until unmuted (see Attention); "Why <status>?" is herdr's `agent.explain`, read-only.
    The menu is its own view compared by value and holds nothing that changes per reply: a
    visible menu that SwiftUI rebuilds jumps back to its top, and the conversation re-renders
    with every streamed record.
    Find searches the loaded messages only (its field says so), steps newest-first, shows Folded
    while a match is one Digest hides, and opens the run holding a match. While omp works the composer's + menu offers Send
    After This Run (typed into omp's editor, then Ctrl+Q queues it as a follow-up).
+   **Agent dock** (`AgentDock`): one 44 pt glass button, the composer's round-button size,
+   standing on the send button as the mic stands on +; a field taller than the pair carries
+   both up to its top corners. With a one-line field they flank the pinned Now or catch-up
+   line over the field, so a working agent adds no second row. On an agent's
+   terminal it stands on the composer's send button too, and ends the keys' row while typing
+   mode hides the composer. The bar reserves the slot
+   (`AgentDock.slot`, an anchor preference) and the dock's own layer over the thread draws the
+   button there, so the stack can open over everything and morph out of it. The stack is
+   capped by the room between the top bars and the button, so the keyboard never pushes it
+   under the header. Send stays its own
+   button: an agent can need the user mid-draft. It is about keeping agents busy, not
+   tracking them: its glyph and colour are the most urgent other thread's (orange Needs you,
+   green Done, else a neutral conversations glyph), a count of what wants the user (drawn
+   outside the glass container, which would composite over it), and no text. A
+   tap morphs it (`glassEffectID`, 200 ms ease-in-out; the glyph's replace runs at 2× to land
+   with it; a crossfade under
+   Reduce Motion) into a stack of the other threads in the inbox's scope, Hidden and Ended left
+   out. Settings › Agent Dock turns it off (the pinned line then sits over the field alone) and Dock
+   Order picks the order. The default, Attention, Working, Idle: Needs
+   attention (Needs you, then Done; within each the one waiting longest first by herdr's
+   session-wide `state_change_seq`), then Working, then Idle (each the latest turn first).
+   Same as Inbox uses the Agents list's grouping and sort under a leading Needs You. The first
+   row that wants the user is set apart (bigger title, two preview lines, a tinted plate) so
+   the next move reads at once.
+   Rows show status glyph, title and the newest line (or the workspace without previews; the
+   host under All Hosts). The order is frozen while the stack is open: status glyphs update in
+   place, ended rows drop out and new threads wait for the next opening. A tap replaces the open thread in place, without
+   animation on a phone (`scene.open`); a thread without a transcript opens its terminal.
+   Opening a thread is not a read; the usual read gate decides. The dock is disabled while a
+   send is in flight, since the composer and attachments belong to the thread they started
+   in; a send that fails afterwards restores its text to its own draft. Dismiss with the
+   button (it becomes Close), a tap outside, or the accessibility escape gesture. In a split
+   view the selected thread is the detail stack's root (swapped in place) rather than a pushed
+   view: pushing it blanked the column on every change of selection.
+   A hold on the closed button opens the **quick switch** instead: a native menu (`Menu` with a
+   primary action, so a tap still opens the stack) of only what wants a turn now. That means
+   Needs you and Done (the longest waiting first), then Working (the latest turn first), whatever
+   Dock Order says. Idle is left to the stack, and it reads "No active agents" when nothing is
+   active. `.menuOrder(.priority)` puts the most urgent row nearest the button, so it reads
+   upward. The menu is compared by value, so streamed records don't rebuild it while it's open.
+   A pick looks the thread up again, since it may have ended. There's no menu while the stack is open.
 3. **Terminal**: existing SwiftTerm surface pushed from the conversation or a shell row; observe
    by default, typing mode (takeover) opt-in. The fallback for anything we can't structure.
    Reading scrolls like a document without touching the host's pane: vertically into earlier
@@ -93,7 +144,7 @@ header, an accent glass-prominent Start control launches OMP, Claude or Codex in
 The kind is remembered per host profile (`lastAgentKind.<profileID>`) and also seeds
 New Agent. A foreground non-shell process triggers “Start in New Tab” /
 Cancel rather than typing into the busy program; the new tab uses the pane's workspace
-and cwd without focusing it, skips the busy check (its shell may still run startup helpers
+and the busy program's folder (`Pane.workingDirectory`) without focusing it, skips the busy check (its shell may still run startup helpers
 such as mise), and retries `agent_pane_busy` for up to 5 s until that shell is ready.
 If process inspection is unavailable, herdr still validates the start. A started agent's
 transcript doesn't exist until its first message, so a missing file reads as empty and the
@@ -103,15 +154,34 @@ and a leading Start swipe action; Machines uses the same empty-workspace wording
 
 Inbox options (Settings, persisted in `UserDefaults`): Agents or Machines (herdr's host ›
 workspace › tab › pane tree, with Close Tab/Close Workspace swipes); all hosts or the current
-one; grouping None/Host/Workspace/Status, with "Needs You" pinned first in Priority; sort Recent or
-Priority (blocked, unread done, working, idle, unknown); collapse idle. Rows swipe leading to
-Mark as Read/Unread (full swipe) and Hide/Unhide (local), trailing to Close (confirmed); the
-context menu has New Agent Here.
+one; grouping None/Host/Workspace/Status; "Needs You" pinned first in either sort, by the held
+rank while browsing, so a thread doesn't jump into or out of it under the reader; sort Recent or
+Priority (unread done, working, idle, unknown); collapse idle ("3 Idle", a summary row at the
+end of its group's card; a separate idle section reads as a different group). Idle, Terminals,
+Hidden and Ended open from a summary row inside their card (`FoldRow`): the rows come and go at
+once and only its chevron turns (150 ms ease-out: it moves on the frame the rows land; an ease-in start lagged them). An animated insert can't look right in an
+inset-grouped list: UIKit reshapes a kept row's corners only after the insert, so the summary
+stayed rounded over the arriving rows (black notches); a fresh summary row per state crossfades
+two half-transparent rows (a dark flash); and a custom row background is clipped to the row's
+corners too. Not `.grouped` with hand-drawn card corners: every card would need it, for one
+transition; nor rows opening above the summary, which then slides down past them. Rows swipe leading to
+Mark as Read/Unread (full swipe) and Hide/Unhide (local), trailing to Close. Close is a plain
+red action, not `.destructive` (a list slides a destructive row out at once, then back while the
+prompt is open). It asks in a popover anchored to the row (`ClosePrompt`), not a
+`confirmationDialog`: a dialog runs its action only after its dismissal animation, about 0.5 s
+after the tap. Confirming takes the thread off every list at once (`HostConnection.closing`,
+200 ms ease-in-out) while herdr ends it, until a snapshot no longer has the pane; a refusal puts
+it back with an alert. The context menu has
+Rename… and New Agent Here. Rename sets the pane's name in herdr (`pane.rename`, its manual
+label), so herdr and every device show it; it wins over the agent's name, terminal title and
+the transcript's title, and an empty name goes back to them. herdr announces no event for a
+rename, so `renamePane` nudges the session's mirrors (`MirrorRegistry`) into a fresh snapshot.
 
 New Agent (`NewAgentSheet`) is "+" → Start: workspace and agent kind are preselected. The
 workspace is the one last started in on that host and
 session (id and label must still match; herdr reuses ids after a restart), else herdr's focused
-workspace, else the first; with none, the home folder. Changing it lists every workspace in
+workspace, else the first; with none, the home folder, resolved to a path before the workspace
+is made (herdr puts a workspace without one beside its focused workspace). Changing it lists every workspace in
 view (All Hosts groups them by host and session) and Choose Folder…, a one-level remote folder
 browser (`HerdrClient.folders`, NUL-framed, dot folders hidden, repositories marked with a
 one-tap Use) that opens next to the selected workspace's folder; a typed path is a fallback in
@@ -119,7 +189,11 @@ its menu. An existing workspace gets a new tab in its folder (its worktree check
 first tab's), passed explicitly: left to herdr, the tab starts wherever the workspace's focused
 process is, so an agent that changed directory drags new tabs along. A folder that exactly
 one workspace's panes report reuses that workspace, any other folder gets a new workspace
-(labelled by herdr with the folder name). The terminal button beside Start opens a plain shell
+(labelled by herdr with the folder name). A workspace's folder is its first pane's shell
+directory (`cwd`, what herdr names it after); an agent's own folder is the process in front of
+its shell (`foreground_cwd`, `Agent.workingDirectory`), which differs when the agent was started
+elsewhere. Relative links and images, resume, row and alert captions use the agent's folder; a
+resumed agent's tab opens in it. The terminal button beside Start opens a plain shell
 in the same place instead. Created panes skip the busy check and wait out startup files; a
 failed start keeps its pane for the next attempt. `agent.start` answers before the agent runs,
 so the start then waits (up to 10 s) until the mirror shows the agent, so its conversation never
@@ -150,7 +224,7 @@ confirmed (`integration.install`); the terminal works without it; restart the ag
 
 The composer attaches files and images, uploaded to the host and cleaned up after the chosen
 retention (1 hour/day/week, default a day). Its + menu inserts saved snippets (Settings ›
-Messages › Snippets) into the draft; a snippet is never sent by itself. The on-screen Return adds a line unless "On-screen
+Composer › Snippets) into the draft; a snippet is never sent by itself. The on-screen Return adds a line unless "On-screen
 Return Sends" is on; on a hardware keyboard Return and ⌘↩ send, ⇧↩ or ⌥↩ adds a line.
 Conversation detail is Folded (default) or Digest: one saved preference, set in Settings
 or any conversation's More menu (Find may show Folded until its Done). A third level, Full (every
@@ -167,11 +241,63 @@ relaunching. A new thread shows one quiet line, "Send a
 message to get started.", only once its transcript is live and empty and nothing is being
 sent.
 
+Dictation is the mic over the + button, in both composers, mirroring the dock over Send (a tall field carries both to its top corners; the card's stem reaches down to the mic) so the
+field keeps the bar's width: the system keyboard's own mic depends on which keyboard is up, and
+a dictation keyboard (Wispr Flow) means switching keyboards. Speech is recognized on the device
+by SpeechAnalyzer: SpeechTranscriber, or DictationTranscriber where the first isn't offered or the
+user has known terms (only it takes hints: the known terms, then the folder, agent and recent file
+names, via `AnalysisContext.contextualStrings`); the first use in a language downloads the
+system's model. Tap to listen (the tap also puts the keyboard away, to leave room for an ask; tap
+the field to bring it back; ⌘⇧D leaves it up). The keyboard is resigned a turn after the tap, not
+inside its action: a UIKit text view resigned inside a SwiftUI action sends the bottom inset to
+the screen's edge and springs it back (seen on iOS 27). The mic grows (0.28 s critically damped spring,
+no bounce)
+into one piece of glass shaped like an L (`DictationShape`), taking its room in the layout as it
+grows so the thread moves with it, and shrinks back into the mic on Stop or × (0.24 s; Reduce
+Motion swaps them outright). Its stem is Stop, standing where the mic was, and
+its top runs across the whole bar, hugging the words up to about four lines (then it scrolls,
+held at the newest) beside the × that discards them. It says what it's doing until the first
+words, then shows the settled words and, dimmed, the model's open guess, which never reaches the
+draft; the words are the sign it hears you, so nothing pulses. Settings › Dictation › Show Live Transcript
+off keeps it to one status line ("Listening…", then "Hearing you…" once words are recognized),
+for when an agent's question card and a growing draft already crowd the bottom. Stop puts the
+words in at the cursor as one undoable insert; stopping before any words ends quietly, with
+nothing inserted and no error. (Liquid Glass's own morph, `glassEffectID` with
+`.matchedGeometry`, only faded a card in at full width here, and a 300 ms grow-from-the-mic scale
+felt sluggish; the words' height changes aren't animated.) The mic stays left and the dock right
+although trailing voice is the commoner convention (ChatGPT, Claude, WhatsApp): mic and + gather
+the draft, dock and Send act on agents, and a missed mic tap can't send. Nothing sends until the words are in (Stop
+never sends), and a call, a route change or leaving the app stops it and keeps what was heard.
+Auto-lock is held off while words keep coming (`isIdleTimerDisabled`) and handed back after 30 s
+without new words, so a forgotten session can't keep the phone awake; the lock then stops it and
+keeps the words. It doesn't record in the background, as Voice Memos does: that would need the
+audio background mode and a session that outlives the screen.
+⌘⇧D starts and stops it; Escape cancels. A lost connection locks the field, + and Send, but not
+Stop or ×. The pinned Now line takes a button's height, so it sits on the mic's and the dock's
+center line.
+
+Settings › Dictation › Dictionary has replacements and known terms, applied in that order to the
+words in the card (settled and guessed) and at Stop, never to typed text. Recognizers hear an
+unfamiliar word as familiar ones ("poster SQL", "item potent"), so the dictionary works twice, as
+superwhisper's and VoiceInk's do: known terms bias the recognizer (above), then the words are
+rewritten. Replacements rewrite phrases the speech model keeps getting wrong ("poster SQL" →
+PostgreSQL): whole words or phrases, ignoring case, apostrophe style and how the words are joined
+(spaced, run together, hyphen or comma), longest match first, written exactly as entered, never
+chained; they see the words as heard, so they go first. Known terms (`KnownTerms`, a comma or line
+list like the Dictation app's custom words) are spelled as entered wherever a run of words, not
+broken by punctuation, spells them once case, spacing and punctuation are set aside ("git hub",
+"R and D"), a plural or possessive keeping its "s". A term of eight letters or more also takes a
+run a few letters off (edit distance 1 from 8 letters, 2 from 10, 3 from 14, same first letter;
+"poster SQL" → PostgreSQL, "a board controller" → AbortController); shorter terms match only
+exactly, because the Dictation app's Levenshtein-plus-Soundex fallback, applied to every length,
+would turn "shift" into a Swift term, "clause" into Claude, "a" into AI.
+
 One line over the composer says what's happening, in the card slot (asks, permission prompts
-and Needs You take it first). It is bare, a `QuietHeader` in the transcript's own column, in
-the bottom inset (`safeAreaInset`; a `safeAreaBar` would blur the scroll edge but stops the
-transcript's text being selectable on iOS 26, so the inset brings its own 16 pt fade of the
-background above it): no chip of its own. While the agent or any
+and Needs You take it first). It is bare, quiet text that hugs its words with the chevron right
+after them (not a run line's chevron out at the column's edge, which would hang short of the
+agent dock beside it), in the bottom inset (`safeAreaInset`; a `safeAreaBar` would blur
+the scroll edge but stops the transcript's text being selectable on iOS 26, so the inset
+brings its own 16 pt fade of the background above it): no chip of its own. While the agent or any
 of its subagents works, it's the Now line: the newest running call ("Waiting on npm run
 bench", "Running npm test +1"), then "BenchCouncil working" or "3 subagents working" and
 "1 in background", or just "Working…"; derived only from the transcript's running calls,
@@ -264,7 +390,15 @@ lines of at most 2 MB, Markdown rendered, shareable).
 Settings say only what a label can't: detail levels are checkmark Toggles in a menu (a Picker's
 tag spreads over a two-Text row), and Keep Uploads and Alerts While
 Away each a one-line footer (when uploads are swept; what never leaves the computer), plus
-Alerts While Away's How It Works page.
+Alerts While Away's How It Works page. Hosts list each name above its address.
+
+Settings choices are menus (`SettingsMenuRow`), not menu-style Pickers: iOS 26 morphs a closing
+menu back into its source in window space, so scrolling while it closed left the value floating
+where the row had been and the row blank. The menu's label is identity glass (draws nothing) in
+its own `GlassEffectContainer`, which keeps the value in the row; only the menu's platter fades
+where it was. The menu sprouts from its label's frame, so the label is the trailing value alone
+(a full-row label opened the menu centred over the title); like a menu Picker, the title doesn't
+open it. Appearance stays segmented.
 
 Liquid Glass only on: system toolbars (automatic), the composer container, the key bar, ask
 option buttons. Never glass inside a toolbar item or inside another glass container. Status is
@@ -274,12 +408,11 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
 ## Conversation source of truth
 - herdr's snapshot gives `agents[].agent_session = {source, agent, kind, value}`. omp reports
   `kind:"path"` (`~/.omp/agent/sessions/<slug>/<ts>_<id>.jsonl`); Claude Code and Codex report
-  `kind:"id"`, and `HerdrClient.locateTranscript` finds the file with one exec: the agent's
-  own `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (from `/proc/<foreground pid>/environ` on Linux), then
-  the shell's, then `~/.claude` / `~/.codex`; `projects/*/<id>.jsonl` or
+  `kind:"id"`, and `HerdrClient.locateTranscripts` finds every such agent's file with one exec:
+  each agent's own `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (from `/proc/<foreground pid>/environ` on
+  Linux), then the shell's, then `~/.claude` / `~/.codex`; `projects/*/<id>.jsonl` or
   `sessions/*/*/*/rollout-*-<id>.jsonl`. The app retries 4× (2/4/6 s): a fresh session's file
-  can appear after herdr reports the id. Several agents' files are located concurrently (at
-  most four at a time). A conversation keeps its loaded transcript through reconnects and
+  can appear after herdr reports the id. A conversation keeps its loaded transcript through reconnects and
   while the agent's reference is missing, and starts over only when a different agent
   session appears in the pane. Subagent and ended transcripts resume following after a
   reconnect.
@@ -292,15 +425,35 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
     `custom_tool_call` and outputs ("Process exited with code N" → exit code, text after
     "Output:"); harness user messages (`<environment_context>` …) hidden; `event_msg` errors
     → notices.
-- `ConversationFeed` (app) over `HerdrClient.readFileTail`/`followFile` (HerdwickCore): only the
-  open conversation is read. One exec reads the file size and the first 4 KiB (line 1 is a
-  padded `title` record rewritten in place, so the title comes from there); then one channel
-  runs `tail -c +<offset> -F <path> & …; cat >/dev/null; kill` from the last 256 KiB (partial
-  first line dropped). The remote `tail` dies when the channel closes, because the shell is
-  waiting on stdin. "Show Earlier Messages" reloads with 4× the window. A dropped channel
+- `ConversationFeed` (app) over `HerdrClient.followFile` (HerdwickCore): only the open
+  conversation is read, over one exec channel so opening costs a single round of channel
+  setup. The host measures the file and sends `<size> <start>` plus its first 4 KiB in base64
+  (line 1 is a padded `title` record rewritten in place, so the title comes from there), then
+  `exec tail -c +<start+1> -F <path>` from the last 256 KiB (partial first line dropped). The
+  remote `tail` dies when the channel closes, because the shell is waiting on stdin. Claude
+  Code and Codex paths come from the inbox's preview reads when it has found them, so opening
+  skips the host lookup. "Show Earlier Messages" reloads with 4× the window. A dropped channel
   (backgrounding closes the transport) keeps the painted conversation; the view follows again
   on the same transport after 2 s or when the reconnect bumps `liveID`. Only a first read that
   never painted shows "Couldn't read this agent's transcript".
+- Opening is instant: `ConversationRegistry` (owned by `AppModel`, handed to each
+  `HostConnection`) keeps a `ConversationState` (feed, location, pending sends) per
+  conversation, so the view reads app-owned data instead of starting from nothing. The inbox's
+  activity reads already fetch each agent's transcript tail and then its new bytes; for the
+  eight most recent conversations per host (last turn, or last opened here) those same bytes
+  are parsed off-main into a `WarmConversation` with its byte offset. Opening paints that at
+  once and `followFile(resumeOffset:)` continues from the offset (the host falls back to the
+  window when the offset is past the file's end, e.g. a truncated file). The spinner shows only
+  when nothing is renderable. A warm conversation is not yet caught up (`isCaughtUp`): read
+  state and pending settlement wait for the follow to reach the end, and the pinned catch-up
+  line waits for a live read. An unopened conversation that grows past twice the window is
+  replaced by a fresh tail. At most eight inactive parsed conversations per host are kept
+  (warm targets first), a memory warning drops them (the next activity read warms them
+  again), and a conversation with pending sends is never evicted. With offline transcripts on,
+  a follow resumes only onto a saved copy that ends at the same offset; otherwise it reads the
+  window again behind the warm paint, so the copy stays contiguous. Two windows showing one
+  conversation share one follow. A file truncated and regrown past the offset isn't detected
+  (transcripts are append-only).
 - `TranscriptReader` → `TranscriptEntry` → `Conversation` (HerdwickCore `Transcript.swift`;
   omp shapes below):
   - `message/user` → user bubble; `message/assistant` `text` → agent text (Markdown blocks:
@@ -338,15 +491,21 @@ text/glyphs, never a glass capsule. Remove glass from `StatusBadge`, `Connection
   blocked agent drops the dot, never the orange. Agents first seen start read. We never call
   `agent.focus`/tab focus: that would move the user's desk.
 - A sent message shows as the user's bubble from the tap, not once the agent writes it down
-  (seconds, and a new thread has no transcript until then). It leaves when a later user
-  message in the transcript holds its text (whitespace aside; attachments add paths), or when
-  a turn ends without a match; a failed send takes it back to the composer.
+  (seconds, and a new thread has no transcript until then). Pending sends live in the
+  conversation's `ConversationState` and are saved with its draft (`DraftStore`), so they
+  survive leaving the conversation and relaunching; they are never resent. Each records the
+  conversation's last stable item when sent (any kind, so a window of only tool output still
+  has one), and leaves when a user message after it in the transcript holds its text
+  (whitespace aside; attachments add paths); each transcript record settles one
+  pending send, so two identical sends need two records. A failed send takes it back to the
+  composer; a long press offers "Remove Pending Message".
 - Sending while an omp agent works queues the message as steering: it shows dimmed under the
   conversation, "Queued · Tap to Edit", until the transcript records it. Tapping the newest
   sends omp's Alt+Up (restore the last queued message to its editor), checks omp's editor on
   screen (`OmpEditor`), clears it with Ctrl+C (which leaves the turn running) and puts the
   text back in the composer. If omp took the message first, its editor stays empty and
-  nothing is cleared.
+  nothing is cleared. If the editor holds a different message (one queued at the desk since),
+  it is left there and nothing is cleared.
 
 ## Attention: alerts, badge, widgets
 From the councils of 2026-09-25 (`Attention`, `Push`):
@@ -371,7 +530,7 @@ From the councils of 2026-09-25 (`Attention`, `Push`):
   snapshot. Widgets say when
   what they show is old or a host was offline and never claim "all clear" then.
   `herdwick://open?host=&session=&pane=` deep-links alerts and widgets.
-- Alerts while away (opt-in, Settings › Alerts While Away, with a How It Works page). As the
+- Alerts while away (opt-in, Settings › Notifications › Alerts While Away, with a How It Works page). As the
   app backgrounds it arms a watcher on each live link over the SSH it already holds
   (`PushWatch`, inside a background task) and disarms it when the link next comes up in the
   foreground, including after the app was closed. The watcher is a POSIX `sh` script written
@@ -453,12 +612,18 @@ Answer driver (closed loop, `PromptDriver` in HerdwickCore `AskDriver.swift`, in
 1. `pane.read {source:"visible", format:"text"}` → locate option rows by label (strip
    " (Recommended)") and the cursor row (starts with U+F054).
    Every read must match the question text and the call's option labels, or nothing is sent.
+   omp renders both as markdown, so the comparison drops emphasis and code markers, link
+   targets, entities and all whitespace on both sides (`PromptDriver.comparable`).
    Rows are logical (options, then "Other", then Claude's `Submit`): a pane smaller than the
    box (herdr's default 80×24) cuts the question with "…", scrolls the options with a `█`/`│`
-   scrollbar column and may wrap a label, so the visible rows must be a consecutive run of the
-   call's rows, matched by label prefix (Claude by row number). Before this, every multi-question
-   ask in such a pane failed to "Answer in the terminal". Verified 2026-09-27 at 82×24 against
-   omp: three questions with multi-select, the last option of a scrolled list, and "Other".
+   scrollbar column and wraps a long label onto indented lines (matched with them), so the
+   visible rows must be a consecutive run of the call's rows, matched by label prefix (Claude by
+   row number). A narrow pane also wraps omp's tab row: every header line up to the one ending
+   in `Submit` is tabs. Before these, a multi-question ask in such a pane failed to "Answer in
+   the terminal" ("a different prompt"). Verified 2026-09-27 at 82×24 against omp: three
+   questions with multi-select, the last option of a scrolled list, and "Other"; 2026-10-02 at
+   48 columns against omp 18.4.4: six questions with a three-line tab row, a three-line label,
+   markdown in questions, and multi-select, every answer recorded as chosen.
 2. One `up`/`down` per `pane.send_keys`, re-reading after each; the cursor must land on the next
    logical row (the list may scroll under it) or the driver stops before `enter`.
 3. `enter`.
@@ -517,7 +682,7 @@ omp 18.3.1 (fixtures `omp-approval*.txt`, `omp-plan-review.txt`).
   iPhone's key" runs `AuthorizedKeyInstall` (strictly
   validated key line, refuses a symlinked `authorized_keys`, modes 700/600, idempotent) over
   that connection, re-dials with the key against the same host key, pins it, saves the host as
-  device-key auth and drops the password. "Keep using password" stores it in the Keychain.
+  device-key auth and drops the password. "Keep Using Password" stores it in the Keychain.
   The password field is cleared once `KeySetup` has it, so iOS doesn't offer to save it.
   Verified 2026-09-25 (simulator → asyncssh server on the tailnet): password sign-in, key
   installed into `authorized_keys`, then publickey logins only; fingerprint matched.

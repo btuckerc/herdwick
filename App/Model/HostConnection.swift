@@ -2,6 +2,7 @@ import Foundation
 import HerdrAPI
 import HerdrDemo
 import HerdwickSSH
+import os
 import TailscaleKit
 
 /// The live link to one host. It feeds scene, network and transport events into
@@ -19,6 +20,8 @@ final class HostConnection {
     private(set) var client: HerdrClient?
     /// Set when the host presented a key that differs from the pinned one.
     private(set) var rejectedHostKey: SSHHostKey?
+    /// Panes a close was sent for, kept out of every list until a snapshot drops them.
+    private(set) var closing: Set<String> = []
     var hidden: [String: Int] = [:] {
         didSet {
             UserDefaults.standard.set(hidden, forKey: hiddenKey)
@@ -28,6 +31,7 @@ final class HostConnection {
     /// Pane id → subagents last seen working in that agent's conversation. Feeds only run
     /// while a conversation is open, so this is last-known; the inbox gates it on the agent working.
     var workingSubagents: [String: Int] = [:]
+    let conversations: ConversationRegistry
     /// Called when a snapshot arrives or something is read, for alerts, the badge and widgets.
     var onAttentionChange: ((HostConnection) -> Void)?
     /// Called each time a fresh transport goes live.
@@ -77,6 +81,8 @@ final class HostConnection {
     private var attempt: Task<Void, Never>?
     private var verification: Task<Void, Never>?
     private var retry: Task<Void, Never>?
+    /// Ends an attempt that has no live snapshot within `connectBudget`.
+    private var deadline: Task<Void, Never>?
     private var generation = 0
     /// A snapshot was on screen when this attempt began, so it is a reconnect.
     private var resuming = false
@@ -86,16 +92,35 @@ final class HostConnection {
     var includesAllSessions = false
     private let onSessions: ((HostConnection) -> Void)?
 
-    init(profile: HostProfile, tailnet: Tailnet, demo: DemoHost? = nil, onSessions: ((HostConnection) -> Void)? = nil) {
+    init(profile: HostProfile, tailnet: Tailnet, conversations: ConversationRegistry, demo: DemoHost? = nil, onSessions: ((HostConnection) -> Void)? = nil) {
         self.profile = profile
         self.tailnet = tailnet
+        self.conversations = conversations
         self.demo = demo
         self.onSessions = onSessions
         supervisor = ConnectionSupervisor(migratesAcrossRoutes: profile.isTailnet)
+        restore()
+    }
+
+    /// Paints the last authoritative snapshot of the likely session before any network: the
+    /// inbox shows at launch, dimmed until live, and the first connect subscribes to its panes
+    /// alongside the preview. `connect` replaces it, or drops it if another session is chosen.
+    private func restore() {
+        guard demo == nil, profile.isEnabled, let session = profile.session ?? Self.lastSession(profile),
+              let copy = SnapshotStore.load(hostID: profile.id, session: session) else { return }
+        activeSession = session
+        sessions = copy.sessions
+        snapshot = copy.snapshot
+        hidden = UserDefaults.standard.dictionary(forKey: hiddenKey) as? [String: Int] ?? [:]
+        loadRead()
+        loadActivity()
     }
 
     /// Usable: live, or live and being checked after its route moved.
     var isLive: Bool { phase == .live || phase == .resuming }
+
+    /// The live link, if any, rides the in-app tailnet.
+    var ridesTailnet: Bool { isLive && supervisor.migratesAcrossRoutes }
 
     var identity: SessionAddress {
         SessionAddress(hostID: profile.id, session: activeSession ?? profile.session ?? "")
@@ -105,16 +130,20 @@ final class HostConnection {
         PaneAddress(hostID: profile.id, session: activeSession ?? profile.session ?? "", paneID: paneID)
     }
 
-    /// Reuse the live transport for discovery; retry a disconnected host.
-    func refreshSessions() async {
+    /// Reuse the live transport for discovery; retry a disconnected host. `explicit`: the user
+    /// asked, so an attempt still under way starts over too (the automatic refresh on every
+    /// foreground leaves it be). A live link that doesn't answer within `checkBound` is taken
+    /// as dead and redialled: its transport can stall silently, and the 60 s keepalive and
+    /// channel deadlines are far too long to hold a pull to refresh.
+    func refreshSessions(explicit: Bool = false) async {
         guard let client else {
-            if case .connecting = phase { return }
+            if case .connecting = phase, !explicit { return }
             handle(.userRetry)
             return
         }
         let generation = generation
         do {
-            let sessions = try await client.sessions()
+            let sessions = try await withTimeout(Self.checkBound) { try await client.sessions() }
             guard generation == self.generation, !Task.isCancelled else { return }
             self.sessions = sessions
             onSessions?(self)
@@ -123,6 +152,7 @@ final class HostConnection {
             }
         } catch {
             guard generation == self.generation, !Task.isCancelled else { return }
+            ConnectTrace.note("refresh check failed (\(ConnectTrace.kind(of: error)))")
             handle(.dropped(failure(for: error)))
         }
     }
@@ -154,6 +184,11 @@ final class HostConnection {
         case .connecting(let attempt): attempt > 1
         case .idle, .suspended, .resuming, .live: false
         }
+    }
+
+    /// Stopped on a failure only the user can fix; the inbox shows its `FailureCard`.
+    var isFailed: Bool {
+        if case .failed = phase { true } else { false }
     }
 
     // MARK: Read state
@@ -204,6 +239,32 @@ final class HostConnection {
 
     func unhide(_ agent: Agent) {
         hidden.removeValue(forKey: agent.paneID)
+    }
+
+    /// Ends an agent and its terminal. Its thread leaves every list as this is called (inside
+    /// the caller's animation) rather than when herdr's next snapshot drops it, and comes back
+    /// if herdr refuses; the task carries herdr's answer.
+    @discardableResult
+    func close(paneID: String) -> Task<Void, Error> {
+        closing.insert(paneID)
+        let client = client, session = activeSession
+        return Task {
+            do {
+                guard let client, let session else { throw HerdrError.noResponse }
+                try await client.closePane(paneID, session: session)
+            } catch {
+                closing.remove(paneID)
+                throw error
+            }
+        }
+    }
+
+    /// Names an agent's thread in herdr, so every client and herdr itself show it; blank goes
+    /// back to the agent's own title. The name arrives with herdr's next pane update.
+    func rename(paneID: String, to name: String) async throws {
+        guard let client, let session = activeSession else { throw HerdrError.noResponse }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await client.renamePane(paneID, label: name.isEmpty ? nil : name, session: session)
     }
 
     private func reconcileHidden(_ snapshot: Snapshot) {
@@ -272,13 +333,19 @@ final class HostConnection {
         guard let client, let session = activeSession, let agents = snapshot?.agents else { return }
         let generation = generation
         let current = activity
+        let host = identity
+        let inputs = conversations.warmInputs(host: host, agents: agents,
+                                              lastTurn: current.compactMapValues { $0.transcript?.lastTurnAt })
         activityRead = Task { [weak self] in
-            let updated = await Self.readActivity(current, agents: agents, client: client, session: session)
+            let (updated, warm) = await Self.readActivity(current, agents: agents, client: client, session: session, warm: inputs.mapValues(\.state))
             guard let self else { return }
             self.activityRead = nil
             if generation == self.generation, session == self.activeSession, updated != self.activity {
                 self.activity = updated
                 UserDefaults.standard.set(try? JSONEncoder().encode(updated), forKey: self.activityKey)
+            }
+            if generation == self.generation, session == self.activeSession {
+                self.conversations.publish(warm, revisions: inputs.mapValues(\.revision), host: host, agents: agents)
             }
             if self.activityPending {
                 self.activityPending = false
@@ -289,33 +356,26 @@ final class HostConnection {
 
     /// A failed read keeps what was known; the snapshot is authoritative for which panes remain.
     nonisolated private static func readActivity(_ current: [String: PaneActivity], agents: [Agent],
-                                                 client: HerdrClient, session: String) async -> [String: PaneActivity] {
+                                                 client: HerdrClient, session: String,
+                                                 warm: [String: WarmConversation?]) async -> ([String: PaneActivity], [String: WarmConversation?]) {
         var next: [String: PaneActivity] = [:]
+        var warmed = warm
         var missing: [(String, AgentSessionRef)] = []
         for agent in agents {
             guard let ref = agent.agentSession, TranscriptFormat(agent: ref.agent) != nil else { continue }
             let entry = current[agent.paneID].flatMap { $0.ref == ref ? $0 : nil } ?? PaneActivity(ref: ref)
             next[agent.paneID] = entry
+            if case .some(.none) = warm[agent.paneID], let transcript = entry.transcript {
+                next[agent.paneID]?.transcript = TranscriptActivity(path: transcript.path, format: transcript.format)
+            }
             if entry.transcript == nil { missing.append((agent.paneID, ref)) }
         }
-        await withTaskGroup(of: (String, AgentSessionRef, TranscriptLocation?).self) { group in
-            var remaining = missing.makeIterator()
-            func enqueue(_ candidate: (String, AgentSessionRef)) {
-                group.addTask {
-                    guard !Task.isCancelled else { return (candidate.0, candidate.1, nil) }
-                    let location = try? await client.locateTranscript(candidate.1, pane: candidate.0, session: session)
-                    return (candidate.0, candidate.1, location)
-                }
-            }
-            for _ in 0..<4 {
-                if let candidate = remaining.next() { enqueue(candidate) }
-            }
-            for await (pane, ref, location) in group {
-                guard !Task.isCancelled else { group.cancelAll(); break }
-                if let location, next[pane]?.ref == ref {
+        if !missing.isEmpty, !Task.isCancelled,
+           let located = try? await client.locateTranscripts(missing.map { (pane: $0.0, ref: $0.1) }, session: session) {
+            for (pane, ref) in missing {
+                if let location = located[pane], next[pane]?.ref == ref {
                     next[pane]?.transcript = TranscriptActivity(path: location.path, format: location.format)
                 }
-                if let candidate = remaining.next() { enqueue(candidate) }
             }
         }
         var panes = Set(next.keys)
@@ -323,12 +383,19 @@ final class HostConnection {
             let reads = next.filter { panes.contains($0.key) }.compactMapValues { entry in entry.transcript.map { ($0.path, $0.nextRead) } }
             guard !Task.isCancelled, !reads.isEmpty, let chunks = try? await client.readChunks(reads) else { break }
             for (pane, chunk) in chunks {
+                if let transcript = next[pane]?.transcript, !transcript.isLookingBack, warmed.keys.contains(pane) {
+                    let initial = transcript.offset == nil
+                    var data = warmed[pane] ?? nil
+                    if initial { data = WarmConversation(location: TranscriptLocation(path: transcript.path, format: transcript.format)) }
+                    if var data, data.absorb(chunk, initial: initial) { warmed[pane] = .some(data) }
+                    else { warmed[pane] = .some(nil) }
+                }
                 next[pane]?.transcript?.absorb(size: chunk.size, from: chunk.from, bytes: chunk.bytes)
             }
             panes = panes.filter { next[$0]?.transcript?.needsMore == true }
             if panes.isEmpty { break }
         }
-        return next
+        return (next, warmed)
     }
 
     /// Messages can arrive without any status change, so a live link also looks on a timer.
@@ -346,6 +413,9 @@ final class HostConnection {
     // MARK: Inputs
 
     func handle(_ input: ConnectionSupervisor.Input, notifyAttention: Bool = true) {
+        // A host turned off is never dialled, retried or woken by a network change; its link
+        // only stands in for it on screen.
+        guard profile.isEnabled else { return }
         let wasLive = isLive
         let effects = supervisor.handle(input)
         phase = supervisor.phase
@@ -390,7 +460,7 @@ final class HostConnection {
     /// Returns why it didn't start.
     func startHerdr() async -> String? {
         do {
-            let ssh = try await dial(profile)
+            let (ssh, _) = try await dial(profile)
             do {
                 try await HerdrClient(runner: ssh, herdrPath: Self.cachedHerdrPath(profile)).startServer(session: profile.session)
                 await ssh.close()
@@ -428,7 +498,7 @@ final class HostConnection {
         var target = paneID
         if inNewTab {
             guard let pane = snapshot?.panes.first(where: { $0.id == paneID }) else { throw HerdrError.noResponse }
-            target = try await client.createTab(workspaceID: pane.workspaceID, label: nil, cwd: pane.cwd, session: session).rootPane.id
+            target = try await client.createTab(workspaceID: pane.workspaceID, label: nil, cwd: pane.workingDirectory, session: session).rootPane.id
         }
         let fresh = inNewTab || freshPane
         // A fresh tab can't be busy with user work, but its shell may still be running startup
@@ -506,12 +576,27 @@ final class HostConnection {
 
     // MARK: Effects
 
+    /// The most an attempt may take to its first live snapshot. Each step has its own bound, but
+    /// together they ran to minutes (a host command gets ten), all of it showing "Reconnecting…".
+    private static let connectBudget: Duration = .seconds(45)
+    /// The most one round trip on a link that claims to be live may take (a route check, a
+    /// refresh) before the link is taken as dead.
+    private static let checkBound: Duration = .seconds(10)
+
     private func connect() {
         resuming = snapshot != nil
         teardown()
         let generation = generation
         let profile = profile
         let demo = demo
+        let trace = ConnectTrace(phase: phase, resuming: resuming)
+        deadline = Task { [weak self] in
+            try? await Task.sleep(for: Self.connectBudget)
+            guard let self, !Task.isCancelled, generation == self.generation, case .connecting = self.phase else { return }
+            trace.fail("no live snapshot in time", kind: "deadline")
+            // Retried like any failed attempt; the teardown this brings cancels the attempt.
+            self.handle(.connectFailed(self.failure(for: TimeoutError())))
+        }
         attempt = Task { [weak self] in
             guard let self else { return }
             var wentLive = false
@@ -520,17 +605,21 @@ final class HostConnection {
                 if let demo {
                     runner = demo
                 } else {
-                    let ssh = try await self.dial(profile)
+                    let (ssh, viaTailnet) = try await self.dial(profile, trace: trace)
+                    trace.mark("ssh")
                     guard generation == self.generation else {
                         await ssh.close()
                         return
                     }
                     self.ssh = ssh
+                    // Checked or replaced on a route change by the route this link took.
+                    self.supervisor.migratesAcrossRoutes = viaTailnet
                     runner = ssh
                 }
                 let client = HerdrClient(runner: runner, herdrPath: demo == nil ? Self.cachedHerdrPath(profile) : nil)
                 let herdrPath = try await client.resolveHerdrPath()
                 if demo == nil { Self.cache(herdrPath: herdrPath, for: profile) }
+                trace.mark("herdr")
                 guard generation == self.generation else { return }
                 // Subscribe to the likely session while listing sessions; the list decides
                 // whether that mirror is kept. Dropping an unused stream closes its bridge.
@@ -539,6 +628,7 @@ final class HostConnection {
                 let sessions = try await client.sessions()
                 guard generation == self.generation else { return }
                 self.sessions = sessions
+                trace.mark("sessions")
                 let wanted = self.includesAllSessions && !sessions.contains(where: { $0.running && $0.name == profile.session })
                     ? nil : profile.session
                 guard sessions.contains(where: \.running) else {
@@ -561,12 +651,18 @@ final class HostConnection {
 
                 let snapshots = (session == guess ? speculative : nil) ?? client.mirror(session: session, panes: self.knownPanes(in: session))
                 speculative = nil
+                var previewed = false
                 for try await update in snapshots {
                     guard generation == self.generation else { return }
                     let firstLive: Bool
-                    if case .live = update { firstLive = !wentLive } else { firstLive = false }
+                    if case .live = update { firstLive = !wentLive } else {
+                        firstLive = false
+                        if !previewed { previewed = true; trace.mark("preview") }
+                    }
                     if firstLive {
                         wentLive = true
+                        self.deadline?.cancel()
+                        trace.mark("live")
                         self.client = client
                         self.liveID += 1
                         self.handle(.connected, notifyAttention: false)
@@ -575,16 +671,25 @@ final class HostConnection {
                     if firstLive {
                         self.onLive?(self)
                         self.startActivityTimer()
-                        self.refreshActivity()
-                        Task { await self.checkIntegrations() }
-                        if demo == nil { Task { await self.sampleClock(runner) } }
+                        // `apply` has already started the activity read. Integrations and the
+                        // clock are only warnings: they wait until the first screen has settled.
+                        Task { [weak self] in
+                            try? await Task.sleep(for: .seconds(2))
+                            guard let self, generation == self.generation else { return }
+                            if demo == nil { await self.sampleClock(runner) }
+                            await self.checkIntegrations()
+                        }
                     }
                 }
                 guard generation == self.generation, !Task.isCancelled else { return }
+                trace.fail("Connection closed", kind: wentLive ? "dropped: stream ended" : "stream ended")
                 self.handle(wentLive ? .dropped(ConnectionFailure("Connection closed", retryable: true)) : .connectFailed(ConnectionFailure("Connection closed", retryable: true)))
             } catch {
                 guard generation == self.generation, !Task.isCancelled else { return }
+                // 127: the shell found no binary at the cached path; the retry resolves it anew.
+                if demo == nil, case CommandError.exited(127, _) = error { Self.forgetHerdrPath(profile) }
                 let failure = self.failure(for: error)
+                trace.fail(failure.message, kind: (wentLive ? "dropped: " : "") + ConnectTrace.kind(of: error))
                 self.handle(wentLive ? .dropped(failure) : .connectFailed(failure))
             }
         }
@@ -602,12 +707,13 @@ final class HostConnection {
         verification?.cancel()
         verification = Task { [weak self] in
             do {
-                let snapshot = try await withTimeout(.seconds(10)) { try await client.snapshot(session: session) }
+                let snapshot = try await withTimeout(Self.checkBound) { try await client.snapshot(session: session) }
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
                 self.apply(snapshot, authoritative: true)
                 self.handle(.connected)
             } catch {
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
+                ConnectTrace.note("route check failed (\(ConnectTrace.kind(of: error)))")
                 self.handle(.dropped(self.failure(for: error)))
             }
         }
@@ -626,10 +732,13 @@ final class HostConnection {
                 snapshot.agents.contains { $0.paneID == pane && $0.agentSession == value.ref }
             }.compactMapValues { $0.transcript?.path }
             EndedAgents.shared.observe(snapshot, hostID: profile.id, session: session, paths: paths)
+            SnapshotStore.save(.init(hostID: profile.id, session: session, sessions: sessions, snapshot: snapshot))
         }
         self.snapshot = snapshot
         recordBaseline(snapshot)
         reconcileHidden(snapshot)
+        // A close holds its pane out until a snapshot no longer has it.
+        closing.formIntersection(snapshot.panes.map(\.id))
         onAttentionChange?(self)
         // A status change usually comes with a message; look now rather than at the next tick.
         refreshActivity()
@@ -639,6 +748,8 @@ final class HostConnection {
         generation += 1
         attempt?.cancel()
         attempt = nil
+        deadline?.cancel()
+        deadline = nil
         verification?.cancel()
         verification = nil
         activityTimer?.cancel()
@@ -651,12 +762,41 @@ final class HostConnection {
         }
     }
 
-    private func dial(_ profile: HostProfile) async throws -> SSHConnection {
+    /// Off Wi-Fi and wired networks a LAN address can't answer, so it isn't dialled. Set by
+    /// `AppModel` from the network path.
+    static var onLocalNetwork = true
+
+    /// The SSH link, and whether it rides the in-app tailnet. With a LAN address and a pinned
+    /// host key, the LAN address is dialled alongside the route and the first to finish SSH
+    /// sign-in wins: away from that network the route connects as fast as it would alone.
+    private func dial(_ profile: HostProfile, trace: ConnectTrace? = nil) async throws -> (ssh: SSHConnection, tailnet: Bool) {
         let authentication: SSHAuthentication = switch profile.auth {
         case .deviceKey: .ed25519(try DeviceKey.load(hostID: profile.id))
         case .password: .password(Keychain.string(for: profile.passwordAccount) ?? "")
         case .tailscaleSSH: .none
         }
+        // Only against a key already pinned: a LAN address on someone else's network may
+        // belong to another machine, which must neither be trusted nor fail the host.
+        guard let lan = profile.lanRoute, Self.onLocalNetwork, let pinned = Keychain.string(for: profile.hostKeyAccount) else {
+            return (try await dialRoute(profile, authentication: authentication, trace: trace), profile.isTailnet)
+        }
+        let username = profile.username
+        let candidates: [@Sendable () async throws -> SSHConnection] = [
+            { try await self.dialRoute(profile, authentication: authentication, trace: trace) },
+            {
+                try await SSHConnection.connect(
+                    host: lan.host, port: lan.port, username: username, authentication: authentication,
+                    hostKeyValidator: { Self.keyIdentity($0.publicKey) == Self.keyIdentity(pinned) },
+                    timeout: .seconds(3)
+                )
+            },
+        ]
+        let won = try await firstSuccess(candidates) { await $0.close() }
+        trace?.mark(won.index == 0 ? "route won" : "lan won")
+        return (won.value, won.index == 0 && profile.isTailnet)
+    }
+
+    private func dialRoute(_ profile: HostProfile, authentication: SSHAuthentication, trace: ConnectTrace?) async throws -> SSHConnection {
         switch profile.route {
         case .direct(let host, let port):
             return try await SSHConnection.connect(
@@ -664,11 +804,8 @@ final class HostConnection {
                 authentication: authentication, hostKeyValidator: validator(for: profile, tailnetKeys: [])
             )
         case .tailnet(let nodeID, _, let address):
-            let handle = try await tailnet.readyHandle()
-            let peer = tailnet.peer(id: nodeID)
-            let fd = try await withTimeout(.seconds(15)) { [tailnet] in
-                try await tailnet.dial(address: peer?.address ?? address, port: 22, handle: handle)
-            }
+            let (fd, peer) = try await tailnet.connect(to: nodeID, address: address, port: 22)
+            trace?.mark("tailnet socket")
             return try await SSHConnection.connect(
                 adoptingConnectedSocket: fd, username: profile.username,
                 authentication: authentication,
@@ -753,12 +890,20 @@ final class HostConnection {
         throw SessionError.none
     }
 
+    /// The resolved herdr binary. "herdr-path" held whatever `command -v` said, often a
+    /// version manager's shim; it's dropped so those hosts resolve the real binary once.
     private static func cachedHerdrPath(_ profile: HostProfile) -> String? {
-        UserDefaults.standard.string(forKey: "herdr-path.\(profile.id.uuidString)")
+        UserDefaults.standard.removeObject(forKey: "herdr-path.\(profile.id.uuidString)")
+        return UserDefaults.standard.string(forKey: "herdr-exec.\(profile.id.uuidString)")
     }
 
     private static func cache(herdrPath: String, for profile: HostProfile) {
-        UserDefaults.standard.set(herdrPath, forKey: "herdr-path.\(profile.id.uuidString)")
+        UserDefaults.standard.set(herdrPath, forKey: "herdr-exec.\(profile.id.uuidString)")
+    }
+
+    /// A resolved binary disappears when its version manager upgrades or prunes it.
+    private static func forgetHerdrPath(_ profile: HostProfile) {
+        UserDefaults.standard.removeObject(forKey: "herdr-exec.\(profile.id.uuidString)")
     }
 
     /// The session last opened on this host; only a guess to subscribe early, never a choice.
@@ -771,19 +916,53 @@ final class HostConnection {
     }
 }
 
-/// Runs `operation`, giving up after `limit`.
-func withTimeout<T: Sendable>(_ limit: Duration, _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask(operation: operation)
-        group.addTask {
-            try await Task.sleep(for: limit)
-            throw TimeoutError()
-        }
-        defer { group.cancelAll() }
-        return try await group.next()!
-    }
-}
+/// Stage times of one connect attempt, logged for Console.app (subsystem dev.btuckerc.herdwick,
+/// category connect) so a device's slow connect can be read off by stage.
+struct ConnectTrace: Sendable {
+    private static let log = Logger(subsystem: "dev.btuckerc.herdwick", category: "connect")
+    private let id = String(UInt16.random(in: 0...UInt16.max), radix: 16)
+    private let start = ContinuousClock.now
 
-struct TimeoutError: LocalizedError {
-    var errorDescription: String? { "The host didn't answer in time." }
+    init(phase: ConnectionSupervisor.Phase, resuming: Bool) {
+        let attempt = if case .connecting(let n) = phase { n } else { 0 }
+        let tag = self.id
+        Self.log.notice("\(tag, privacy: .public) start attempt=\(attempt) resuming=\(resuming)")
+    }
+
+    func mark(_ stage: String) {
+        Self.log.notice("\(id, privacy: .public) \(stage, privacy: .public) +\(elapsed) ms")
+    }
+
+    /// An app-wide event on the same timeline (foreground, tailnet recovery).
+    static func note(_ event: String) {
+        log.notice("\(event, privacy: .public)")
+    }
+
+    /// The message may name the host, so it stays private; `kind` says what failed in the clear.
+    func fail(_ message: String, kind: String) {
+        Self.log.notice("\(id, privacy: .public) failed +\(elapsed) ms (\(kind, privacy: .public)): \(message, privacy: .private)")
+    }
+
+    /// What failed, without anything that names the host.
+    static func kind(of error: any Error) -> String {
+        switch error {
+        case let error as TailnetError:
+            switch error {
+            case .notRunning: "tailnet not running"
+            case .signedOut: "tailnet signed out"
+            case .dialFailed: "tailnet dial"
+            }
+        case is TimeoutError: "timeout"
+        case is SSHError: "ssh"
+        case is CommandError: "command"
+        case is HerdrError: "herdr"
+        case is HostConnection.SessionError: "session"
+        default: String(describing: type(of: error))
+        }
+    }
+
+    private var elapsed: Int {
+        let duration = ContinuousClock.now - start
+        return Int(duration.components.seconds * 1000 + duration.components.attoseconds / 1_000_000_000_000_000)
+    }
 }

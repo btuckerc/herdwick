@@ -12,9 +12,16 @@ struct SessionView: View {
     let connection: HostConnection
 
     @State private var sheet: Sheet?
+    // Folded parts of the inbox, each opened from a `FoldRow` inside its card.
     @State private var showsTerminals = false
+    @State private var showsHidden = false
+    @State private var showsEnded = false
+    /// Sections whose idle agents are shown.
+    @State private var openIdle: Set<String> = []
     @State private var closing: Thread?
-    @State private var closeError: String?
+    @State private var renaming: Thread?
+    @State private var newName = ""
+    @State private var failure: Failure?
     /// Ranks the inbox holds while the user scrolls or reads below the top, so rows don't move
     /// under them; nil while it follows live activity.
     @State private var heldRanks: [PaneAddress: InboxRank]?
@@ -97,19 +104,25 @@ struct SessionView: View {
                 settleOrder()
                 for link in links { link.refreshActivity() }
             }
-            .confirmationDialog("Close \(closing?.agent.conversationTitle ?? "agent")?", isPresented: .init(
-                get: { closing != nil }, set: { if !$0 { closing = nil } }
-            ), titleVisibility: .visible, presenting: closing) { thread in
-                Button("Close", role: .destructive) { Task { await close(thread) } }
-                Button("Cancel", role: .cancel) { closing = nil }
+            .alert("Rename Agent", isPresented: .init(
+                get: { renaming != nil }, set: { if !$0 { renaming = nil } }
+            ), presenting: renaming) { thread in
+                TextField("Name", text: $newName)
+                Button("Cancel", role: .cancel) { renaming = nil }
+                Button("Rename") { rename(thread) }
             } message: { _ in
-                Text("This ends the agent and its terminal.")
+                Text("Shown here and in herdr. Leave it empty for the agent's own title.")
             }
-            .alert("Could Not Close Agent", isPresented: .init(
-                get: { closeError != nil }, set: { if !$0 { closeError = nil } }
-            )) { Button("OK", role: .cancel) { closeError = nil } } message: {
-                Text(closeError ?? "")
+            .alert(failure?.title ?? "", isPresented: .init(
+                get: { failure != nil }, set: { if !$0 { failure = nil } }
+            ), presenting: failure) { _ in Button("OK", role: .cancel) { failure = nil } } message: {
+                Text($0.message)
             }
+    }
+
+    struct Failure {
+        let title: String
+        let message: String
     }
 
     @ViewBuilder private func sheetContent(_ sheet: Sheet) -> some View {
@@ -183,14 +196,17 @@ struct SessionView: View {
     }
 
     private var allHosts: Bool { settings.allHosts && model.demo == nil }
+    /// The shown host is off; under All Hosts, every host is.
+    private var hostOff: Bool {
+        allHosts ? !model.profiles.contains(where: \.isEnabled) : !connection.profile.isEnabled
+    }
     private var links: [HostConnection] { allHosts ? model.connections : [connection] }
     private var threads: [Thread] {
-        let scoped = (allHosts ? model.threads : model.threads.filter { $0.connection === connection })
-            .filter { !scene.needsYouOnly || $0.agent.agentStatus == .blocked }
+        let scoped = model.inboxThreads(in: scene)
         let query = query.trimmingCharacters(in: .whitespaces)
         guard !query.isEmpty else { return scoped }
         return scoped.filter { thread in
-            [thread.agent.conversationTitle, thread.workspace?.label, thread.agent.cwd, thread.connection.profile.name,
+            [thread.agent.conversationTitle, thread.workspace?.label, thread.agent.workingDirectory, thread.connection.profile.name,
              settings.inboxPreviews ? thread.connection.preview(thread.agent) : nil]
                 .contains { $0?.localizedStandardContains(query) == true }
         }
@@ -221,11 +237,14 @@ struct SessionView: View {
     private static func order(_ result: (needsYou: [Thread], sections: [InboxSection], hidden: [Thread])) -> [PaneAddress] {
         (result.needsYou + result.sections.flatMap { $0.threads + $0.idle } + result.hidden).map(\.address)
     }
-    private var canSwitchHosts: Bool { !allHosts && model.profiles.count >= 2 }
-    private var hostIndex: Int? { model.profiles.firstIndex { $0.id == connection.profile.id } }
+    /// The title swipes through the hosts that are on (and the one shown, even if it's off).
+    private var ring: [HostProfile] { model.profiles.filter { $0.isEnabled || $0.id == connection.profile.id } }
+    private var canSwitchHosts: Bool { !allHosts && ring.count >= 2 }
     private func neighbor(_ offset: Int) -> HostProfile? {
-        guard canSwitchHosts, let index = hostIndex, model.profiles.indices.contains(index + offset) else { return nil }
-        return model.profiles[index + offset]
+        let ring = ring
+        guard canSwitchHosts, let index = ring.firstIndex(where: { $0.id == connection.profile.id }),
+              ring.indices.contains(index + offset) else { return nil }
+        return ring[index + offset]
     }
 
     /// Next host enters from the trailing edge, previous from the leading edge.
@@ -236,24 +255,50 @@ struct SessionView: View {
         hostSelection += 1
     }
 
-    private func close(_ thread: Thread) async {
-        do {
-            guard let client = thread.connection.client else { throw HerdrError.noResponse }
-            try await client.closePane(thread.address.paneID, session: thread.address.session)
-        } catch { closeError = error.localizedDescription }
+    /// Off the list at once, the rows below closing the gap, while herdr ends it; back with an
+    /// alert if herdr refuses.
+    private func close(_ thread: Thread) {
         closing = nil
+        let request = withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+            thread.connection.close(paneID: thread.agent.paneID)
+        }
+        Task {
+            if case .failure(let error) = await request.result {
+                failure = Failure(title: "Could Not Close Agent", message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func rename(_ thread: Thread) {
+        renaming = nil
+        let name = newName
+        Task {
+            do { try await thread.connection.rename(paneID: thread.agent.paneID, to: name) } catch {
+                failure = Failure(title: "Could Not Rename Agent", message: error.localizedDescription)
+            }
+        }
     }
 
     @ViewBuilder
     private var content: some View {
-        if settings.inboxView == .machines {
+        if hostOff {
+            ContentUnavailableView {
+                Label("\(connection.profile.name) Is Off", systemImage: "powersleep")
+            } description: {
+                Text("Herdwick won't connect to it until you turn it on.")
+            } actions: {
+                Button("Turn On") { model.setEnabled(true, for: connection.profile.id) }
+                    .buttonStyle(.glassProminent)
+            }
+        } else if settings.inboxView == .machines {
             MachinesView()
         } else if !allHosts, case .failed(let failure) = connection.phase, connection.snapshot == nil {
             ScrollView {
                 sharedButton
                 FailureCard(connection: connection, failure: failure) { sheet = .editHost(connection.profile) }
+                    .padding()
             }
-            .refreshable { await model.refresh() }
+            .refreshable { await model.refresh(explicit: true) }
         } else if allHosts || connection.snapshot != nil {
             inboxList
         } else {
@@ -288,6 +333,7 @@ struct SessionView: View {
                     if case .failed(let failure) = link.phase {
                         Section {
                             FailureCard(connection: link, failure: failure) { sheet = .editHost(link.profile) }
+                                .listRowInsets(EdgeInsets())
                                 .listRowBackground(Color.clear)
                         } header: {
                             if allHosts { Text("\(link.profile.name) · \(link.activeSession ?? "Sessions")") }
@@ -305,13 +351,14 @@ struct SessionView: View {
                         .badge(SharedInbox.shared.packages.count)
                     }
                 }
+                // Only the stale rows dim: the failure card above is the way out and stays at full strength.
                 inbox(shown)
+                    .opacity(allHosts || connection.isLive ? 1 : 0.6)
             }
             .listStyle(.insetGrouped)
             .safeAreaInset(edge: .top) { if scene.searchPresented { searchBar } }
             .onChange(of: scene.searchPresented, initial: true) { _, shown in searchFocused = shown }
-            .refreshable { await model.refresh() }
-            .opacity(allHosts || connection.isLive ? 1 : 0.6)
+            .refreshable { await model.refresh(explicit: true) }
             // No list-wide animation: live status and order changes would slide every row at once.
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 // Strict: a few points down, the list keeps visible rows fixed and inserts above them unseen.
@@ -380,11 +427,12 @@ struct SessionView: View {
                 Section(section.title) {
                     rows(section.threads)
                     if !section.idle.isEmpty {
-                        DisclosureGroup {
-                            rows(section.idle)
-                        } label: {
-                            Label("\(section.idle.count) Idle", systemImage: "moon.zzz")
-                        }
+                        FoldRow(title: "\(section.idle.count) Idle", systemImage: AgentStatus.idle.symbol, open: Binding {
+                            openIdle.contains(section.id)
+                        } set: { open in
+                            if open { openIdle.insert(section.id) } else { openIdle.remove(section.id) }
+                        })
+                        if openIdle.contains(section.id) { rows(section.idle) }
                     }
                 }
             }
@@ -402,7 +450,8 @@ struct SessionView: View {
                         Button("New Agent", systemImage: "plus") { sheet = .newAgent(nil, workspace: nil) }
                             .labelStyle(.titleAndIcon)
                     }
-                } else if links.allSatisfy(\.isDown) {
+                } else if links.allSatisfy(\.isDown), !links.allSatisfy(\.isFailed) {
+                    // A failed host already shows its card with the fix; this would repeat it.
                     ContentUnavailableView {
                         Label("No hosts connected", systemImage: "network.slash")
                     } description: {
@@ -420,9 +469,8 @@ struct SessionView: View {
             }
             if !result.hidden.isEmpty {
                 Section {
-                    DisclosureGroup("Hidden (\(result.hidden.count))") {
-                        rows(result.hidden, hidden: true)
-                    }
+                    FoldRow(title: "Hidden (\(result.hidden.count))", open: $showsHidden)
+                    if showsHidden { rows(result.hidden, hidden: true) }
                 }
             }
             let ended = EndedAgents.shared.entries.filter { item in
@@ -430,7 +478,8 @@ struct SessionView: View {
             }
             if !ended.isEmpty {
                 Section {
-                    DisclosureGroup("Ended (\(ended.count))") {
+                    FoldRow(title: "Ended (\(ended.count))", open: $showsEnded)
+                    if showsEnded {
                         ForEach(ended) { item in
                             Button { sheet = .ended(item) } label: {
                                 VStack(alignment: .leading) {
@@ -482,12 +531,28 @@ struct SessionView: View {
                 }
             }
             .contextMenu {
+                Button("Rename…", systemImage: "pencil") {
+                    newName = thread.agent.conversationTitle
+                    renaming = thread
+                }
                 Button("New Agent Here", systemImage: "plus") {
                     sheet = .newAgent(thread.connection, workspace: thread.agent.workspaceID)
                 }
             }
+            // Not `.destructive`: a list takes that as the row already gone and slides it out,
+            // then back when the confirmation is still open.
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                Button("Close", systemImage: "trash", role: .destructive) { closing = thread }
+                Button("Close", systemImage: "trash") { closing = thread }
+                    .tint(.red)
+            }
+            // On the row, so it points at what it closes. A popover rather than a confirmation
+            // dialog: a dialog runs its button only once its dismissal has played (~0.5 s), and
+            // this takes the row out as Close is tapped.
+            .popover(isPresented: .init(
+                get: { closing?.address == thread.address }, set: { if !$0 { closing = nil } }
+            ), arrowEdge: .bottom) {
+                ClosePrompt(title: thread.agent.conversationTitle) { close(thread) }
+                    .presentationCompactAdaptation(.popover)
             }
         }
     }
@@ -496,7 +561,9 @@ struct SessionView: View {
     private func terminals(_ panes: [Pane], _ link: HostConnection) -> some View {
         if !panes.isEmpty {
             Section {
-                DisclosureGroup(isExpanded: $showsTerminals) {
+                FoldRow(title: panes.count == 1 ? "1 Terminal" : "\(panes.count) Terminals", systemImage: "apple.terminal",
+                        open: $showsTerminals)
+                if showsTerminals {
                     ForEach(Array(Set(panes.map(\.workspaceID))).sorted(), id: \.self) { workspaceID in
                         let workspace = link.snapshot?.workspaces.first { $0.id == workspaceID }
                         let noAgent = !(link.snapshot?.agents.contains { $0.workspaceID == workspaceID } ?? false)
@@ -523,9 +590,6 @@ struct SessionView: View {
                             }
                         }
                     }
-                } label: {
-                    Label(panes.count == 1 ? "1 Terminal" : "\(panes.count) Terminals", systemImage: "apple.terminal")
-                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -535,11 +599,10 @@ struct SessionView: View {
         scene.navigationPath.append(agent.hasTranscript ? .conversation(address) : .terminal(address))
     }
 
-
     // MARK: Chrome
 
     private var subtitle: String {
-        if allHosts { return "\(model.profiles.count) hosts" }
+        if allHosts { return model.enabledHostsLabel }
         if let link = connection.statusText { return link }
         guard let session = connection.activeSession, connection.sessions.filter(\.running).count > 1 else {
             return connection.profile.address
@@ -599,13 +662,14 @@ private struct HostList: View {
         NavigationStack {
             List {
                 if model.demo == nil, model.profiles.count > 1 {
-                    row("All Hosts", detail: "\(model.profiles.count) hosts", selected: allHosts) {
+                    row("All Hosts", detail: model.enabledHostsLabel, selected: allHosts) {
                         settings.allHosts = true
                     }
                 }
                 Section("Hosts") {
                     ForEach(model.profiles) { profile in
-                        row(profile.name, detail: profile.address, selected: !allHosts && profile.id == connection.profile.id) {
+                        row(profile.name, detail: profile.isEnabled ? profile.address : "Off",
+                            selected: !allHosts && profile.id == connection.profile.id) {
                             settings.allHosts = false
                             model.select(profile.id, in: scene)
                         }
@@ -675,6 +739,37 @@ enum Route: Hashable {
     }
 }
 
+/// A folded group's summary row, the rows it opens following it in the same card. They come
+/// and go at once; only the chevron turns. An animated insert keeps this row's rounded corners
+/// over the arriving rows until it ends (black notches), and a fresh row per state crossfades
+/// two rows (a dark flash); iOS clips a custom row background to those corners too.
+private struct FoldRow: View {
+    let title: String
+    var systemImage: String?
+    @Binding var open: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button { open.toggle() } label: {
+            HStack {
+                if let systemImage { Label(title, systemImage: systemImage) } else { Text(title) }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    // Quick and out of the gate, as the rows it opens arrive at once: an ease-in
+                    // start sat still for ~80 ms after they had landed, which read as lag.
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: open)
+            }
+            .foregroundStyle(.secondary)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(open ? "Expanded" : "Collapsed")
+    }
+}
+
 struct AgentRow: View {
     let agent: Agent
     /// What the row shows, which may differ from the host's state: see `HostConnection.presentedStatus`.
@@ -715,7 +810,7 @@ struct AgentRow: View {
 
     /// Status, then where it runs: "Working · 2 subagents · herdwick".
     private var caption: String {
-        let place = workspace ?? agent.cwd.map { ($0 as NSString).lastPathComponent }
+        let place = workspace ?? agent.workingDirectory.map { ($0 as NSString).lastPathComponent }
         let helpers = status == .working && subagents > 0 ? (subagents == 1 ? "1 subagent" : "\(subagents) subagents") : nil
         return [status.label, helpers, place, host].compactMap { $0 }.joined(separator: " · ")
     }
@@ -728,9 +823,36 @@ struct TerminalRow: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(pane.label ?? pane.terminalTitle ?? pane.id)
                 .lineLimit(1)
-            if let cwd = pane.cwd {
+            if let cwd = pane.workingDirectory {
                 Text(homeRelative(cwd)).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
             }
         }
+    }
+}
+
+/// The close confirmation, laid out like the system's: a title, what it does, and Close.
+/// Tapping outside cancels.
+private struct ClosePrompt: View {
+    let title: String
+    let close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Close \(title)?")
+                .font(.headline)
+            Text("This ends the agent and its terminal.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Button(role: .destructive, action: close) {
+                Text("Close").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.capsule)
+            .controlSize(.large)
+            .padding(.top, 12)
+        }
+        .frame(width: 240, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(20)
     }
 }

@@ -63,9 +63,10 @@ struct NewAgentSheet: View {
             ?? Self.defaultLink(links, preferred: preferred, contextual: workspace != nil)
         _target = State(initialValue: link.flatMap { link in
             if let resume {
+                // Same id and label: herdr reuses ids after a restart. The tab opens in the agent's own
+                // folder, which needn't be the workspace's.
                 guard link.snapshot?.workspaces.contains(where: {
-                    $0.id == resume.workspaceID && $0.label == resume.workspaceLabel &&
-                    (resume.cwd == nil || link.folder(ofWorkspace: $0.id) == resume.cwd)
+                    $0.id == resume.workspaceID && $0.label == resume.workspaceLabel
                 }) == true else { return nil }
                 return NewAgentTarget(host: link.identity, place: .workspace(resume.workspaceID))
             }
@@ -120,7 +121,7 @@ struct NewAgentSheet: View {
                 if let link { Section { IntegrationOffer(connection: link, harness: kind) } }
                 if let link, !link.isLive, model.demo == nil {
                     Section {
-                        Button("Reconnect", systemImage: "arrow.clockwise") { Task { await link.refreshSessions() } }
+                        Button("Reconnect", systemImage: "arrow.clockwise") { Task { await link.refreshSessions(explicit: true) } }
                     } footer: {
                         Text(link.statusText ?? "Not connected")
                     }
@@ -157,6 +158,7 @@ struct NewAgentSheet: View {
                 HStack {
                     if opening == .agent || startFlow.running { ProgressView() }
                     Text(busy && opening != .terminal ? "Starting \(startTitle)…" : "Start \(startTitle)")
+                        .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -240,7 +242,9 @@ struct NewAgentSheet: View {
                         pane = try await client.createTab(workspaceID: id, label: nil, cwd: cwd, session: session).rootPane.id
                     }
                 case .folder(let path):
-                    let result = try await client.createWorkspace(label: nil, cwd: path, session: session)
+                    // herdr puts a workspace without a folder beside its focused one, not in home.
+                    let cwd = if let path { path } else { try await client.folders(in: nil).path }
+                    let result = try await client.createWorkspace(label: nil, cwd: cwd, session: session)
                     pane = result.rootPane.id
                     workspace = result.workspace
                 }
@@ -467,6 +471,8 @@ private struct FolderBrowser: View {
         .safeAreaInset(edge: .bottom) {
             Button { if let listing { pick(listing.path) } } label: {
                 Text(listing.map { "Use \(($0.path as NSString).lastPathComponent)" } ?? "Use This Folder")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)

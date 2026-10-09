@@ -44,6 +44,8 @@ private actor DemoEngine {
 
     private enum Role {
         case bridge
+        /// `BridgeLane`: every request answered, each followed by its status line.
+        case lane
         case events
         case terminal(pane: String, cols: Int, rows: Int, seq: UInt64)
         case file(path: String, offset: Int)
@@ -104,20 +106,28 @@ private actor DemoEngine {
         } else if command.contains(" session list --json") {
             channel.send(scenario.sessionsJSON)
             channel.finish()
+        } else if command.contains("HERDWICK_REQUEST") {
+            channels[channel.id] = Open(channel: channel, role: .lane)
+            Self.askForEmbeddedRequest(command, on: channel)
         } else if command.contains(" remote-api-bridge") {
             channels[channel.id] = Open(channel: channel, role: .bridge)
+            Self.askForEmbeddedRequest(command, on: channel)
         } else if let terminal = Self.terminalRequest(command) {
             channels[channel.id] = Open(channel: channel, role: .terminal(pane: terminal.pane, cols: terminal.cols, rows: terminal.rows, seq: 0))
             paint(channel.id)
         } else if let request = Self.fileRequest(command) {
-            let data = transcripts[request.path] ?? Data()
-            if let limit = request.limit {
+            switch request {
+            case .read(let path, let offset, let limit):
+                let data = transcripts[path] ?? Data()
                 channel.send("\(data.count)\n")
-                channel.send(Data(data.dropFirst(request.offset).prefix(limit)))
+                channel.send(Data(data.dropFirst(offset).prefix(limit)))
                 channel.finish()
-            } else {
-                if data.count > request.offset { channel.send(Data(data.dropFirst(request.offset))) }
-                channels[channel.id] = Open(channel: channel, role: .file(path: request.path, offset: max(request.offset, data.count)))
+            case .follow(let path, let lastBytes, let headLimit, let resumeOffset):
+                let data = transcripts[path] ?? Data()
+                let start = resumeOffset >= 0 && resumeOffset <= data.count ? resumeOffset : max(0, data.count - lastBytes)
+                channel.send("\(data.count) \(start)\n\(Data(data.prefix(headLimit)).base64EncodedString())\n")
+                if data.count > start { channel.send(Data(data.dropFirst(start))) }
+                channels[channel.id] = Open(channel: channel, role: .file(path: path, offset: data.count))
             }
         } else if command.contains("for spec in"), command.contains("p.tombstone") {
             let script = command.replacingOccurrences(of: "'\\''", with: "'")
@@ -155,6 +165,13 @@ private actor DemoEngine {
         return channel
     }
 
+    /// Like a host without perl: a request carried in the command line is asked for again on stdin.
+    private static func askForEmbeddedRequest(_ command: String, on channel: DemoChannel) {
+        guard let range = command.range(of: "herdwick_first="),
+              command[range.upperBound...].first?.isHexDigit == true else { return }
+        channel.send("\u{1E}r\n")
+    }
+
     /// `terminal session control|observe <pane> ... --cols N --rows M`, possibly shell-wrapped.
     private static func terminalRequest(_ command: String) -> (pane: String, cols: Int, rows: Int)? {
         func word(after marker: String) -> Substring? {
@@ -168,8 +185,13 @@ private actor DemoEngine {
         return (String(pane), cols, rows)
     }
 
+    private enum FileRequest {
+        case read(path: String, offset: Int, limit: Int)
+        case follow(path: String, lastBytes: Int, headLimit: Int, resumeOffset: Int)
+    }
+
     /// Decode only the shell forms emitted by PaneRead, never execute scenario commands.
-    private static func fileRequest(_ command: String) -> (path: String, offset: Int, limit: Int?)? {
+    private static func fileRequest(_ command: String) -> FileRequest? {
         let prefix = "/bin/sh -c '"
         guard command.hasPrefix(prefix), command.hasSuffix("'") else { return nil }
         let script = String(command.dropFirst(prefix.count).dropLast()).replacingOccurrences(of: "'\\''", with: "'")
@@ -180,10 +202,11 @@ private actor DemoEngine {
         }
         if let parts = capture(#"tail -c \+\$\(\((\d+) \+ 1\)\) (\S+) \| head -c (\d+)$"#),
            let offset = Int(parts[0]), let limit = Int(parts[2]) {
-            return (parts[1], offset, limit)
+            return .read(path: parts[1], offset: offset, limit: limit)
         }
-        if let parts = capture(#"(?m)^tail -c \+(\d+) -F (\S+) 2>/dev/null"#), let start = Int(parts[0]), start > 0 {
-            return (parts[1], start - 1, nil)
+        if let parts = capture(#"\{ f=(\S+); s=0; .*\(\(s > (\d+) \? [\s\S]*r=(-?\d+);[\s\S]* head -c (\d+) "\$f""#),
+           let lastBytes = Int(parts[1]), let resumeOffset = Int(parts[2]), let headLimit = Int(parts[3]) {
+            return .follow(path: parts[0], lastBytes: lastBytes, headLimit: headLimit, resumeOffset: resumeOffset)
         }
         return nil
     }
@@ -200,7 +223,7 @@ private actor DemoEngine {
         for line in lines {
             guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
             switch open.role {
-            case .bridge: request(object, on: id)
+            case .bridge, .lane: request(object, on: id)
             case .events, .file: break
             case .terminal: terminalCommand(object, on: id)
             }
@@ -208,8 +231,8 @@ private actor DemoEngine {
     }
 
     func inputClosed(_ id: ObjectIdentifier) {
-        // herdr ends subscriptions and terminal streams on stdin EOF; one-shot bridges
-        // have already answered.
+        // herdr ends subscriptions and terminal streams on stdin EOF, and a lane's loop ends;
+        // one-shot bridges have already answered.
         guard let open = channels.removeValue(forKey: id) else { return }
         open.channel.finish()
     }
@@ -250,19 +273,46 @@ private actor DemoEngine {
                ScreenPrompt.parse(ScreenMarkup.text(markup, cols: 80, rows: 40).joined(separator: "\n"))?.style == .ompAsk {
                 movePrompt(keys, pane: pane)
                 if !keys.contains("enter") {
-                    channels[id] = nil
-                    open.channel.finish()
+                    answered(open, on: id)
                     return
                 }
             }
             for trigger in scenario.triggers where trigger.method == method && (trigger.pane == nil || trigger.pane == pane) {
                 schedule(trigger.then)
             }
+        case "pane.close":
+            let pane = params["pane_id"] as? String ?? ""
+            for key in ["panes", "agents"] {
+                snapshot[key] = (snapshot[key] as? [[String: Any]] ?? []).filter { $0["pane_id"] as? String != pane }
+            }
+            reply(["pane_id": pane])
+            broadcast("pane_closed", ["pane_id": pane])
+        case "pane.rename":
+            let pane = params["pane_id"] as? String ?? ""
+            var panes = snapshot["panes"] as? [[String: Any]] ?? []
+            if let index = panes.firstIndex(where: { $0["pane_id"] as? String == pane }) {
+                let label = (params["label"] as? String)?.trimmingCharacters(in: .whitespaces)
+                panes[index]["label"] = label?.isEmpty == false ? label : nil
+                snapshot["panes"] = panes
+                reply(["type": "pane_info", "pane": panes[index]])
+                broadcast("pane_updated", ["pane": panes[index]])
+            } else {
+                open.channel.send(["id": requestID, "error": ["code": "pane_not_found", "message": "pane \(pane) not found"]])
+            }
         default:
             open.channel.send(["id": requestID, "error": ["code": "unsupported", "message": "demo host: \(method)"]])
         }
-        channels[id] = nil
-        open.channel.finish()
+        answered(open, on: id)
+    }
+
+    /// A one-shot bridge ends after its answer; a lane reports the exit status and waits for more.
+    private func answered(_ open: Open, on id: ObjectIdentifier) {
+        if case .lane = open.role {
+            open.channel.send("\u{1E}0\n")
+        } else {
+            channels[id] = nil
+            open.channel.finish()
+        }
     }
 
     private func movePrompt(_ keys: [String], pane: String) {
@@ -371,6 +421,13 @@ private actor DemoEngine {
         ]
         for open in channels.values {
             if case .events = open.role { open.channel.send(event) }
+        }
+    }
+
+    /// A structural event to every subscriber; the app's mirror refetches the snapshot on it.
+    private func broadcast(_ name: String, _ data: [String: Any]) {
+        for open in channels.values {
+            if case .events = open.role { open.channel.send(["event": name, "data": data]) }
         }
     }
 

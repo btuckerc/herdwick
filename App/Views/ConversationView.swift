@@ -14,9 +14,28 @@ struct ConversationView: View {
     /// Pushes the terminal; alerts can't hold navigation links.
     let openTerminal: () -> Void
 
-    @State private var feed = ConversationFeed()
-    @State private var location: TranscriptLocation?
-    @State private var locatedRef: AgentSessionRef?
+    private var entry: ConversationState {
+        connection.conversations.entry(host: connection.identity, pane: paneID, agent: agent,
+                                       ref: agent?.agentSession ?? endedAgent?.reference)
+    }
+    private var feed: ConversationFeed { entry.feed }
+    private var locatedRef: AgentSessionRef? { agent?.agentSession ?? endedAgent?.reference }
+    private var location: TranscriptLocation? {
+        get {
+            if let location = entry.location { return location }
+            if let known = connection.activity[paneID], known.ref == locatedRef, let transcript = known.transcript {
+                return TranscriptLocation(path: transcript.path, format: transcript.format)
+            }
+            if let path = locatedRef?.transcriptPath, let ref = locatedRef, let format = TranscriptFormat(agent: ref.agent) {
+                return TranscriptLocation(path: path, format: format)
+            }
+            if let ended = endedAgent, let path = ended.transcriptPath, let format = TranscriptFormat(agent: ended.harness) {
+                return TranscriptLocation(path: path, format: format)
+            }
+            return nil
+        }
+        nonmutating set { entry.location = newValue }
+    }
     @State private var locateFailure: String?
     @State private var draft = ""
     @State private var attachments: [DraftAttachment] = []
@@ -29,7 +48,10 @@ struct ConversationView: View {
     @State private var choosing: String?
     /// Sent messages the transcript doesn't have yet, shown from the tap on. omp holds some
     /// (steering, follow-ups) until the agent next takes input; the last of those can be unsent.
-    @State private var pending: [PendingSend] = []
+    private var pending: [PendingSend] {
+        get { entry.pending }
+        nonmutating set { entry.pending = newValue }
+    }
     @State private var unsending = false
     /// Find's temporary switch to Folded for a match Digest hides; Done or a chosen level clears it.
     @State private var detailOverride: DetailLevel?
@@ -64,6 +86,8 @@ struct ConversationView: View {
     @State private var arrival: ReadCursors.Mark?
     /// The "Since 9:41" line sits over the composer until tapped or a message is sent.
     @State private var catchUpPinned = true
+    /// This window's claim on the shared feed's follow; another window showing it waits.
+    @State private var followerID = UUID()
     /// Usage over the whole transcript, totalled on the host as Session Details opens on a
     /// partly loaded conversation; nil when not needed or not counted.
     @State private var wholeUsage: TranscriptUsage?
@@ -83,6 +107,15 @@ struct ConversationView: View {
     /// omp waits on its Plan Review screen while herdr reports it idle, so the transcript says when.
     private var planReview: Bool {
         locatedRef == agent?.agentSession && agent?.agent == "omp" && agent?.agentStatus != .working && feed.conversation.pendingPlanReview != nil
+    }
+    /// For dictation: the folder, the agent and the files it lately read or edited.
+    private var dictationVocabulary: [String] {
+        let roots = [agent?.workingDirectory, agent?.agent].compactMap { $0 }
+        let files = feed.conversation.items.reversed().lazy.compactMap { item -> String? in
+            guard case .tool(let tool) = item, tool.kind == .edit || tool.kind == .read else { return nil }
+            return tool.summary
+        }
+        return DictationController.vocabulary(from: roots + files.prefix(100))
     }
 
     var body: some View {
@@ -114,7 +147,7 @@ struct ConversationView: View {
             }
             .sheet(isPresented: $showsImages) {
                 ImageGrid(loaded: feed.conversation.toolImages, whole: wholeImages,
-                          loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd))
+                          loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.workingDirectory))
             }
             .sheet(isPresented: $showsChanges) { ChangesSheet(edits: feed.conversation.recordedEdits) }
             .sheet(isPresented: $showsNow) { nowSheet }
@@ -223,7 +256,9 @@ struct ConversationView: View {
 
     /// Split from `body`, whose single modifier chain overran the type-checker's time limit.
     private var observed: some View {
-        scroller
+        let key = FeedKey(liveID: connection.liveID, location: location, window: feed.window, feedID: ObjectIdentifier(feed))
+        let state = entry
+        return scroller
             .toolbar { toolbar }
             .confirmationDialog("Stop this run?", isPresented: $confirmStop, titleVisibility: .visible) {
                 Button("Stop", role: .destructive) { Task { await press(["esc"], failure: "The agent couldn't be stopped.") } }
@@ -233,14 +268,21 @@ struct ConversationView: View {
             .task(id: LocateKey(liveID: connection.liveID, ref: agent?.agentSession)) {
                 await locateTranscript()
             }
-            .task(id: FeedKey(liveID: connection.liveID, location: location, window: feed.window, feedID: ObjectIdentifier(feed))) {
-                let feed = feed
-                // A kept offline copy paints first, even with no connection.
+            .task(id: key) {
+                let feed = state.feed
+                let viewerID = UUID()
+                connection.conversations.activate(state, viewer: viewerID)
+                defer { connection.conversations.deactivate(state, viewer: viewerID) }
+                // Capture the key's location; a locate task cannot start a second channel here.
+                let location = key.location
                 if let location { feed.restore(location, host: connection.identity) }
                 // A channel can end while the transport lives on (a brief background, a killed
                 // `tail`): follow again. A dead transport bumps `liveID`, which restarts this task.
                 while !Task.isCancelled, connection.isLive, let client = connection.client, let location {
-                    await feed.follow(location, client: client, host: connection.identity)
+                    // Another window already follows this conversation: its feed is this one too.
+                    if !(feed.isFollowing && feed.follower != followerID) {
+                        await feed.follow(location, client: client, host: connection.identity, follower: followerID)
+                    }
                     guard (try? await Task.sleep(for: .seconds(2))) != nil else { return }
                 }
             }
@@ -263,6 +305,7 @@ struct ConversationView: View {
             }
             .onChange(of: demo?.sendCount) { Task { await sendDraft() } }
             .onChange(of: feed.state, initial: true) { _, state in demo?.conversationReady = state == .live }
+            .onChange(of: feed.isCaughtUp) { _, caughtUp in if caughtUp { entry.settlePending() } }
             .onChange(of: settings.offlineTranscripts) { _, on in if !on { feed.discardOfflineCopy() } }
             .onChange(of: scene.draftRevision) { if let draftID { draft = DraftStore.load(draftID) ?? draft } }
             .task(id: SharedImportKey(importID: scene.importPackageID, draftID: draftID,
@@ -283,7 +326,7 @@ struct ConversationView: View {
     /// Read means seen: the app is in front, this agent's transcript has painted live and its
     /// end is on screen. An error or a still-loading feed is never a read.
     private var showsLatest: Bool {
-        locatedRef == agent?.agentSession && scenePhase == .active && feed.state == .live && !feed.isOfflineCopy && locateFailure == nil && atLatest
+        locatedRef == agent?.agentSession && scenePhase == .active && feed.isCaughtUp && !feed.isOfflineCopy && locateFailure == nil && atLatest
     }
 
     private var scroller: some View {
@@ -298,12 +341,12 @@ struct ConversationView: View {
         .environment(\.reachedCatchUp, EnvironmentAction { catchUpPinned = false })
         .environment(\.opensInPlace, EnvironmentAction { followsLatest = false })
         .environment(\.findTarget, findTarget)
-        .environment(\.imageLoader, ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd))
-        .modifier(FileLinks(loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd)) { [feed] name in
+        .environment(\.imageLoader, ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.workingDirectory))
+        .modifier(FileLinks(loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.workingDirectory)) { [feed] name in
             feed.conversation.touchedFile(name)
         })
         .sheet(item: $previewing) {
-            ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.cwd))
+            ImagePreview(source: $0, loader: ImageLoader(connection: connection, transcript: location?.path, cwd: agent?.workingDirectory))
         }
         // Size changes are anchored below, only while following; a role-less anchor here would pin them too.
         .defaultScrollAnchor(.bottom, for: .initialOffset)
@@ -311,8 +354,7 @@ struct ConversationView: View {
         .onChange(of: feed.conversation.workingSubagents.count) { _, count in
             connection.workingSubagents[paneID] = count
         }
-        .onChange(of: feed.conversation.items.count) { settlePending(turnEnded: false) }
-        .onChange(of: agent?.agentStatus, statusChanged)
+        .onChange(of: feed.conversation.items.count) { entry.settlePending() }
         .onScrollGeometryChange(for: TailGeometry.self) { geometry in
             TailGeometry(geometry)
         } action: { old, new in
@@ -340,7 +382,9 @@ struct ConversationView: View {
         }
         // An inset, not `safeAreaBar`: under a bar the transcript's text can't be selected (iOS 26).
         .safeAreaInset(edge: .bottom) { bottomBar }
-        .navigationTitle(feed.title ?? feed.conversation.title ?? agent?.conversationTitle ?? paneID)
+        .agentDock(current: connection.address(paneID: paneID), busy: sending)
+        // A name given in herdr wins over the transcript's own title.
+        .navigationTitle(agent?.label ?? feed.title ?? feed.conversation.title ?? agent?.conversationTitle ?? paneID)
         .navigationSubtitle(subtitle)
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -545,13 +589,7 @@ struct ConversationView: View {
             TranscriptRows(feed: feed, detail: detail, arrival: arrival, nowPinned: pinnedNow != nil)
                 .equatable()
             ForEach(unarrived) { message in
-                if message.held {
-                    QueuedBubble(text: message.text, canUnsend: message.id == pending.last(where: \.held)?.id && !unsending && !sending) {
-                        Task { await unsend(message) }
-                    }
-                } else {
-                    UserBubble(text: message.text, images: [])
-                }
+                pendingBubble(message)
             }
             if let plan = openPlan {
                 TodoCard(tool: plan)
@@ -562,6 +600,22 @@ struct ConversationView: View {
         // Full width even when empty: the scroll view sizes to it, and the placeholder and
         // reconnecting badge over it would otherwise get a sliver and wrap a letter per line.
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func pendingBubble(_ message: PendingSend) -> some View {
+        Group {
+            if message.held {
+                QueuedBubble(text: message.text, canUnsend: message.id == pending.last(where: \.held)?.id && !unsending && !sending && connection.isLive) {
+                    Task { await unsend(message) }
+                }
+            } else {
+                UserBubble(text: message.text, images: [])
+            }
+        }
+        .contextMenu {
+            Button("Remove Pending Message", role: .destructive) { pending.removeAll { $0.id == message.id } }
+        }
     }
 
     private var subtitle: String {
@@ -603,7 +657,7 @@ struct ConversationView: View {
                 NavigationLink("Open Terminal", value: Route.terminal(connection.address(paneID: paneID)))
                 if let harness = agent?.agent { IntegrationOffer(connection: connection, harness: harness) }
             }
-        } else if feed.state == .loading, !feed.isOfflineCopy, connection.snapshot != nil, !connection.isConnecting, pending.isEmpty {
+        } else if feed.state == .loading, !feed.isRenderable, !feed.isOfflineCopy, connection.snapshot != nil, !connection.isConnecting, pending.isEmpty {
             ProgressView()
         } else if feed.state == .live, feed.conversation.items.isEmpty, pending.isEmpty, !sending, sentCount == 0 {
             // A quiet hint, gone the moment a message is on its way; the transcript file
@@ -638,18 +692,13 @@ struct ConversationView: View {
                 .cardBackground()
             } else if blocked {
                 NeedsYouBanner(paneID: paneID, terminalAddress: connection.address(paneID: paneID)).cardBackground()
-            } else if let now = pinnedNow {
-                PinnedLine(label: Text(now.label), live: true, action: now.opens ? { showsNow = true } : nil)
-            } else if catchUpPinned, let arrival, let catchUp = feed.conversation.catchUp(after: arrival.item) {
-                PinnedLine(label: CatchUpLine.summary(catchUp, since: arrival.seen)) {
-                    catchUpPinned = false
-                    followsLatest = false
-                    position.scrollTo(id: CatchUpLine.id, anchor: .top)
-                }
             }
+            // The pinned line rides over the field, between the mic and the dock while it's short.
             MessageComposer(draft: $draft, attachments: $attachments, sending: sending || shareImportTaskID != nil, focus: $composerFocused,
-                            actions: composerActions, dismissals: keyboardDismissals) { Task { await sendDraft() } }
-                .disabled(!connection.isLive || agent == nil || feed.isOfflineCopy)
+                            actions: composerActions, dismissals: keyboardDismissals, docksAgents: hasDock,
+                            pinned: pinnedLineShown ? AnyView(pinnedLine) : nil,
+                            locked: !connection.isLive || agent == nil || feed.isOfflineCopy,
+                            vocabulary: { dictationVocabulary }) { Task { await sendDraft() } }
         }
         // An ask or permission card replaces typing: put the keyboard away so the card has the room.
         .onChange(of: pendingAsk != nil || (locatedRef == agent?.agentSession && (blocked || planReview) && screenPrompt != nil)) { _, prompting in
@@ -670,6 +719,41 @@ struct ConversationView: View {
                 .padding(.top, -16)
                 .ignoresSafeArea(edges: .bottom)
                 .allowsHitTesting(false)
+        }
+    }
+
+    /// Other threads to switch to, so the dock keeps its place in the bar.
+    private var hasDock: Bool {
+        guard settings.showsDock else { return false }
+        let current = connection.address(paneID: paneID)
+        return model.dockThreads(in: scene).contains { $0.address != current }
+    }
+
+    /// An ask, permission or Needs You card holds the slot over the composer instead.
+    private var promptCardShown: Bool {
+        blocked || (locatedRef == agent?.agentSession && planReview && screenPrompt != nil)
+    }
+
+    private var pinnedLineShown: Bool {
+        guard !promptCardShown else { return false }
+        if pinnedNow != nil { return true }
+        guard feed.state == .live, catchUpPinned, let arrival else { return false }
+        return feed.conversation.catchUp(after: arrival.item) != nil
+    }
+
+    /// What's running now, else what came since the last look; nothing while a card shows.
+    @ViewBuilder
+    private var pinnedLine: some View {
+        if promptCardShown {
+            EmptyView()
+        } else if let now = pinnedNow {
+            PinnedLine(label: Text(now.label), live: true, action: now.opens ? { showsNow = true } : nil)
+        } else if feed.state == .live, catchUpPinned, let arrival, let catchUp = feed.conversation.catchUp(after: arrival.item) {
+            PinnedLine(label: CatchUpLine.summary(catchUp, since: arrival.seen)) {
+                catchUpPinned = false
+                followsLatest = false
+                position.scrollTo(id: CatchUpLine.id, anchor: .top)
+            }
         }
     }
 
@@ -750,13 +834,14 @@ struct ConversationView: View {
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
         // omp holds a message sent mid-turn as steering and can hand it back (Alt+Up).
         let queues = agent.agent == "omp" && agent.agentStatus == .working && attachments.isEmpty
-        let usersBefore = userTexts.count
+        let boundary = feed.conversation.lastStableID
         let packageID = importedPackageID
+        let origin = draftID
         sending = true
         defer { sending = false }
         // Cleared before delivery so the keyboard stays up and anything typed meanwhile is kept.
         draft = ""
-        let shown = show(text, usersBefore: usersBefore, held: queues)
+        let shown = show(text, afterItemID: boundary, held: queues)
         do {
             try await deliverDraft(text, attachments: attachments, connection: connection, pane: paneID,
                                    agent: true, retention: settings.attachmentRetention) { updated in
@@ -766,17 +851,28 @@ struct ConversationView: View {
             sentCount += 1
             finishImport(packageID)
         } catch {
+            // The draft holds the text again; a bubble beside it would invite sending it twice.
             pending.removeAll { $0.id == shown }
-            draft = restoringDraft(text, before: draft)
+            restoreFailedSend(text, to: origin)
             sendError = "The message wasn't delivered completely. Your draft and attachments are still here. \(error.localizedDescription)"
         }
     }
 
+    /// A failed send's text goes back into the draft it came from, ahead of anything typed
+    /// since. Stored as well: the user may have left this conversation while it was sending.
+    private func restoreFailedSend(_ text: String, to origin: String?) {
+        let restored = restoringDraft(text, before: origin.flatMap(DraftStore.load) ?? draft)
+        draft = restored
+        guard let origin else { return }
+        DraftStore.save(restored, for: origin)
+        scene.draftRevision += 1
+    }
+
     /// The message in the transcript from the tap on, not once the agent has written it down:
     /// that can take seconds, and a new thread has no transcript at all until then.
-    private func show(_ text: String, usersBefore: Int, held: Bool) -> PendingSend.ID? {
+    private func show(_ text: String, afterItemID: String?, held: Bool) -> PendingSend.ID? {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        let message = PendingSend(text: text, usersBefore: usersBefore, held: held)
+        let message = PendingSend(text: text, afterItemID: afterItemID, held: held)
         pending.append(message)
         jumpToLatest()
         return message.id
@@ -799,57 +895,34 @@ struct ConversationView: View {
         let text = draft
         guard !sending, shareImportTaskID == nil, connection.isLive, let client = connection.client, let session = connection.activeSession,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let usersBefore = userTexts.count
+        let boundary = feed.conversation.lastStableID
         let packageID = importedPackageID
+        let origin = draftID
         sending = true
         defer { sending = false }
         draft = ""
-        let shown = show(text, usersBefore: usersBefore, held: true)
+        var shown: PendingSend.ID?
         do {
             guard OmpEditor.draft(inScreen: try await client.readPane(paneID, session: session).text) == nil else {
-                pending.removeAll { $0.id == shown }
-                draft = restoringDraft(text, before: draft)
+                restoreFailedSend(text, to: origin)
                 sendError = "omp has unsent text in its editor. Clear it in the terminal first."
                 return
             }
+            shown = show(text, afterItemID: boundary, held: true)
             try await connection.sendText(text, pane: paneID, submit: false)
             try await connection.sendKeys(["ctrl+q"], pane: paneID)
             sentCount += 1
             finishImport(packageID)
         } catch {
             pending.removeAll { $0.id == shown }
-            draft = restoringDraft(text, before: draft)
+            restoreFailedSend(text, to: origin)
             sendError = "The message wasn't queued. Your draft is still here. \(error.localizedDescription)"
         }
     }
 
-    private var userTexts: [String] {
-        feed.conversation.items.compactMap { if case .user(_, let text, _) = $0 { text } else { nil } }
-    }
-
-    /// Filtered as the transcript updates, so the real bubble never shows beside its stand-in.
-    private var unarrived: [PendingSend] {
-        guard !pending.isEmpty else { return [] }
-        let users = userTexts
-        return pending.filter { !$0.arrived(in: users) }
-    }
-
-    /// A sent message leaves once the transcript has it. A held one also leaves when the agent
-    /// is idle (omp sent what it held, or someone at the desk took it back); any other, when a
-    /// turn ends without the transcript matching it, except the one still being delivered.
-    private func settlePending(turnEnded: Bool) {
-        guard !pending.isEmpty else { return }
-        let idle = agent?.agentStatus == .idle || agent?.agentStatus == .done
-        let delivering = sending ? pending.last?.id : nil
-        let users = userTexts
-        pending.removeAll { message in
-            message.arrived(in: users) || (message.held && idle) || (turnEnded && message.id != delivering)
-        }
-    }
-
-    private func statusChanged(_ old: AgentStatus?, _ new: AgentStatus?) {
-        settlePending(turnEnded: old == .working && (new == .idle || new == .done))
-    }
+    /// Settlement waits for a caught-up transcript; until then a stand-in whose real message is
+    /// already shown is only hidden, so the two never show side by side.
+    private var unarrived: [PendingSend] { entry.unsettled }
 
     /// omp's Alt+Up puts its last queued message back in its editor; that text moves to the
     /// composer here and omp's editor is cleared. If the agent took the message first, the
@@ -868,10 +941,18 @@ struct ConversationView: View {
             try await connection.sendKeys(["alt+up"], pane: paneID)
             try await Task.sleep(for: .milliseconds(300))
             let after = try await client.readPane(paneID, session: session)
-            pending.removeAll { $0.id == message.id }
-            guard OmpEditor.draft(inScreen: after.text) != nil else { return }
+            // Empty: the agent took it first, and the transcript will show it as sent.
+            guard let recovered = OmpEditor.draft(inScreen: after.text) else { return }
+            // A message queued at the desk since is newer, so Alt+Up hands that one back instead.
+            // The editor may show only part of a long message.
+            let shown = recovered.filter { !$0.isWhitespace }
+            guard message.text.filter({ !$0.isWhitespace }).contains(shown) || message.matches(recovered) else {
+                sendError = "omp handed back a different queued message, so it was left in omp's editor."
+                return
+            }
             // With text in its editor, Ctrl+C clears it and leaves the turn running.
             try await connection.sendKeys(["ctrl+c"], pane: paneID)
+            pending.removeAll { $0.id == message.id }
             draft = draft.isEmpty ? message.text : message.text + "\n" + draft
             composerFocused = true
         } catch {
@@ -912,19 +993,16 @@ struct ConversationView: View {
     }
 
     /// Finds the transcript file. Claude Code and Codex name only a session id, which the
-    /// host resolves to a path; a dropped channel or a file not flushed yet gets a few retries.
+    /// host resolves to a path, unless the inbox already resolved it for the row's preview;
+    /// a dropped channel or a file not flushed yet gets a few retries.
     private func locateTranscript() async {
         guard !Task.isCancelled else { return }
-        guard let ref = agent?.agentSession else { return }
-        if locatedRef != ref {
-            // A new thread gets its session (or a new one) with the first message, which stays
-            // shown; counts against another thread's messages would be wrong, so those go.
-            if !userTexts.isEmpty { pending = [] }
-            locatedRef = ref
-            location = nil
+        guard let ref = locatedRef else { return }
+        locateFailure = nil
+        if let known = connection.activity[paneID], known.ref == ref, let transcript = known.transcript {
+            location = TranscriptLocation(path: transcript.path, format: transcript.format)
             locateFailure = nil
-            feed = ConversationFeed()
-            screenPrompt = nil
+            return
         }
         guard let client = connection.client, let session = connection.activeSession else {
             // Offline: a reported path is enough to paint a kept copy.
@@ -1029,6 +1107,8 @@ private struct ReadKey: Hashable {
 /// The ⋯ menu, compared by value: a menu that is rebuilt while open jumps back to its top, and
 /// the conversation re-renders with every streamed record. So nothing here changes per reply:
 /// thinking level, tokens and estimated cost open in an alert.
+/// The places to go sit side by side in one row, so a slip lands on a neighbour you can see is
+/// different; settings and rarer items are named submenus, Stop alone at the end.
 struct ConversationMenu: View, Equatable {
     struct Mute: Equatable {
         let address: PaneAddress
@@ -1062,48 +1142,61 @@ struct ConversationMenu: View, Equatable {
 
     var body: some View {
         Menu {
-            DetailLevelOptions(selection: Binding(get: { detail }, set: { act(.detail($0)) }))
-            Button("Find in Conversation") { act(.find) }
-            if images { Button("Images") { act(.images) } }
-            if changes { Button("Changes") { act(.changes) } }
-            if canRetry {
-                Section { Button("Retry Last Turn") { act(.retry) } }
-            }
-            if canStop {
-                Section { Button("Stop Run", role: .destructive) { act(.stop) } }
-            }
-            if let liveActivity {
-                Section {
-                    Button(liveActivity == .hide ? "Hide Live Activity" : "Show Live Activity") { act(.liveActivity) }
+            Section {
+                ControlGroup {
+                    Button("Find", systemImage: "magnifyingglass") { act(.find) }
+                        .accessibilityLabel("Find in Conversation")
+                    if images { Button("Images", systemImage: "photo.on.rectangle") { act(.images) } }
+                    if changes { Button("Changes", systemImage: "doc.text") { act(.changes) } }
                 }
             }
-            if let session {
-                if sessionHasDetails {
-                    Section(session) { Button("Session Details") { act(.sessionDetails) } }
-                } else {
-                    Section { Text(session) }
+            Section {
+                Menu("View: \(DetailLevelOptions.title(detail))", systemImage: "slider.horizontal.3") {
+                    DetailLevelOptions(selection: Binding(get: { detail }, set: { act(.detail($0)) }))
                 }
-            }
-            if let mute {
-                Section {
+                if session != nil || liveActivity != nil || status != nil {
+                    Menu("Session", systemImage: "info.circle") {
+                        if let session {
+                            if sessionHasDetails {
+                                Section(session) { Button("Session Details", systemImage: "info.circle") { act(.sessionDetails) } }
+                            } else {
+                                Section { Text(session) }
+                            }
+                        }
+                        if let liveActivity {
+                            Button(liveActivity == .hide ? "Hide Live Activity" : "Show Live Activity",
+                                   systemImage: "rectangle.on.rectangle") { act(.liveActivity) }
+                        }
+                        if let status {
+                            Button("Why “\(status)”?", systemImage: "questionmark.circle") { act(.explain) }
+                        }
+                    }
+                }
+                if let mute {
                     if Mutes.shared.isMuted(mute.address, reference: mute.reference) {
-                        Button("Unmute Notifications") { Mutes.shared.unmute(mute.address, reference: mute.reference) }
+                        Button("Unmute Notifications", systemImage: "bell") { Mutes.shared.unmute(mute.address, reference: mute.reference) }
                     } else {
-                        Menu("Mute Notifications") {
-                            Button("For 1 Hour") {
+                        Menu("Mute Notifications", systemImage: "bell.slash") {
+                            Button("For 1 Hour", systemImage: "clock") {
                                 Mutes.shared.set(mute.address, reference: mute.reference, until: .now.addingTimeInterval(3600))
                             }
-                            Button("Until Unmuted") { Mutes.shared.set(mute.address, reference: mute.reference, until: nil) }
+                            Button("Until Unmuted", systemImage: "bell.slash") {
+                                Mutes.shared.set(mute.address, reference: mute.reference, until: nil)
+                            }
                         }
                     }
                 }
             }
-            if let status {
-                Section { Button("Why “\(status)”?") { act(.explain) } }
+            if canRetry {
+                Section { Button("Retry Last Turn", systemImage: "arrow.clockwise") { act(.retry) } }
+            }
+            if canStop {
+                Section { Button("Stop Run", systemImage: "stop.circle", role: .destructive) { act(.stop) } }
             }
         } label: {
             Label("More", systemImage: "ellipsis")
         }
+        .menuOrder(.fixed)
         .accessibilityLabel("Conversation Actions")
     }
 }
@@ -1246,20 +1339,6 @@ enum ConversationRow: Identifiable {
     }
 }
 
-struct PendingSend: Identifiable {
-    let id = UUID()
-    let text: String
-    /// User messages in the transcript when this was sent; only later ones can be it.
-    let usersBefore: Int
-    /// omp holds it until the agent next takes input.
-    let held: Bool
-
-    /// A later user message holds its text, whitespace aside (attachments add paths around it).
-    func arrived(in users: [String]) -> Bool {
-        let key = text.filter { !$0.isWhitespace }
-        return users.dropFirst(usersBefore).contains { $0.filter { !$0.isWhitespace }.contains(key) }
-    }
-}
 
 /// A sent message omp hasn't taken yet. The newest one can be tapped back into the composer.
 private struct QueuedBubble: View {
@@ -1544,8 +1623,10 @@ private struct StepLine: View {
 }
 
 /// The one line pinned over the composer: what's running now, or what came since the last look.
-/// Bare, like the run lines it stands in for (same column, same chevron); a slow pulsing dot
-/// marks the Now line and holds still under Reduce Motion.
+/// It hugs its words with the chevron right after them, so it reads as one tappable status and
+/// leaves the row's end to the agent dock (a run line's chevron, out at the column's edge, would
+/// hang short of the dock); a slow pulsing dot marks the Now line and holds still under Reduce
+/// Motion.
 private struct PinnedLine: View {
     let label: Text
     var live = false
@@ -1553,15 +1634,26 @@ private struct PinnedLine: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 6) {
+        let line = HStack(spacing: 6) {
             if live {
                 Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(.tint)
                     .symbolEffect(.pulse, options: .speed(0.5), isActive: !reduceMotion)
                     .accessibilityHidden(true)
             }
-            QuietHeader(action: action) { label }
+            label.font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+            if action != nil {
+                Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
         }
         .padding(.horizontal, 4)
+        .frame(minHeight: 28)
+        .contentShape(.rect)
+        if let action {
+            Button(action: action) { line }.buttonStyle(.plain)
+        } else {
+            line
+        }
     }
 }
 
@@ -1891,7 +1983,8 @@ private struct PermissionCard: View {
             GlassEffectContainer(spacing: 8) {
                 VStack(spacing: 8) {
                     ForEach(Array(prompt.options.enumerated()), id: \.offset) { _, option in
-                        button(option).buttonStyle(.glass)
+                        // A long option wraps; a capsule around two lines reads as a blob.
+                        button(option).buttonStyle(.glass).buttonBorderShape(.roundedRectangle(radius: 16))
                     }
                 }
             }

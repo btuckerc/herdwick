@@ -281,9 +281,9 @@ public enum PromptDriver {
     /// The screen is asking `question`: its title, and rows that are the transcript's options
     /// in order. A title cut short (`…`) or wrapped, and a label cut short, match as a prefix.
     static func matches(_ screen: ScreenPrompt, _ question: AskQuestion) -> Bool {
-        var title = screen.title.normalizedSpace
-        let expected = question.question.normalizedSpace
-        if title.hasSuffix("…") { title = String(title.dropLast()).trimmingCharacters(in: .whitespaces) }
+        var shown = screen.title
+        if shown.hasSuffix("…") { shown.removeLast() }
+        let title = comparable(shown), expected = comparable(question.question)
         guard !title.isEmpty, title == expected || expected.hasPrefix(title) || title.hasPrefix(expected) else { return false }
         return rows(screen, question)?.isEmpty == false
     }
@@ -303,7 +303,7 @@ public enum PromptDriver {
                 // Claude numbers its rows; the free-text row shows whatever was typed into it.
                 if let number = option.number, number - 1 != row { return false }
                 if row == count { return option.isOther || option.number != nil }
-                return row < count && !option.isOther && labelMatches(option.label, question.options[row].label)
+                return row < count && !option.isOther && labelMatches(option, question.options[row].label)
             }
         }
         let windows = (0...(count + 1)).filter(fits)
@@ -323,17 +323,34 @@ public enum PromptDriver {
     }
 
     /// A label matches in full, or as the start of the option when the pane cut it short.
-    private static func labelMatches(_ shown: String, _ label: String) -> Bool {
-        let shown = plain(shown)
-        let label = plain(label)
+    /// One too long for its row continues on the indented lines under it, ahead of any description.
+    private static func labelMatches(_ option: ScreenPrompt.Option, _ label: String) -> Bool {
+        let shown = comparable(plain(option.label))
+        let label = comparable(plain(label))
+        guard !shown.isEmpty else { return false }
         if shown == label { return true }
-        guard shown.hasSuffix("…") else { return false }
-        let start = String(shown.dropLast()).trimmingCharacters(in: .whitespaces)
-        return !start.isEmpty && label.hasPrefix(start)
+        if option.label.hasSuffix("…") {
+            let start = shown.dropLast()
+            return !start.isEmpty && label.hasPrefix(start)
+        }
+        guard label.hasPrefix(shown), let detail = option.detail else { return false }
+        return comparable(plain(option.label + " " + detail)).hasPrefix(label)
     }
 
     private static func plain(_ label: String) -> String {
-        label.replacingOccurrences(of: " (Recommended)", with: "").normalizedSpace
+        label.replacingOccurrences(of: " (Recommended)", with: "")
+    }
+
+    /// Transcript text as the agent's screen shows it, for comparing the two. omp renders a
+    /// question and its labels as markdown: emphasis and code markers dropped, a link as its
+    /// text, entities decoded, paragraphs run together. Both sides lose markup and spacing.
+    static func comparable(_ text: String) -> String {
+        var text = text.replacing(/\[([^\]]*)\]\([^)]*\)/) { String($0.output.1) }
+        for (entity, character) in [("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&")] {
+            text = text.replacingOccurrences(of: entity, with: character)
+        }
+        text.unicodeScalars.removeAll { $0.properties.isWhitespace || "*_`~\\<>".unicodeScalars.contains($0) }
+        return text
     }
 
     private static func sameChoice(_ a: ScreenPrompt, _ b: ScreenPrompt) -> Bool {

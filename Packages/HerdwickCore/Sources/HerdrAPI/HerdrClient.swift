@@ -24,12 +24,21 @@ public func shellQuote(_ word: String) -> String {
 
 /// herdr API client over any `CommandRunner` (SSH on device, a local process in tests).
 ///
-/// Every request spawns one `herdr remote-api-bridge`, because the herdr API
-/// socket answers exactly one request per connection. Subscriptions and the
-/// terminal stream stay open for as long as the caller consumes them.
+/// The herdr API socket answers exactly one request per connection. Requests share a
+/// long-lived lane per session (`BridgeLane`); subscriptions and the terminal stream each
+/// get their own `herdr remote-api-bridge` and stay open while the caller consumes them.
 public actor HerdrClient {
     public let runner: any CommandRunner
+    /// The live `mirror(session:)` streams, nudged after changes herdr doesn't announce.
+    nonisolated let mirrors = MirrorRegistry()
     private var herdrPath: String?
+    /// Request lanes per session, opened as concurrent requests need them.
+    private var lanes: [String: [BridgeLane]] = [:]
+    private var laneLoad: [ObjectIdentifier: Int] = [:]
+    private var lastRequestID = 0
+    /// A second lane keeps one slow request (a long pane read) from holding up the rest;
+    /// more would only spend the host's per-connection channel budget.
+    static let lanesPerSession = 2
 
     public init(runner: any CommandRunner, herdrPath: String? = nil) {
         self.runner = runner
@@ -38,8 +47,9 @@ public actor HerdrClient {
 
     // MARK: Discovery
 
-    /// Absolute path of `herdr` on the host. The login shell's PATH comes first;
-    /// then the install locations herdr itself probes.
+    /// Absolute path of the `herdr` executable on the host. The login shell's PATH comes first;
+    /// then the install locations herdr itself probes. A version manager's shim (mise, asdf)
+    /// is resolved to the binary it would run: the shim costs every call ~100 ms of host CPU.
     public func resolveHerdrPath() async throws -> String {
         if let herdrPath { return herdrPath }
         let probe = #"""
@@ -49,6 +59,12 @@ public actor HerdrClient {
                 [ -x "$c" ] && p=$c && break
               done
             fi
+            case $p in
+              */shims/*)
+                r=$("${SHELL:-/bin/sh}" -lc 'mise which herdr 2>/dev/null || asdf which herdr 2>/dev/null' 2>/dev/null | tail -n 1)
+                case $r in /*) [ -x "$r" ] && p=$r ;; esac
+                ;;
+            esac
             printf '%s' "$p"
             """#
         let channel = try await runner.exec(Self.posix(probe))
@@ -140,6 +156,14 @@ public actor HerdrClient {
         let _: CloseResult = try await request("pane.close", params: Params(pane_id: paneID), session: session)
     }
 
+    /// Names a pane in herdr (its manual label, shown wherever herdr shows the pane); nil or
+    /// blank clears it. herdr announces no event for it, so this session's mirrors are told.
+    public func renamePane(_ paneID: String, label: String?, session: String) async throws {
+        struct Params: Encodable, Sendable { var pane_id: String; var label: String? }
+        let _: Ignored = try await request("pane.rename", params: Params(pane_id: paneID, label: label), session: session)
+        mirrors.touch(session)
+    }
+
     public func closeTab(_ tabID: String, session: String) async throws {
         struct Params: Encodable, Sendable { var tab_id: String }
         let _: CloseResult = try await request("tab.close", params: Params(tab_id: tabID), session: session)
@@ -156,38 +180,53 @@ public actor HerdrClient {
         let _: Ignored = try await request("pane.send_keys", params: Params(pane_id: pane, keys: keys), session: session)
     }
 
-    /// One request/response over a fresh bridge.
+    /// One request/response over the session's request lane (`BridgeLane`).
     public func request<P: Encodable & Sendable, R: Decodable>(
         _ method: String, params: P, session: String
     ) async throws -> R {
-        let channel = try await runner.exec(try await command(session, ["remote-api-bridge"]))
-        defer { Task { await channel.close() } }
-        let request = try Self.requestLine(id: "1", method: method, params: params)
-        let line = try await Self.finite(channel, timeout: .seconds(60)) {
-            try await channel.write(request)
-            var lines = LineSplitter()
-            for try await chunk in channel.output {
-                if let line = lines.append(chunk).first { return line }
-            }
-            throw HerdrError.noResponse
+        lastRequestID += 1
+        let id = String(lastRequestID)
+        let request = try Self.requestLine(id: id, method: method, params: params)
+        let lane = try await lane(for: session)
+        let key = ObjectIdentifier(lane)
+        laneLoad[key, default: 0] += 1
+        defer { laneLoad[key, default: 1] -= 1 }
+        return try Self.decodeResponse(try await lane.send(request, id: id, timeout: .seconds(60)))
+    }
+
+    /// An idle lane, else a new one up to the limit, else the least loaded.
+    private func lane(for session: String) async throws -> BridgeLane {
+        let herdr = try await resolveHerdrPath()
+        let pool = lanes[session, default: []]
+        func load(_ lane: BridgeLane) -> Int { laneLoad[ObjectIdentifier(lane), default: 0] }
+        if let idle = pool.first(where: { load($0) == 0 }) { return idle }
+        guard pool.count >= Self.lanesPerSession, let least = pool.min(by: { load($0) < load($1) }) else {
+            let lane = BridgeLane(runner: runner, herdr: herdr, session: session)
+            lanes[session] = pool + [lane]
+            return lane
         }
-        return try Self.decodeResponse(line)
+        return least
     }
 
     // MARK: Streams
 
     /// Long-lived event stream. Returns once herdr acknowledges the subscription, so a
     /// snapshot taken afterwards cannot miss a change. Keeps stdin open: herdr ends the
-    /// subscription on EOF. Finishes when the bridge dies; the caller reconnects.
+    /// subscription on EOF. Finishes when the stream dies; the caller reconnects.
+    /// The request rides in the command line (`BridgeLane.streamCommand`) when it fits.
     public func events(session: String, subscriptions: [Subscription]) async throws -> AsyncThrowingStream<HerdrEvent, any Error> {
         struct Params: Encodable, Sendable { var subscriptions: [Subscription] }
-        let channel = try await runner.exec(try await command(session, ["remote-api-bridge"]))
-        do {
-            let request = try Self.requestLine(id: "events", method: "events.subscribe", params: Params(subscriptions: subscriptions))
-            try await Self.finite(channel, timeout: .seconds(60)) { try await channel.write(request) }
-        } catch {
-            await channel.close()
-            throw error
+        let request = try Self.requestLine(id: "events", method: "events.subscribe", params: Params(subscriptions: subscriptions))
+        let embedded = request.count <= BridgeLane.embedLimit
+        let command = BridgeLane.streamCommand(herdr: try await resolveHerdrPath(), session: session, first: embedded ? request : nil)
+        let channel = try await runner.exec(command)
+        if !embedded {
+            do {
+                try await Self.finite(channel, timeout: .seconds(60)) { try await channel.write(request) }
+            } catch {
+                await channel.close()
+                throw error
+            }
         }
         let (stream, continuation) = AsyncThrowingStream<HerdrEvent, any Error>.makeStream()
         let (ack, ackContinuation) = AsyncThrowingStream<Void, any Error>.makeStream()
@@ -199,6 +238,8 @@ public actor HerdrClient {
                     for line in lines.append(chunk) {
                         if acknowledged {
                             continuation.yield(try Self.decodeEvent(line))
+                        } else if embedded, line == BridgeLane.resend {
+                            try await channel.write(request)
                         } else {
                             let _: Ignored = try Self.decodeResponse(line)
                             acknowledged = true

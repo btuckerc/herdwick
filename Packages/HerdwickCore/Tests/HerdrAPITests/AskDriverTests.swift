@@ -94,6 +94,25 @@ private func screen(_ name: String) throws -> String {
         #expect(PromptDriver.rows(cut, deploy) == [0, 1, 2])
     }
 
+    /// Six questions in a 56-column pane: the tab row wraps onto three lines.
+    @Test func ompWrappedTabRowIsNotPartOfTheQuestion() throws {
+        let prompt = try #require(ScreenPrompt.parse(try screen("omp-narrow-tabs")))
+        #expect(prompt.tabs == ["deploy-target", "database-engine", "migration-window", "retry-policy", "test-coverage", "release-notes"])
+        #expect(prompt.title == "Where should the api service deploy first?")
+        #expect(PromptDriver.matches(prompt, deployTarget))
+    }
+
+    /// omp shows the question as rendered markdown and continues a long label on the line below.
+    @Test func renderedMarkdownAndWrappedLabelMatchTheTranscript() throws {
+        let prompt = try #require(ScreenPrompt.parse(try screen("omp-wrapped-label")))
+        #expect(prompt.options.first?.label == "Staging cluster in us-east-1 behind the existing load balancer, with traffic mirrored from production for an")
+        #expect(PromptDriver.rows(prompt, deployTarget) == [0, 1, 2, 3])
+        #expect(PromptDriver.matches(prompt, deployTarget))
+        let other = AskQuestion(id: "d", question: deployTarget.question, options: [AskOption(label: "Staging cluster in us-east-1 behind the existing load balancer, with traffic mirrored from production for an afternoon")] + deployTarget.options.dropFirst())
+        #expect(!PromptDriver.matches(prompt, other))
+        #expect(PromptDriver.comparable("Use **[the docs](https://x.dev)** &amp; `make  test`") == PromptDriver.comparable("Use the docs & make test"))
+    }
+
     @Test func claudeQuestionWithTabs() throws {
         let prompt = try #require(ScreenPrompt.parse(try screen("claude-ask-q1")))
         #expect(prompt.style == .claudeAsk)
@@ -223,6 +242,24 @@ private let sheep = AskActivity(toolCallId: "x", questions: [
     AskQuestion(id: "q", question: "Which colour should the sheep be?",
                 options: [AskOption(label: "Red"), AskOption(label: "Green"), AskOption(label: "Blue")]),
 ])
+
+/// A real omp ask (18.4.4): markdown in questions, a label longer than a phone-width row.
+private let sixQuestions = AskActivity(toolCallId: "six", questions: [
+    AskQuestion(id: "deploy-target", question: "Where should the `api` service deploy first?", options: [
+        AskOption(label: "Staging cluster in us-east-1 behind the existing load balancer, with traffic mirrored from production for an hour"),
+        AskOption(label: "Production canary at 5%"), AskOption(label: "Local only")]),
+    AskQuestion(id: "database-engine", question: "Which database should the **ledger** use?",
+                options: [AskOption(label: "Postgres 18"), AskOption(label: "SQLite with WAL"), AskOption(label: "FoundationDB")]),
+    AskQuestion(id: "migration-window", question: "When should the migration run?",
+                options: [AskOption(label: "Tonight"), AskOption(label: "Saturday morning"), AskOption(label: "Next sprint")]),
+    AskQuestion(id: "retry-policy", question: "How should `RetryPolicy` back off?",
+                options: [AskOption(label: "Exponential with jitter"), AskOption(label: "Fixed 2 s"), AskOption(label: "No retries")]),
+    AskQuestion(id: "test-coverage", question: "Which test suites must pass before merge?",
+                options: [AskOption(label: "Unit"), AskOption(label: "Integration"), AskOption(label: "Snapshot")], multi: true),
+    AskQuestion(id: "release-notes", question: "Who writes the release notes?",
+                options: [AskOption(label: "Me"), AskOption(label: "The agent"), AskOption(label: "Skip them")]),
+])
+private let deployTarget = sixQuestions.questions[0]
 
 private let retry = AskQuestion(id: "retry_policy", question: "Reconnects to one host keep failing a few times in a row before succeeding, and the current backoff of 0.5, 1, 2, 4, then 8 seconds makes the inbox sit on \"Reconnecting…\" for a long time. I can change how quickly and how often the supervisor retries, but faster retries cost battery and can hammer a host that is really down. Which retry policy should the reconnect use?", options: [
     AskOption(label: "Keep current exponential backoff unchanged"),

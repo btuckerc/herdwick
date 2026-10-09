@@ -104,8 +104,15 @@ import HerdrAPI
         #expect(try await client.readFileTail(path: location.path, from: initial.fileSize + 10, limit: 40).bytes.isEmpty)
         #expect(try await client.readFileTail(path: "/missing.jsonl", from: 0, limit: 40).fileSize == 0)
 
-        var stream = client.followFile(path: location.path, from: 13).makeAsyncIterator()
-        #expect(try await stream.next() == Array(initial.bytes.dropFirst(13)))
+        var stream = client.followFile(path: location.path, lastBytes: initial.fileSize - 13, headLimit: 16).makeAsyncIterator()
+        #expect(try await stream.next() == .opened(fileSize: initial.fileSize, start: 13, head: Array(initial.bytes.prefix(16))))
+        #expect(try await stream.next() == .bytes(Array(initial.bytes.dropFirst(13))))
+        var resumed = client.followFile(path: location.path, lastBytes: 4, headLimit: 16, resumeOffset: 13).makeAsyncIterator()
+        #expect(try await resumed.next() == .opened(fileSize: initial.fileSize, start: 13, head: Array(initial.bytes.prefix(16))))
+        #expect(try await resumed.next() == .bytes(Array(initial.bytes.dropFirst(13))))
+        var fallback = client.followFile(path: location.path, lastBytes: 4, headLimit: 0, resumeOffset: initial.fileSize + 1).makeAsyncIterator()
+        #expect(try await fallback.next() == .opened(fileSize: initial.fileSize, start: initial.fileSize - 4, head: []))
+        #expect(try await fallback.next() == .bytes(Array(initial.bytes.suffix(4))))
         var reader = TranscriptReader()
         var conversation = Conversation()
         conversation.apply(reader.append(initial.bytes))
@@ -116,9 +123,9 @@ import HerdrAPI
 
         try await PromptDriver.answer(ask, replies: [.init(selected: ["Run migrations, then deploy"])],
                                       io: DemoPromptIO(client: client, path: location.path))
-        conversation.apply(reader.append(try #require(try await stream.next())))
+        conversation.apply(reader.append(try #require(try await stream.next()?.bytes)))
         #expect(conversation.pendingAsk == nil)
-        conversation.apply(reader.append(try #require(try await stream.next())))
+        conversation.apply(reader.append(try #require(try await stream.next()?.bytes)))
         #expect(conversation.items.last?.id == "deploy-final")
         let finished = try await client.readFileTail(path: location.path, from: initial.fileSize, limit: 100_000)
         var finishedReader = TranscriptReader()
@@ -133,9 +140,10 @@ import HerdrAPI
         let client = HerdrClient(runner: host)
         let path = DemoScenario.transcriptPath("p1")
         let head = try await client.readFileTail(path: path, from: 0, limit: 1000)
-        var stream = client.followFile(path: path, from: head.fileSize).makeAsyncIterator()
+        var stream = client.followFile(path: path, lastBytes: 0, headLimit: 0).makeAsyncIterator()
+        #expect(try await stream.next() == .opened(fileSize: head.fileSize, start: head.fileSize, head: []))
         host.startClock()
-        let appended = try #require(try await stream.next())
+        let appended = try #require(try await stream.next()?.bytes)
         #expect(String(decoding: appended, as: UTF8.self) == "{\"type\":\"title\",\"title\":\"After\"}\n")
 
         let studio = HerdrClient(runner: DemoHost(scenario: try .bundled("studio")))
@@ -159,14 +167,15 @@ import HerdrAPI
         let client = HerdrClient(runner: DemoHost(scenario: try .bundled("preview")))
         let path = DemoScenario.transcriptPath("p1")
         let head = try await client.readFileTail(path: path, from: 0, limit: 100_000)
-        var stream = client.followFile(path: path, from: head.fileSize).makeAsyncIterator()
+        var stream = client.followFile(path: path, lastBytes: 0, headLimit: 0).makeAsyncIterator()
+        _ = try await stream.next()
         try await client.sendText("Run the migrations first, then deploy", pane: "p1", submit: true, session: "main")
         var reader = TranscriptReader()
         var conversation = Conversation()
         conversation.apply(reader.append(head.bytes))
-        conversation.apply(reader.append(try #require(try await stream.next())))
+        conversation.apply(reader.append(try #require(try await stream.next()?.bytes)))
         #expect(conversation.pendingAsk == nil)
-        conversation.apply(reader.append(try #require(try await stream.next())))
+        conversation.apply(reader.append(try #require(try await stream.next()?.bytes)))
         #expect(conversation.items.contains { if case .tool(let tool) = $0 { tool.id == "deploy-run" && tool.state == .succeeded } else { false } })
     }
 
@@ -175,6 +184,10 @@ import HerdrAPI
             _ = try Fixture.scenario(timeline: #"[{"t":0,"do":"append","pane":"p1","records":"reply.jsonl"}]"#)
         }
     }
+}
+
+private extension FileFollowEvent {
+    var bytes: [UInt8]? { if case .bytes(let bytes) = self { bytes } else { nil } }
 }
 
 @Suite struct ScreenMarkupTests {

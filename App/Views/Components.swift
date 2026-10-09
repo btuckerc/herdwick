@@ -25,13 +25,15 @@ extension AgentStatus {
         }
     }
 
+    /// Filled silhouettes of a like weight, each its own shape: a question waiting, a check, a
+    /// dotted ring (at work, still: a spinner in every row is motion for its own sake), asleep.
     var symbol: String {
         switch self {
         case .blocked: "exclamationmark.bubble.fill"
         case .done: "checkmark.circle.fill"
-        case .working: "circle.dotted"
+        case .working: "circle.dotted.circle.fill"
         case .idle: "moon.zzz.fill"
-        case .unknown: "questionmark.circle"
+        case .unknown: "questionmark.circle.fill"
         }
     }
 }
@@ -174,46 +176,60 @@ struct FailureCard: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            GlassEffectContainer {
-                HStack {
-                    if failure.herdrStopped {
-                        Button {
-                            starting = true
-                            Task {
-                                startError = await connection.startHerdr()
-                                starting = false
-                            }
-                        } label: {
-                            if starting { ProgressView() } else { Text("Start herdr") }
-                        }
-                        .buttonStyle(.glassProminent)
-                        .disabled(starting)
-                    }
-                    if failure.herdrStopped {
-                        Button("Retry") { connection.handle(.userRetry) }.buttonStyle(.glass)
-                    } else {
-                        Button("Retry") { connection.handle(.userRetry) }.buttonStyle(.glassProminent)
-                    }
-                    if let presented = connection.rejectedHostKey {
-                        Button("Trust New Key…") { confirmingKey = true }
-                            .buttonStyle(.glass)
-                            .confirmationDialog("Trust the new host key?", isPresented: $confirmingKey, titleVisibility: .visible) {
-                                Button("Trust New Key", role: .destructive) { connection.trustPresentedHostKey() }
-                            } message: {
-                                Text("Pinned: \(pinnedFingerprint)\nPresented: \(presented.fingerprint)\n\nOnly trust it if you changed the server's key or reinstalled it.")
-                            }
-                    }
-                    if let onEdit {
-                        Button("Edit Host", action: onEdit).buttonStyle(.glass)
-                    }
-                }
+            // One row while every title fits on one line; otherwise full-width rows, never wrapped titles.
+            ViewThatFits(in: .horizontal) {
+                actions(stacked: false)
+                actions(stacked: true)
             }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.fill.quaternary, in: .rect(cornerRadius: 24))
-        .padding()
+        .confirmationDialog("Trust the new host key?", isPresented: $confirmingKey, titleVisibility: .visible) {
+            Button("Trust New Key", role: .destructive) { connection.trustPresentedHostKey() }
+        } message: {
+            if let presented = connection.rejectedHostKey {
+                Text("Pinned: \(pinnedFingerprint)\nPresented: \(presented.fingerprint)\n\nOnly trust it if you changed the server's key or reinstalled it.")
+            }
+        }
         .onChange(of: failure) { startError = nil }
+    }
+
+    private func actions(stacked: Bool) -> some View {
+        let layout = stacked ? AnyLayout(VStackLayout(spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
+        func title(_ text: String) -> some View {
+            Text(text).lineLimit(1).frame(maxWidth: stacked ? .infinity : nil)
+        }
+        return GlassEffectContainer(spacing: 8) {
+            layout {
+                if failure.herdrStopped {
+                    Button {
+                        starting = true
+                        Task {
+                            startError = await connection.startHerdr()
+                            starting = false
+                        }
+                    } label: {
+                        if starting { ProgressView().frame(maxWidth: stacked ? .infinity : nil) } else { title("Start herdr") }
+                    }
+                    .buttonStyle(.glassProminent)
+                    .disabled(starting)
+                    Button { connection.handle(.userRetry) } label: { title("Retry") }
+                        .buttonStyle(.glass)
+                } else {
+                    Button { connection.handle(.userRetry) } label: { title("Retry") }
+                        .buttonStyle(.glassProminent)
+                }
+                if connection.rejectedHostKey != nil {
+                    Button { confirmingKey = true } label: { title("Trust New Key…") }
+                        .buttonStyle(.glass)
+                }
+                if let onEdit {
+                    Button(action: onEdit) { title("Edit Host") }
+                        .buttonStyle(.glass)
+                }
+            }
+        }
     }
 
     private var pinnedFingerprint: String {
@@ -222,9 +238,11 @@ struct FailureCard: View {
 }
 
 extension Agent {
-    /// The conversation's name as a person would say it. Agents put a glyph before their
-    /// terminal title ("π: Fix the build", "✳ Claude Code"); the name starts after it.
+    /// The conversation's name as a person would say it: the name given in herdr, else the
+    /// terminal title past the glyph agents put before it ("π: Fix the build", "✳ Claude
+    /// Code").
     var conversationTitle: String {
+        if let label, !label.isEmpty { return label }
         var text = Substring(title)
         if let colon = text.firstIndex(of: ":"), text.distance(from: text.startIndex, to: colon) <= 2 {
             text = text[text.index(after: colon)...]
@@ -250,6 +268,8 @@ func homeRelative(_ path: String) -> String {
 /// The message field and send button shared by the conversation and the terminal.
 struct MessageComposer: View {
     @Environment(Settings.self) private var settings
+    @Environment(DictationController.self) private var dictation
+    @Environment(\.openURL) private var openURL
     @Binding var draft: String
     @Binding var attachments: [DraftAttachment]
     var sending: Bool
@@ -259,6 +279,15 @@ struct MessageComposer: View {
     var actions: [ComposerAction] = []
     /// Bumped to put the keyboard away (an ask card arriving); the field's own focus is UIKit's.
     var dismissals = 0
+    /// The agent dock stands over the send button, as the mic does over +; a field taller
+    /// than the pair carries both up to its top corners.
+    var docksAgents = false
+    /// The line over the field, beside the dock (the conversation's pinned Now line).
+    var pinned: AnyView?
+    /// Off line or without an agent: the field, attachments and send are off; the pinned line stays live.
+    var locked = false
+    /// Names the fallback speech model is told to expect, read when dictation starts.
+    var vocabulary: () -> [String] = { [] }
     let onSend: () -> Void
     @State private var photos: [PhotosPickerItem] = []
     @State private var showPhotos = false
@@ -268,90 +297,41 @@ struct MessageComposer: View {
     @State private var importTask: Task<Void, Never>?
     @State private var importID = UUID()
     @State private var previewing: ImagePreviewSource?
+    @State private var dictationOwner = UUID()
+    @State private var field = ComposerHandle()
+    /// The dictionary as it stood when this dictation started: the preview and the draft agree.
+    @State private var dictionary: (terms: [String], rules: [WordReplacement]) = ([], [])
+    @ScaledMetric(relativeTo: .callout) private var transcriptHeight = 86.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The card is up (opening, open or closing) and how far it has grown out of the mic.
+    @State private var cardShown = false
+    @State private var cardProgress: CGFloat = 0
+    /// The field's height and the bar's, which place the mic and dock (and the card's stem).
+    @State private var fieldHeight = AgentDock.size
+    @State private var barHeight = AgentDock.size * 2 + 8
 
     private var busy: Bool { sending || importing }
+    /// This composer's dictation is under way: nothing sends until its words are in the draft.
+    private var dictating: Bool { dictation.owner == dictationOwner && dictation.state.blocksSending }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !attachments.isEmpty {
-                ScrollView(.horizontal) {
-                    HStack {
-                        ForEach(attachments) { attachment in
-                            HStack(spacing: 6) {
-                                // The picture and name open the preview; Remove stays its own button.
-                                Button {
-                                    previewing = .local(attachment.data, name: attachment.filename, id: attachment.id)
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        if let thumbnail = attachment.thumbnail {
-                                            Image(uiImage: thumbnail).resizable().scaledToFill()
-                                                .frame(width: 32, height: 32).clipped()
-                                        }
-                                        VStack(alignment: .leading) {
-                                            Text(attachment.filename).lineLimit(1)
-                                            Text(attachment.state).font(.caption2).foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    .contentShape(.rect)
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!attachment.isImage)
-                                .accessibilityHint(attachment.isImage ? "Shows the image" : "")
-                                Button {
-                                    attachments.removeAll { $0.id == attachment.id }
-                                } label: { Image(systemName: "xmark") }
-                                .disabled(busy)
-                                .accessibilityLabel("Remove \(attachment.filename)")
-                            }
-                            .font(.caption)
-                            .padding(8)
-                            .background(.fill.tertiary, in: .rect(cornerRadius: 10))
-                        }
-                    }
+        // Listening, the card's stem stands in the bar where the mic was, running down to it
+        // past the pinned line when the field is tall.
+        VStack(alignment: .leading, spacing: -(AgentDock.size + micDrop)) {
+            if cardShown { dictationCard.zIndex(1) }
+            bar.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { barHeight = $0 }
+        }
+        // The card grows out of the mic on appearing; closing, it shrinks back in, still in the
+        // layout so the thread settles with it, then goes. Reduce Motion just swaps them.
+        .onChange(of: dictating) { _, now in
+            if !now {
+                withAnimation(reduceMotion ? nil : .spring(duration: 0.24)) { cardProgress = 0 } completion: {
+                    if !dictating { cardShown = false }
                 }
-            }
-            GlassEffectContainer {
-                HStack(alignment: .bottom, spacing: 8) {
-                    Menu {
-                        Button("Photo Library", systemImage: "photo.on.rectangle") { showPhotos = true }
-                        Button("Files", systemImage: "folder") { showFiles = true }
-                        if !settings.snippets.isEmpty {
-                            Menu("Insert Snippet", systemImage: "text.badge.plus") {
-                                ForEach(settings.snippets) { snippet in
-                                    Button(snippet.title) { insert(snippet.text) }
-                                }
-                            }
-                        }
-                        ForEach(actions) { action in
-                            Button(action.title, systemImage: action.systemImage, action: action.perform)
-                                .disabled(busy || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
-                    } label: {
-                        Image(systemName: "plus").frame(width: 30, height: 30)
-                    }
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.circle)
-                    .disabled(busy)
-                    .accessibilityLabel("Attach")
-                    ComposerTextView(text: $draft, focus: focus, placeholder: placeholder,
-                                     autocorrect: settings.composerAutocorrect,
-                                     returnKeySends: settings.returnKeySends, dismissals: dismissals) {
-                        if !busy { onSend() }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 11)
-                    // Not `.interactive()`: its touch handling takes taps from the + menu's
-                    // items where they overlap the field, all but their leading glyph.
-                    .glassEffect(.regular, in: .rect(cornerRadius: 22))
-                    Button(action: onSend) {
-                        Image(systemName: "arrow.up")
-                            .font(.body.weight(.semibold)).frame(width: 30, height: 30)
-                    }
-                    .buttonStyle(.glassProminent)
-                    .buttonBorderShape(.circle)
-                    .disabled(busy || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
-                    .accessibilityLabel("Send")
-                }
+            } else if cardShown {
+                withAnimation(openCard) { cardProgress = 1 }
+            } else {
+                cardShown = true
             }
         }
         // The field stays enabled while sending: disabling it would drop the keyboard.
@@ -409,10 +389,252 @@ struct MessageComposer: View {
             importTask = nil
             importing = false
             photos = []
+            dictation.cancel(owner: dictationOwner)
         }
         .alert("Couldn't attach", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
             Button("OK", role: .cancel) {}
         } message: { Text(importError ?? "") }
+        .alert("Dictation unavailable", isPresented: Binding(get: { dictationFailure != nil }, set: { if !$0 { dictation.clearError() } })) {
+            if dictation.permissionDenied {
+                Button("Open Settings") { openURL(URL(string: UIApplication.openSettingsURLString)!) }
+            }
+            Button("OK", role: .cancel) {}
+        } message: { Text(dictationFailure ?? "") }
+    }
+
+    /// The mic over +, the dock over send: a short field leaves them stacked on those buttons,
+    /// a taller one carries them up to its top corners.
+    private var sideHeight: CGFloat { max(AgentDock.size * 2 + 8, fieldHeight) }
+    /// How far below the bar's top the mic stands (under the pinned line beside a tall field).
+    private var micDrop: CGFloat { max(0, barHeight - sideHeight) }
+
+    private var bar: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            // Listening, the card's stem holds the mic's place.
+            VStack(spacing: 0) {
+                if cardShown {
+                    Color.clear.frame(width: AgentDock.size, height: AgentDock.size)
+                } else {
+                    dictationButton
+                }
+                Spacer(minLength: 8)
+                attachMenu
+            }
+            .frame(height: sideHeight)
+            VStack(alignment: .leading, spacing: 8) {
+                // A button tall, so it rides the mic's and the dock's center line.
+                if let pinned { pinned.frame(maxWidth: .infinity, minHeight: AgentDock.size, alignment: .leading) }
+                if !attachments.isEmpty { attachmentStrip.disabled(locked) }
+                ComposerTextView(text: $draft, focus: focus, placeholder: placeholder,
+                                 autocorrect: settings.composerAutocorrect,
+                                 returnKeySends: settings.returnKeySends, dismissals: dismissals,
+                                 sendsBlocked: dictating, onDictate: toggleDictation,
+                                 onCancelDictation: { dictation.cancel(owner: dictationOwner) }, handle: field) {
+                    if !busy && !dictating { onSend() }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 11)
+                // Not `.interactive()`: its touch handling takes taps from the + menu's
+                // items where they overlap the field, all but their leading glyph.
+                .glassEffect(.regular, in: .rect(cornerRadius: 22))
+                .disabled(locked)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fieldHeight = $0 }
+            }
+            // Outside any glass container: the dock's slot preference doesn't come out of one.
+            VStack(spacing: 0) {
+                if docksAgents { AgentDock.slot }
+                Spacer(minLength: 8)
+                Button(action: onSend) {
+                    Image(systemName: "arrow.up")
+                        .font(.body.weight(.semibold)).frame(width: 30, height: 30)
+                }
+                .buttonStyle(.glassProminent)
+                .buttonBorderShape(.circle)
+                .disabled(locked || busy || dictating || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
+                .accessibilityLabel("Send")
+            }
+            .frame(height: sideHeight)
+        }
+    }
+
+    private var dictationFailure: String? {
+        guard dictation.owner == dictationOwner, case .failed(let message) = dictation.state else { return nil }
+        return message
+    }
+
+    /// The mic, opened: one piece of glass, an L. Its stem is Stop, where the mic stood; its top
+    /// runs across the bar with what's been heard (the model's open guess dimmed) and Cancel.
+    /// The words reach the draft at Stop, rewritten by the dictionary as shown; with the live
+    /// transcript off it is one status line. Nothing pulses: the words, or "Hearing you…", are
+    /// the sign it hears you.
+    @ViewBuilder private var dictationCard: some View {
+        let recording = dictation.state == .recording
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 4) {
+                let words = cardWords.font(.callout).frame(maxWidth: .infinity, alignment: .leading)
+                // Hugs the words up to about four lines; past that it scrolls, held at the newest.
+                ScrollView { words }
+                    .defaultScrollAnchor(.bottom)
+                    .scrollBounceBehavior(.basedOnSize)
+                    .frame(maxHeight: transcriptHeight)
+                    .fixedSize(horizontal: false, vertical: true)
+                    // The first line on Cancel's center.
+                    .padding(.vertical, 4)
+                Button("Cancel Dictation", systemImage: "xmark.circle.fill") { dictation.cancel(owner: dictationOwner) }
+                    .labelStyle(.iconOnly)
+                    .font(.title3)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 30, height: 30)
+                    .contentShape(.circle)
+                    .buttonStyle(.plain)
+            }
+            .padding(.leading, 16)
+            .padding(.trailing, 7)
+            .padding(.vertical, 7)
+            Button(dictating ? "Stop Dictation" : "Dictate", systemImage: dictating ? "stop.fill" : "mic.fill", action: toggleDictation)
+                .labelStyle(.iconOnly)
+                .font(dictating ? .footnote : .callout)
+                .foregroundStyle(recording ? Color.red : Color.secondary)
+                .frame(width: AgentDock.size, height: AgentDock.size)
+                .contentShape(.circle)
+                .buttonStyle(.plain)
+                // Outside `locked`, so a lost connection can't disable it.
+                .disabled(!recording)
+                .padding(.top, cardStem - AgentDock.size)
+        }
+        .modifier(DictationUnfold(progress: cardProgress, stem: cardStem))
+        .onAppear { withAnimation(openCard) { cardProgress = 1 } }
+    }
+
+    /// The stem's length under the card: down to the mic, wherever it stands.
+    private var cardStem: CGFloat { DictationShape.stem + micDrop }
+
+    /// Out of the mic with no overshoot, already moving on its first frame (one from rest adds
+    /// to the beat between the tap and the growth). Critically damped, so it never grows past
+    /// full and back: with the keyboard going down under it, any bounce reads as a wobble.
+    private var openCard: Animation? { reduceMotion ? nil : .interpolatingSpring(duration: 0.28, bounce: 0, initialVelocity: 4) }
+
+    /// Closing, the card empties: its words are in the draft, or dropped.
+    private var cardWords: Text {
+        guard dictating else { return Text(verbatim: " ") }
+        return (settings.showsLiveTranscript ? heard : nil) ?? Text(dictationStatus).foregroundStyle(.secondary)
+    }
+
+    private var heard: Text? {
+        let finalized = Self.rewrite(dictation.finalizedText, with: dictionary)
+        // The guess is rewritten too, so a term looks the same before and after it settles.
+        let guess = Self.rewrite(dictation.volatileText, with: dictionary)
+        guard !finalized.isEmpty || !guess.isEmpty else { return nil }
+        return Text("\(finalized)\(Text(guess).foregroundStyle(.secondary))")
+    }
+
+    /// Shown until the first words, or throughout with the live transcript off.
+    private var dictationStatus: String {
+        switch dictation.state {
+        case .preparing: dictation.downloading ? "Downloading speech model…" : "Preparing…"
+        case .finishing: "Finishing…"
+        default: dictation.finalizedText.isEmpty && dictation.volatileText.isEmpty ? "Listening…" : "Hearing you…"
+        }
+    }
+
+    /// Tap to listen; it opens into the card, whose stem is Stop. It never sends. It puts the
+    /// keyboard away for the room (a tap in the field brings it back); ⌘⇧D leaves it up.
+    private var dictationButton: some View {
+        Button {
+            // A turn later, not inside the tap's action: resigned there, the keyboard's going
+            // drops the bar to the screen's edge and springs it back.
+            Task { @MainActor [field] in field.input?.resignFirstResponder() }
+            toggleDictation()
+        } label: {
+            // Filled and a size down: the outline mic's strokes outweighed the +.
+            Image(systemName: "mic.fill").font(.callout).frame(width: 30, height: 30)
+        }
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        // One session app-wide.
+        .disabled(locked || dictation.state.blocksSending)
+        .accessibilityLabel("Dictate")
+    }
+
+    private func toggleDictation() {
+        if dictating {
+            if dictation.state == .recording { dictation.stop(owner: dictationOwner) }
+        } else if !locked {
+            let dictionary = (terms: settings.knownTerms, rules: settings.dictationReplacements)
+            self.dictionary = dictionary
+            dictation.start(owner: dictationOwner, terms: dictionary.terms, names: vocabulary()) { [field] in
+                field.input?.insertDictation(Self.rewrite($0, with: dictionary))
+            }
+        }
+    }
+
+    /// Replacements first, on the words as heard (their left side is what the recognizer
+    /// wrote), then known terms.
+    private static func rewrite(_ text: String, with dictionary: (terms: [String], rules: [WordReplacement])) -> String {
+        KnownTerms.apply(dictionary.terms, to: WordReplacement.apply(dictionary.rules, to: text))
+    }
+
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal) {
+            HStack {
+                ForEach(attachments) { attachment in
+                    HStack(spacing: 6) {
+                        // The picture and name open the preview; Remove stays its own button.
+                        Button {
+                            previewing = .local(attachment.data, name: attachment.filename, id: attachment.id)
+                        } label: {
+                            HStack(spacing: 6) {
+                                if let thumbnail = attachment.thumbnail {
+                                    Image(uiImage: thumbnail).resizable().scaledToFill()
+                                        .frame(width: 32, height: 32).clipped()
+                                }
+                                VStack(alignment: .leading) {
+                                    Text(attachment.filename).lineLimit(1)
+                                    Text(attachment.state).font(.caption2).foregroundStyle(.secondary)
+                                }
+                            }
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!attachment.isImage)
+                        .accessibilityHint(attachment.isImage ? "Shows the image" : "")
+                        Button {
+                            attachments.removeAll { $0.id == attachment.id }
+                        } label: { Image(systemName: "xmark") }
+                        .disabled(busy)
+                        .accessibilityLabel("Remove \(attachment.filename)")
+                    }
+                    .font(.caption)
+                    .padding(8)
+                    .background(.fill.tertiary, in: .rect(cornerRadius: 10))
+                }
+            }
+        }
+    }
+
+    private var attachMenu: some View {
+        Menu {
+            Button("Photo Library", systemImage: "photo.on.rectangle") { showPhotos = true }
+            Button("Files", systemImage: "folder") { showFiles = true }
+            if !settings.snippets.isEmpty {
+                Menu("Insert Snippet", systemImage: "text.badge.plus") {
+                    ForEach(settings.snippets) { snippet in
+                        Button(snippet.title) { insert(snippet.text) }
+                    }
+                }
+            }
+            ForEach(actions) { action in
+                Button(action.title, systemImage: action.systemImage, action: action.perform)
+                    .disabled(busy || dictating || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        } label: {
+            Image(systemName: "plus").font(.body.weight(.medium)).frame(width: 30, height: 30)
+        }
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        .disabled(locked || busy)
+        .accessibilityLabel("Attach")
     }
 
     /// Adds a snippet at the end of the draft on its own line; the draft is never sent here.
@@ -427,4 +649,83 @@ struct ComposerAction: Identifiable {
     let systemImage: String
     let perform: () -> Void
     var id: String { title }
+}
+
+/// The dictation card's outline: a rounded card with a stem down its leading edge, as wide as the
+/// mic and ending round like it, joined by a small inside curve. Below `progress` 1 it is the
+/// part grown so far out of the mic, from the bottom leading corner: at 0, the mic's circle.
+struct DictationShape: Shape {
+    /// The stem's length under the card at the least: the gap over the bar, then the mic's place.
+    static let stem = AgentDock.size + 8
+    var progress: CGFloat = 1
+    /// Its length here: longer when the mic stands lower in the bar.
+    var stemLength = stem
+
+    /// The height shown of a card `height` tall.
+    static func grown(_ height: CGFloat, _ progress: CGFloat) -> CGFloat {
+        AgentDock.size + (height - AgentDock.size) * progress
+    }
+
+    func path(in full: CGRect) -> Path {
+        let stemWidth = AgentDock.size
+        let height = Self.grown(full.height, progress)
+        let rect = CGRect(x: full.minX, y: full.maxY - height,
+                          width: stemWidth + (full.width - stemWidth) * min(progress, 1), height: height)
+        let bottom = rect.maxY - stemLength
+        guard bottom > rect.minY else { return Path(roundedRect: CGRect(x: rect.minX, y: rect.minY, width: stemWidth, height: height), cornerRadius: stemWidth / 2) }
+        let radius = min(stemWidth / 2, (bottom - rect.minY) / 2, rect.width / 2)
+        // Narrower than fully open, the corners give way rather than cross the stem.
+        let inner = max(0, min(radius, rect.width - stemWidth))
+        let fillet = max(0, min(8, rect.width - stemWidth - inner))
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addArc(tangent1End: CGPoint(x: rect.maxX, y: rect.minY), tangent2End: CGPoint(x: rect.maxX, y: bottom), radius: radius)
+        path.addArc(tangent1End: CGPoint(x: rect.maxX, y: bottom), tangent2End: CGPoint(x: rect.minX, y: bottom), radius: inner)
+        path.addArc(tangent1End: CGPoint(x: rect.minX + stemWidth, y: bottom), tangent2End: CGPoint(x: rect.minX + stemWidth, y: rect.maxY), radius: fillet)
+        path.addArc(tangent1End: CGPoint(x: rect.minX + stemWidth, y: rect.maxY), tangent2End: CGPoint(x: rect.minX, y: rect.maxY), radius: stemWidth / 2)
+        path.addArc(tangent1End: CGPoint(x: rect.minX, y: rect.maxY), tangent2End: CGPoint(x: rect.minX, y: rect.minY), radius: stemWidth / 2)
+        path.addArc(tangent1End: CGPoint(x: rect.minX, y: rect.minY), tangent2End: CGPoint(x: rect.maxX, y: rect.minY), radius: radius)
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// The dictation card's glass, grown out of the mic as `progress` goes from 0 to 1, and back
+/// in on close: it rises and widens from the stem, its words revealed rather than faded (faded
+/// glass pops in late), and takes its room in the bar as it grows, so the thread above moves
+/// with it rather than jumping first.
+struct DictationUnfold: ViewModifier, Animatable {
+    var progress: CGFloat
+    var stem = DictationShape.stem
+
+    nonisolated var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let shape = DictationShape(progress: progress, stemLength: stem)
+        // Its room starts at what the stem covers of the bar, so the bar doesn't shift as it comes.
+        Grown(progress: progress, base: stem - DictationShape.stem + AgentDock.size) {
+            content.clipShape(shape).contentShape(shape).glassEffect(.regular, in: shape)
+        }
+    }
+
+    /// Takes the height grown so far; the card stands full size on its bottom edge.
+    private struct Grown: Layout {
+        var progress: CGFloat
+        var base: CGFloat
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            let size = subviews.first?.sizeThatFits(proposal) ?? .zero
+            return CGSize(width: size.width, height: base + (size.height - base) * progress)
+        }
+
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+            guard let card = subviews.first else { return }
+            let size = card.sizeThatFits(ProposedViewSize(width: bounds.width, height: proposal.height))
+            card.place(at: CGPoint(x: bounds.minX, y: bounds.maxY), anchor: .bottomLeading,
+                       proposal: ProposedViewSize(width: bounds.width, height: size.height))
+        }
+    }
 }

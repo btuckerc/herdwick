@@ -10,7 +10,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
-    MARKETING_VERSION: "1.0"
+    MARKETING_VERSION: "1.1"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
 packages:
@@ -50,6 +50,7 @@ targets:
       properties:
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: Herdwick connects to herdr on computers on your local network.
+        NSMicrophoneUsageDescription: Dictate messages to your agents. Speech is transcribed on this iPhone.
         NSFaceIDUsageDescription: Unlock your Herdwick conversations.
         NSPhotoLibraryAddUsageDescription: Save images from your conversations to your photo library.
         NSSupportsLiveActivities: true

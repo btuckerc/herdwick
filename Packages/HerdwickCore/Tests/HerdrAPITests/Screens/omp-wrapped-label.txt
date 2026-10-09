@@ -1,0 +1,38 @@
+
+ Call the ask tool exactly once, with exactly these six questions and options, copied verbatim (keep the backticks and
+ asterisks). Do nothing else before or after; after the answers come back, just repeat them.
+
+ 1. id deploy-target, question: "Where should the api service deploy first?", options: "Staging cluster in us-east-1
+    behind the existing load balancer, with traffic mirrored from production for an hour", "Production canary at 5%",
+    "Local only".
+ 2. id database-engine, question: "Which database should the ledger use?", options: "Postgres 18", "SQLite with WAL",
+    "FoundationDB".
+ 3. id migration-window, question: "When should the migration run?", options: "Tonight", "Saturday morning", "Next
+    sprint".
+ 4. id retry-policy, question: "How should RetryPolicy back off?", options: "Exponential with jitter", "Fixed 2 s",
+    "No retries".
+ 5. id test-coverage, question: "Which test suites must pass before merge?", multi: true, options: "Unit",
+    "Integration", "Snapshot".
+ 6. id release-notes, question: "Who writes the release notes?", options: "Me", "The agent", "Skip them".
+
+
+  󱊷 Working…
+
+╭─ Ask ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  deploy-target    database-engine    migration-window    retry-policy    test-coverage    release-notes    Submit   │
+│ Where should the api service deploy first?                                                                          │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│   Staging cluster in us-east-1 behind the existing load balancer, with traffic mirrored from production for an    │
+│     hour                                                                                                            │
+│    Production canary at 5%                                                                                         │
+│    Local only                                                                                                      │
+│    Other (type your own)                                                                                           │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 󰌑 select · n note · ↑/↓ move · 󰌒/←/→ · 󱊷 cancel                                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+work

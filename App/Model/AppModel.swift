@@ -1,5 +1,6 @@
 import BackgroundTasks
 import Foundation
+import HerdrAPI
 import Network
 import SwiftUI
 
@@ -16,6 +17,7 @@ final class AppModel {
     private var pendingAddress: PaneAddress?
     private var pendingReply: (address: PaneAddress, draftID: String)?
     let watchedRun = WatchedRun()
+    let conversations = ConversationRegistry()
     private var activeScene: SceneState? { activeSceneID.flatMap { scenes[$0] } }
     var selectedHostID: HostProfile.ID? { activeScene?.selectedHostID ?? initialHostID }
     var connection: HostConnection? { activeScene.flatMap { connection(in: $0) } ?? selectedHostID.flatMap { primary[$0] } ?? demoConnection }
@@ -53,14 +55,21 @@ final class AppModel {
         }
     }
 
-    /// Profile order, then session name. Failed hosts remain present for inline recovery.
+    /// Profile order, then session name. Failed hosts remain present for inline recovery; hosts
+    /// turned off are left out (a selected one's link only stands in for it on screen).
     var connections: [HostConnection] {
         if demo != nil { return demoConnection.map { [$0] } ?? [] }
-        return profiles.flatMap { profile in
+        return profiles.filter(\.isEnabled).flatMap { profile in
             let links = (primary[profile.id].map { [$0] } ?? [])
                 + additional.filter { $0.key.hostID == profile.id }.map(\.value)
             return links.sorted { ($0.activeSession ?? $0.profile.session ?? "") < ($1.activeSession ?? $1.profile.session ?? "") }
         }
+    }
+
+    /// "3 hosts": the hosts All Hosts covers, the ones that are on.
+    var enabledHostsLabel: String {
+        let count = profiles.filter(\.isEnabled).count
+        return count == 1 ? "1 host" : "\(count) hosts"
     }
 
     func connection(for address: SessionAddress) -> HostConnection? {
@@ -104,17 +113,22 @@ final class AppModel {
                               })
         settings.onNotifyNeedsYouChange = { [weak self] in self?.attention?.refresh() }
         push = Push(settings: settings)
-        if profiles.contains(where: \.isTailnet) || tailnet.isConfigured {
+        tailnet.carriesLiveLink = { [weak self] in self?.connections.contains(where: \.ridesTailnet) ?? false }
+        if profiles.contains(where: { $0.isTailnet && $0.isEnabled }) || tailnet.isConfigured {
             tailnet.start()
         }
         let lastID = UserDefaults.standard.string(forKey: "selected-host").flatMap(UUID.init(uuidString:))
-        if let profile = profiles.first(where: { $0.id == lastID }) ?? profiles.first {
-            select(profile.id)
+        if let id = settled(lastID) {
+            select(id)
         }
         pathMonitor.pathUpdateHandler = { [weak self] path in
             let satisfied = path.status == .satisfied
+            let local = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
             let signature = "\(path.status)|" + path.availableInterfaces.map(\.name).sorted().joined(separator: ",")
-            Task { @MainActor in self?.pathChanged(satisfied: satisfied, signature: signature) }
+            Task { @MainActor in
+                HostConnection.onLocalNetwork = local
+                self?.pathChanged(satisfied: satisfied, signature: signature)
+            }
         }
         pathMonitor.start(queue: DispatchQueue(label: "herdwick.path"))
         observeScope()
@@ -160,7 +174,8 @@ final class AppModel {
         guard demo == nil else { return }
         defer { attention?.refresh() }
         let selected = Set(scenes.values.compactMap(\.selectedHostID) + [initialHostID, watchedRun.address?.hostID].compactMap { $0 })
-        let desired = Set(profiles.filter { settings.allHosts || selected.contains($0.id) }.map(\.id))
+        // A host that's off is linked only while it's selected, and that link never dials.
+        let desired = Set(profiles.filter { selected.contains($0.id) || settings.allHosts && $0.isEnabled }.map(\.id))
         for id in Array(primary.keys) where !desired.contains(id) {
             primary.removeValue(forKey: id)?.stop()
         }
@@ -175,13 +190,15 @@ final class AppModel {
                     if isForeground { link.handle(.userRetry) }
                 }
             } else {
-                let link = HostConnection(profile: profile, tailnet: tailnet, onSessions: { [weak self] link in
+                let link = HostConnection(profile: profile, tailnet: tailnet, conversations: conversations, onSessions: { [weak self] link in
                     self?.reconcileSessions(link)
                 })
                 link.includesAllSessions = true
                 link.onAttentionChange = { [weak self] in self?.changed($0) }
                 link.onLive = { [weak self] in self?.wentLive($0) }
                 primary[profile.id] = link
+                // Sessions restored from the last launch get their links (and cached inboxes) now.
+                reconcileSessions(link)
                 if isForeground { link.handle(.start) }
             }
         }
@@ -204,7 +221,7 @@ final class AppModel {
             // host-key failure and detail-stream lifetimes independent. Sharing SSH
             // would require a new host-level supervisor and cross-session cancellation
             // ownership. Cost: one SSH keepalive per session, all closed in background.
-            let link = HostConnection(profile: profile, tailnet: tailnet)
+            let link = HostConnection(profile: profile, tailnet: tailnet, conversations: conversations)
             link.onAttentionChange = { [weak self] in self?.changed($0) }
             link.onLive = { [weak self] in self?.wentLive($0) }
             additional[key] = link
@@ -212,16 +229,19 @@ final class AppModel {
         }
     }
 
-    func refresh() async {
+    /// Discovers sessions on every host. `explicit`: the user asked (pull to refresh, Refresh),
+    /// so every link not live tries again at once, even one still connecting.
+    func refresh(explicit: Bool = false) async {
         guard isForeground else { return }
         if let demoConnection, demo != nil {
-            await demoConnection.refreshSessions()
+            await demoConnection.refreshSessions(explicit: explicit)
             return
         }
+        if explicit { for link in additional.values where !link.isLive { link.handle(.userRetry) } }
         // Discover once per host, not once per mirrored session.
         let links = profiles.compactMap { primary[$0.id] }
         await withTaskGroup(of: Void.self) { group in
-            for link in links { group.addTask { await link.refreshSessions() } }
+            for link in links { group.addTask { await link.refreshSessions(explicit: explicit) } }
         }
     }
 
@@ -249,30 +269,55 @@ final class AppModel {
         ProfileStorage.save(profiles)
     }
 
-    /// Saves edits; a changed route, user or auth reconnects with the new settings.
+    /// Saves edits; a changed route, user or auth reconnects with the new settings. A host
+    /// turned off hands its windows to the first host that's on.
     func update(_ profile: HostProfile) {
         store(profile)
         primary.removeValue(forKey: profile.id)?.stop()
+        SnapshotStore.remove(hostID: profile.id)
         for key in Array(additional.keys) where key.hostID == profile.id {
             additional.removeValue(forKey: key)?.stop()
         }
+        settleSelection()
         reconcile()
+    }
+
+    func setEnabled(_ enabled: Bool, for id: HostProfile.ID) {
+        guard var profile = profiles.first(where: { $0.id == id }), profile.isEnabled != enabled else { return }
+        profile.isEnabled = enabled
+        update(profile)
     }
 
     func delete(_ id: HostProfile.ID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
         try? TranscriptCache.remove(hostID: profile.id)
+        SnapshotStore.remove(hostID: profile.id)
         Keychain.delete(profile.passwordAccount)
         Keychain.delete(profile.hostKeyAccount)
         profiles.removeAll { $0.id == id }
         ProfileStorage.save(profiles)
-        if initialHostID == id { initialHostID = profiles.first?.id }
-        for scene in scenes.values where scene.selectedHostID == id {
-            scene.selectedHostID = profiles.first?.id
+        settleSelection()
+        reconcile()
+    }
+
+    /// `id` if it's a host that's on; else the first host that's on; with none on, `id` while
+    /// it's still saved (its window shows it off), else the first saved host.
+    private func settled(_ id: HostProfile.ID?) -> HostProfile.ID? {
+        if profiles.contains(where: { $0.id == id && $0.isEnabled }) { return id }
+        if let on = profiles.first(where: \.isEnabled) { return on.id }
+        return profiles.contains { $0.id == id } ? id : profiles.first?.id
+    }
+
+    /// Moves windows off a host that's gone or turned off.
+    private func settleSelection() {
+        initialHostID = settled(initialHostID)
+        for scene in scenes.values {
+            let id = settled(scene.selectedHostID)
+            guard id != scene.selectedHostID else { continue }
+            scene.selectedHostID = id
             scene.selectedSession = nil
             scene.navigationPath = []
         }
-        reconcile()
     }
 
     private func store(_ profile: HostProfile) {
@@ -296,7 +341,9 @@ final class AppModel {
             director.run(connection: nil)
             return
         }
-        let connection = HostConnection(profile: director.profile, tailnet: tailnet, demo: director.host)
+        let demoConversations = ConversationRegistry()
+        demoConversations.persistent = false
+        let connection = HostConnection(profile: director.profile, tailnet: tailnet, conversations: demoConversations, demo: director.host)
         self.demoConnection = connection
         connection.handle(.start)
         director.run(connection: connection)
@@ -307,7 +354,7 @@ final class AppModel {
         stopAll()
         for scene in scenes.values { scene.navigationPath = [] }
         endDemoHost()
-        if let first = profiles.first { select(first.id) }
+        if let id = settled(nil) { select(id) }
     }
 
     private func endDemoHost() {
@@ -384,6 +431,7 @@ final class AppModel {
         guard demo == nil, !isForeground else { return }
         let links = connections
         let before = links.map(\.liveID)
+        tailnet.recover()
         for link in links { link.handle(.foregrounded) }
         let deadline = ContinuousClock.now + .seconds(20)
         func settled(_ link: HostConnection, _ id: Int) -> Bool {
@@ -409,17 +457,27 @@ final class AppModel {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            // Back from the background, where iOS has likely suspended the process; not if a
+            // handoff still holds it awake, where a rebind would only reset the paths under live links.
+            if !isForeground {
+                ConnectTrace.note(handoff == nil ? "foreground" : "foreground during handoff")
+                if handoff == nil { tailnet.recover() }
+            }
             isForeground = true
             reconcile()
             for link in connections { link.handle(.foregrounded) }
             Task { await refresh() }
         case .background:
             isForeground = false
+            ConnectTrace.note("background")
             guard demo == nil, let push else {
                 for link in connections { link.handle(.backgrounded) }
                 return
             }
             scheduleRefresh()
+            // Only live links take part in the handoff. An attempt left running would outlive
+            // the suspension on sockets iOS may reclaim, and the return would wait on it.
+            for link in connections where link.isConnecting { link.handle(.backgrounded) }
             // One already in flight closes the links when it ends.
             guard handoff == nil else { return }
             // Hand each host its push watcher over its live link, then close every link. Arming
@@ -471,6 +529,7 @@ final class AppModel {
     private func pathChanged(satisfied: Bool, signature: String) {
         defer { pathSignature = signature }
         guard let previous = pathSignature, previous != signature else { return }
+        if satisfied { tailnet.recover() }
         for link in connections { link.handle(.pathChanged(satisfied: satisfied)) }
     }
 }

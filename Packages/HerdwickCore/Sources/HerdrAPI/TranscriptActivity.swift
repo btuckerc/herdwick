@@ -63,6 +63,9 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
     /// Another read would find more right away: a backward search or a backlog of appends.
     public var needsMore: Bool { lookBack != nil || behind }
 
+    /// Backward preview searches must never be appended to a warm conversation.
+    public var isLookingBack: Bool { lookBack != nil }
+
     /// Takes the bytes `nextRead` asked for. `size` is the file's size (nil: no such file
     /// yet, as omp creates its transcript on the first message); `from` where `bytes` start.
     public mutating func absorb(size: Int?, from: Int, bytes: [UInt8]) {

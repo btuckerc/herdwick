@@ -44,7 +44,7 @@ struct SceneCommands: Commands {
             Button("Back") { scene?.back() }
                 .keyboardShortcut("[", modifiers: .command)
                 .disabled(scene?.navigationPath.isEmpty != false)
-            Button("Refresh") { Task { await model.refresh() } }
+            Button("Refresh") { Task { await model.refresh(explicit: true) } }
                 .keyboardShortcut("r").disabled(scene == nil)
         }
     }

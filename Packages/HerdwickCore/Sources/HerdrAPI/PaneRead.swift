@@ -75,11 +75,21 @@ extension HerdrClient {
         return FileSlice(fileSize: size, offset: offset, bytes: Array(data[data.index(after: newline)...]))
     }
 
-    /// The file's bytes from `offset` on, then whatever is appended, on one channel for as
-    /// long as the stream is consumed. The remote `tail` and stdin watcher are reaped
-    /// when either exits, or when the channel closes.
-    nonisolated public func followFile(path: String, from offset: Int) -> AsyncThrowingStream<[UInt8], any Error> {
-        let command = Self.untilInputCloses("tail -c +\(offset + 1) -F \(shellQuote(path)) 2>/dev/null")
+    /// The file's last `lastBytes` bytes, then whatever is appended, on one channel for as
+    /// long as the stream is consumed. The host measures the file and reads its first
+    /// `headLimit` bytes (a title line) in the same command, so opening costs one exec.
+    /// A valid `resumeOffset` replaces the tail window with just the delta; an offset beyond
+    /// the current size falls back to that window. `.opened.start` confirms which was used.
+    /// The first event is always `.opened`. The remote `tail` and stdin watcher are reaped
+    /// when either exits, or when the channel closes. A missing file opens empty and is
+    /// followed once it appears.
+    nonisolated public func followFile(path: String, lastBytes: Int, headLimit: Int, resumeOffset: Int? = nil) -> AsyncThrowingStream<FileFollowEvent, any Error> {
+        let command = Self.untilInputCloses("""
+        { f=\(shellQuote(path)); s=0; [ -r "$f" ] && s=$(wc -c < "$f"); s=$((s)); b=$((s > \(lastBytes) ? s - \(lastBytes) : 0))
+        r=\(resumeOffset ?? -1); if [ "$r" -ge 0 ] && [ "$r" -le "$s" ]; then b=$r; fi
+        printf '%s %s\\n' "$s" "$b"; [ "$s" -gt 0 ] && head -c \(headLimit) "$f" | base64 | tr -d '\\n'; echo
+        exec tail -c +$((b + 1)) -F "$f" 2>/dev/null; }
+        """)
         let runner = runner
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -87,7 +97,22 @@ extension HerdrClient {
                     let channel = try await runner.exec(command)
                     await withTaskCancellationHandler {
                         do {
-                            for try await chunk in channel.output { continuation.yield(chunk) }
+                            var preamble: [UInt8]? = []
+                            for try await chunk in channel.output {
+                                guard var pending = preamble else {
+                                    continuation.yield(.bytes(chunk))
+                                    continue
+                                }
+                                pending += chunk
+                                guard let opened = try FileFollowEvent.opened(preamble: &pending) else {
+                                    preamble = pending
+                                    continue
+                                }
+                                preamble = nil
+                                continuation.yield(opened)
+                                if !pending.isEmpty { continuation.yield(.bytes(pending)) }
+                            }
+                            if preamble != nil { throw HerdrError.malformed("file follow ended before its size") }
                             continuation.finish()
                         } catch {
                             continuation.finish(throwing: error)
@@ -105,6 +130,26 @@ extension HerdrClient {
     }
 }
 
+public enum FileFollowEvent: Sendable, Equatable {
+    /// The file's size when the follow began, the offset its `.bytes` start at, and its first bytes.
+    case opened(fileSize: Int, start: Int, head: [UInt8])
+    case bytes([UInt8])
+
+    /// Parses `<size> <start>\n<base64 head>\n` off the front of `buffer`, leaving what follows;
+    /// nil until both lines are in.
+    static func opened(preamble buffer: inout [UInt8]) throws -> FileFollowEvent? {
+        guard let first = buffer.firstIndex(of: 0x0A),
+              let second = buffer[(first + 1)...].firstIndex(of: 0x0A) else { return nil }
+        let fields = buffer[..<first].split(separator: 0x20).map { Int(String(decoding: $0, as: UTF8.self)) }
+        guard fields.count == 2, let size = fields[0], let start = fields[1],
+              let head = Data(base64Encoded: Data(buffer[(first + 1)..<second])) else {
+            throw HerdrError.malformed("file follow preamble")
+        }
+        buffer.removeSubrange(...second)
+        return .opened(fileSize: size, start: start, head: Array(head))
+    }
+}
+
 /// Where an agent's transcript lives and how to read it.
 public struct TranscriptLocation: Sendable, Equatable, Hashable {
     public let path: String
@@ -117,31 +162,74 @@ extension HerdrClient {
     /// only a session id, which names a file under their config directory: the agent's own
     /// `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (read from its process on Linux), then the shell's, then the default.
     public func locateTranscript(_ ref: AgentSessionRef, pane: String, session: String) async throws -> TranscriptLocation? {
-        guard let format = TranscriptFormat(agent: ref.agent) else { return nil }
-        if let path = ref.transcriptPath { return TranscriptLocation(path: path, format: format) }
-        let id = ref.value
-        guard ref.kind == "id", !id.isEmpty,
-              id.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }) else { return nil }
-        let variable: String, fallback: String, pattern: String
-        switch format {
-        case .claude: (variable, fallback, pattern) = ("CLAUDE_CONFIG_DIR", "$HOME/.claude", "projects/*/\(id).jsonl")
-        case .codex: (variable, fallback, pattern) = ("CODEX_HOME", "$HOME/.codex", "sessions/*/*/*/rollout-*-\(id).jsonl")
-        case .omp: return nil
+        try await locateTranscripts([(pane, ref)], session: session)[pane]
+    }
+
+    /// `locateTranscript` for several panes, keyed by pane: one host command for all of them.
+    public func locateTranscripts(_ items: [(pane: String, ref: AgentSessionRef)], session: String) async throws -> [String: TranscriptLocation] {
+        var found: [String: TranscriptLocation] = [:]
+        var search: [(pane: String, format: TranscriptFormat, id: String)] = []
+        for (pane, ref) in items {
+            guard let format = TranscriptFormat(agent: ref.agent) else { continue }
+            if let path = ref.transcriptPath {
+                found[pane] = TranscriptLocation(path: path, format: format)
+                continue
+            }
+            let id = ref.value
+            guard format != .omp, ref.kind == "id", !id.isEmpty,
+                  id.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }),
+                  !pane.isEmpty, !pane.contains(where: { $0.isWhitespace || $0 == "|" }) else { continue }
+            search.append((pane, format, id))
         }
-        let pid = (try? await foregroundProcessID(pane: pane, session: session)).map(String.init) ?? ""
-        let script = """
-        agent_dir=""; p='\(pid)'
-        if [ -n "$p" ] && [ -r "/proc/$p/environ" ]; then
-          agent_dir=$(tr '\\0' '\\n' < "/proc/$p/environ" | sed -n 's/^\(variable)=//p' | head -n 1)
-        fi
-        for d in "$agent_dir" "${\(variable):-}" "\(fallback)"; do
-          [ -n "$d" ] || continue
-          for f in "$d"/\(pattern); do [ -f "$f" ] && { printf '%s\\n' "$f"; exit 0; }; done
+        guard !search.isEmpty else { return found }
+        // Two at a time: each request lane carries at most one, so the user's own requests
+        // never queue behind this background work for long.
+        var pids: [String: Int] = [:]
+        await withTaskGroup(of: (String, Int?).self) { group in
+            var remaining = search.makeIterator()
+            func next() {
+                guard let item = remaining.next() else { return }
+                group.addTask { (item.pane, try? await self.foregroundProcessID(pane: item.pane, session: session)) }
+            }
+            next()
+            next()
+            for await (pane, pid) in group {
+                pids[pane] = pid
+                next()
+            }
+        }
+        var script = "for spec in"
+        for item in search {
+            script += " " + shellQuote("\(item.pane)|\(item.format == .claude ? "claude" : "codex")|\(item.id)|\(pids[item.pane].map(String.init) ?? "")")
+        }
+        script += """
+        ; do
+          pane=${spec%%|*}; rest=${spec#*|}; fmt=${rest%%|*}; rest=${rest#*|}; id=${rest%%|*}; p=${rest#*|}
+          if [ "$fmt" = claude ]; then var=CLAUDE_CONFIG_DIR own=${CLAUDE_CONFIG_DIR:-} base=$HOME/.claude
+          else var=CODEX_HOME own=${CODEX_HOME:-} base=$HOME/.codex; fi
+          agent_dir=""
+          if [ -n "$p" ] && [ -r "/proc/$p/environ" ]; then
+            agent_dir=$(tr '\\0' '\\n' < "/proc/$p/environ" | sed -n "s/^$var=//p" | head -n 1)
+          fi
+          found=""
+          for d in "$agent_dir" "$own" "$base"; do
+            [ -n "$d" ] || continue
+            if [ "$fmt" = claude ]; then set -- "$d"/projects/*/"$id".jsonl
+            else set -- "$d"/sessions/*/*/*/rollout-*-"$id".jsonl; fi
+            for f; do [ -f "$f" ] && { found=$f; break; }; done
+            [ -n "$found" ] && break
+          done
+          [ -z "$found" ] || printf '%s %s\\n' "$pane" "$found"
         done
         """
-        let data = try await Self.collect(try await runner.exec(Self.posix(script)))
-        let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        return path.hasPrefix("/") ? TranscriptLocation(path: path, format: format) : nil
+        let output = String(decoding: try await Self.collect(try await runner.exec(Self.posix(script))), as: UTF8.self)
+        let formats = Dictionary(search.map { ($0.pane, $0.format) }, uniquingKeysWith: { first, _ in first })
+        for line in output.split(separator: "\n") {
+            guard let space = line.firstIndex(of: " ") else { continue }
+            let pane = String(line[..<space]), path = String(line[line.index(after: space)...])
+            if path.hasPrefix("/"), let format = formats[pane] { found[pane] = TranscriptLocation(path: path, format: format) }
+        }
+        return found
     }
 
     func foregroundProcessID(pane: String, session: String) async throws -> Int? {

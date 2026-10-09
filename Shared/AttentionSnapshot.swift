@@ -22,7 +22,7 @@ struct AttentionSnapshot: Codable, Equatable {
                 switch self {
                 case .blocked: "exclamationmark.bubble.fill"
                 case .done: "checkmark.circle.fill"
-                case .working: "circle.dotted"
+                case .working: "circle.dotted.circle.fill"
                 case .idle: "moon.zzz.fill"
                 }
             }

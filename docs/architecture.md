@@ -39,7 +39,9 @@ Decisions as of 2026-09-24. The evidence behind them is in
     terminal stream.
   - `HerdrClient`: speaks NDJSON over any `CommandRunner`, which runs a
     remote command and returns an `ExecChannel` (stdin writes, stdout
-    stream). One request per bridge process, as herdr itself does. Every
+    stream). Requests go over request lanes (`BridgeLane`, see Remote commands):
+    up to two per session, one request in flight on each, so a slow read never
+    holds up a tap. Every
     remote command is wrapped in `/bin/sh -c` so fish or other login shells
     do not matter. `events()` returns only after `subscription_started`.
     Finite requests have deadlines: 60 s for the channel to open and the command
@@ -59,8 +61,9 @@ Decisions as of 2026-09-24. The evidence behind them is in
   - `HerdwickSSH`/`SSHConnection`: Apple swift-nio-ssh (not Citadel, which
     depends on a third-party nio-ssh fork). Ed25519 and password auth, `none`
     auth for Tailscale SSH, host-key validation hook for TOFU pinning, exec
-    channels with streaming stdio, a handshake timeout (cancelling a connect
-    attempt closes it mid-handshake), and a keepalive that,
+    channels with streaming stdio (`exec` returns once the request is written, so a
+    command and its first stdin write share a round trip), a handshake timeout
+    (cancelling a connect attempt closes it mid-handshake), and a keepalive that,
     after 60 s without inbound traffic, opens and closes a session channel and
     drops the connection on a miss. It can adopt an already-connected fd
     (`ClientBootstrap.withConnectedSocket`); tests prove this with a
@@ -95,8 +98,26 @@ Decisions as of 2026-09-24. The evidence behind them is in
   `openssl` on the host. Uploads go to `${TMPDIR:-/tmp}/herdwick-<uid>/<session>/` (mode 700)
   and are swept by the chosen retention at the next upload; nothing else is written.
 - Discovery: `$SHELL -lc 'command -v herdr'`, then `~/.local/bin/herdr`,
-  `/opt/homebrew/bin/herdr`, `/usr/local/bin/herdr`. Cache the path per host.
-- API: `herdr --session <s> remote-api-bridge` (probe with `--check`).
+  `/opt/homebrew/bin/herdr`, `/usr/local/bin/herdr`. A version manager's shim
+  (`*/shims/*`) is resolved to the real binary with `mise which` or `asdf which`,
+  so later commands skip the shim's own start-up. Cached per host; an exit 127
+  (the binary moved, e.g. after an upgrade) forgets it and the retry resolves again.
+- API: request lanes, one exec channel each, kept open for the session. The lane
+  finds herdr's socket (`herdr --session <s> status server`) and, where `perl` is
+  present, runs a few lines of it that write each request to the socket in one
+  write and print the response followed by `\x1e<status>`. The first request rides
+  in the command line (hex), so a cold lane answers in one round trip after the
+  channel opens; OpenSSH only opens the stdin window once the command runs, which
+  would cost another. Without perl the lane loops `herdr --session <s>
+  remote-api-bridge` per request and asks for the embedded request again (`\x1er`).
+  Why not the bridge everywhere: herdr 0.9 polls a new connection for its first line
+  every 100 ms (`read_initial_request_line_with_limits`), and the bridge connects
+  before it copies stdin, so nearly every bridged request waited ~100 ms; a single
+  write is read at once (~0.5 ms). Subscriptions are polled the same way upstream,
+  so an event can arrive up to 100 ms late; a blocking read in herdr would fix both.
+  A response with the wrong id, or a lane that ends with a request in flight, fails
+  that request and drops the lane; nothing is resent. `events()` uses the same
+  forwarding on its own channel.
 - Sessions: `herdr session list --json`.
 - Live terminal: read-only `herdr --session <s> terminal session observe
   <pane> --cols C --rows R` at the phone's grid. It does not resize the PTY.
@@ -132,20 +153,74 @@ One SSH connection per host multiplexes every channel. States: `idle`,
   keepalive probe, or event-stream EOF.
 - Foreground backoff: 0.5, 1, 2, 4, then every 8 s. No attempts while
   backgrounded.
-- Going to the background: under a UIKit background assertion, push watchers are
-  armed over the live links (10 s bound, cut short if iOS takes the time back),
-  then every link closes (`suspended`). Nothing stays open while the app is
-  suspended: it could not read what a host sends, a host would keep streaming to
-  it (herdr's writer blocks on an unread subscriber), and a link that died
-  meanwhile would stall the return. Removing a host or session closes its link
-  for good.
+- Connect budget: an attempt that has not reached its first live snapshot within 45 s
+  fails as a timeout and backs off like any other failure (the 600 s command timeout
+  only bounds single reads). Pull to refresh, Refresh (⌘R) and Reconnect restart every
+  link that is not live, including one mid-attempt; coming to the foreground leaves an
+  attempt in progress alone. Every refresh, the foreground's included, asks a live link
+  for its session list with a 10 s bound, and redials it if that doesn't come back: a
+  transport can stall without any path change, and the keepalive takes over a minute.
+- Going to the background: links still connecting or waiting close at once. Under a
+  UIKit background assertion, push watchers are armed over the live links (10 s bound,
+  cut short if iOS takes the time back), then every link closes (`suspended`). Nothing
+  stays open while the app is suspended: it could not read what a host sends, a host
+  would keep streaming to it (herdr's writer blocks on an unread subscriber), and a
+  link that died meanwhile would stall the return. Removing a host or session closes
+  its link for good.
 - Liveness: a quiet link is probed after 60 s without inbound traffic; any
   traffic counts, so a busy link is never probed and an idle one wakes the radio
   once a minute.
 - Route changes: a new path strands a direct TCP connection, so it is replaced.
   A tailnet connection rides the in-app node, which moves to the new path
   itself, so it is only checked (`resuming`: one fresh snapshot, 10 s bound;
-  still usable meanwhile, replaced if it does not answer).
+  still usable meanwhile, replaced if it does not answer). Which applies follows the
+  route the live link took (`ConnectionSupervisor.migratesAcrossRoutes`), not the host.
+- LAN address (optional, per host): on Wi-Fi or wired, with a pinned host key and any
+  auth but Tailscale SSH, it is dialled at the same moment as the host's route
+  (`firstSuccess`, no head start). The first to finish SSH sign-in wins; the other is
+  cancelled, never awaited, and closed if it finishes anyway. Away from that network the
+  route therefore connects exactly as fast as alone; at home the LAN skips node start,
+  rebind and ping. The LAN dial accepts only the pinned key, has a 3 s bound, and its
+  failures never surface: when both fail the route's error is shown. So a first connect
+  (nothing pinned) or another machine at that address on someone else's network can
+  neither be trusted nor fail the host. No migration while live: a tailnet link already
+  moves onto the LAN path by itself, and a LAN link is replaced on the next route change.
+  The trace marks `route won` or `lan won`.
+- Tailnet recovery: iOS suspension can leave the retained tsnet node with dead UDP and
+  DERP sockets; one observed resume sat 13 s on DERP-only handshake retries before sshd
+  saw the dial. Coming to the foreground, a background refresh and a satisfied path
+  change each call `Tailnet.recover()`: one shared `tailscale_rebind` (rebind then restun,
+  5 s bound, off the main actor). Dials wait for it, and the first one within 10 s of a
+  rebind that worked disco-pings its peer (1 s at most) to re-establish a path before the
+  TCP dial. One 15 s budget covers node start, recovery, ping and dial; the dial itself is
+  `tailscale_dial_timeout` (patched in: `tailscale_dial` waits without limit for the
+  backend to run and for the connection). A failed dial or rebind re-reads the backend
+  state, so a node that signed out meanwhile fails as signed out instead of retrying.
+  A return while the push handoff still holds the process awake skips the rebind: the
+  process never slept, and a rebind would only reset paths under the live links.
+- Tailnet escalation: a resumed node can stay broken in ways one rebind doesn't fix, so
+  every dial ran out its 15 s and the host sat on "Reconnecting…" until a relaunch. A
+  rebind still running after 6 s is abandoned (dials stop waiting on it, the next
+  `recover()` starts a new one). Dials that fail in a row while the peer is online
+  escalate: the second rebinds again, the third replaces the node (`Tailnet.restart`: the
+  old node closes, 5 s at most, then a fresh one starts on the same state, no sign-in).
+  At most every 2 minutes, never while a live link rides the node, and a node that won't
+  close is kept rather than run beside a second one on the same state. Cancelled dials,
+  sign-out and an offline peer don't count.
+- Timeouts abandon, never await: `withTimeout` returns at its limit and only cancels the
+  work. The task-group version waited for its child, so a blocking call that ignored
+  cancellation held the caller past the limit.
+- Blocking calls into libtailscale (start, status, rebind, ping, dial, close) run on GCD,
+  never Swift's cooperative pool: it has one thread per core, and dials stuck there once
+  stopped every task in the app, timeouts included, leaving every host "Reconnecting…"
+  until a relaunch.
+- Connect trace: each attempt logs its stages to the unified log (subsystem
+  `dev.btuckerc.herdwick`, category `connect`): start, tailnet socket, ssh, herdr,
+  sessions, preview, live (ms since start), failures and drops with a public kind
+  (`deadline`, `timeout`, `tailnet dial`, `ssh`, `dropped: …`) and the message private,
+  and on the same timeline background, foreground, rebind, ping, failed checks, dial
+  failures in a row and node restarts. To read it: connect the phone to a Mac and run
+  `log collect --device --last 1h`, then filter that subsystem and category.
 - Redialling with a snapshot on screen: the mirror subscribes to the panes that
   snapshot shows while it takes the preview, instead of after it; a pane set
   that changed meanwhile falls back to the preview's panes.
@@ -155,9 +230,15 @@ One SSH connection per host multiplexes every channel. States: `idle`,
 - Resync: subscribe to events, then take a snapshot, then apply the buffered
   events (the gap-free order from the herdr docs). The link counts as live only
   from that snapshot; the preview before it only fills the screen.
-- Setup latency: the herdr path is cached per host, and the mirror for the likely
-  session (the chosen one, else the last one opened) starts alongside
-  `session list`, which then confirms it or picks another.
+- Setup latency: the inbox paints from the last authoritative snapshot
+  (`SnapshotStore`: protected binary plist per host and session, saved at most once
+  a second) before any network, display only: read state, alerts and the ended shelf
+  wait for the live snapshot. The herdr path is cached per host, and the mirror for
+  the likely session (the chosen one, else the last one opened) starts alongside
+  `session list`, which then confirms it or picks another. Transcript locations for
+  every agent are found with one host command; integration and clock checks wait
+  2 s after the first live snapshot. `LatencyBenchTests` (opt-in, `HERDWICK_BENCH=1`)
+  measures each stage over a local sshd with an injected 100 ms round trip.
 - Configuration errors (auth, host key mismatch, herdr missing) stop retrying
   and show the fix where the user is looking. When herdr is installed but no
   session (or not the configured one) is running, the card offers Start herdr:
@@ -188,7 +269,9 @@ One SSH connection per host multiplexes every channel. States: `idle`,
 - Drafts migrate from `composerDrafts` only after an atomic complete-protection file write
   succeeds. An unreadable store is never overwritten. Private files are excluded from backup.
   After a successful load the store stays in memory; every edit is written in order off the
-  main thread (no debounce), and imported text waits for its write to succeed.
+  main thread (no debounce), and imported text waits for its write to succeed. Pending
+  (sent, not yet in the transcript) messages are kept in the same entry and never expire
+  while any remain. Parsed conversations warmed for instant open live only in memory.
 - Opt-in offline transcripts keep complete raw records in protected Application Support
   files: at most 20 conversations, 4 MiB per conversation (80 MiB raw total plus bounded
   identity/title envelopes), and no more than the requested history window. Replay uses the
@@ -202,6 +285,7 @@ One SSH connection per host multiplexes every channel. States: `idle`,
   pending. Only confirmation for every applicable host permits destructive old-key removal.
   This is manual verification, not an automated installation/test; remote old authorizations
   are left intact for the user to remove afterward.
+- Dictation audio is processed on-device, never leaves the device and is never stored.
 
 ## UI
 Liquid Glass only on the control and navigation layer: toolbars, the composer,
@@ -225,7 +309,11 @@ keyboard accessory (sticky ctrl) replaces the key bar.
   uploads with `ASC_KEY_ID` and `ASC_ISSUER_ID`. Release signs manually with an
   API-made Apple Distribution identity and App Store profiles
   (`scripts/mini/app-store-profiles.mjs`, rerun after adding a target or a
-  capability), so no Apple ID has to be signed in to Xcode.
+  capability), so no Apple ID has to be signed in to Xcode. Before archiving,
+  `asc-ready.mjs` checks the key against the API: when Apple has posted a developer
+  agreement (403 `REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED`) it prints where the Account
+  Holder accepts it and waits for it to take effect (30 s polls, `ASC_AGREEMENT_WAIT`
+  minutes, default 30). Accepting is a legal click-through with no API.
 - `scripts/mini/app-store.sh` runs `app-store.mjs` on the Mini through the same key (`asc.mjs`
   is the shared client): `metadata` writes `marketing/listing` (text, categories,
   `age_rating.json`, review notes and the Mini-only contact in `~/.herdwick-signing/review.env`,
@@ -245,8 +333,12 @@ keyboard accessory (sticky ctrl) replaces the key bar.
   deploy host (its Cloudflare login and the fallback are described in the script). Deploy
   the relay before an app build that sends a new push kind.
 - `scripts/mini/build-tailscalekit.sh` builds `Frameworks/TailscaleKit.xcframework`
-  from libtailscale with `GOTOOLCHAIN=go1.25.5`; Go 1.27's json/v2 breaks
-  `go-json-experiment` ("undefined: json.SkipFunc").
+  (called by `sync-and-build.sh`; a no-op while `Frameworks/TailscaleKit.stamp` matches)
+  from libtailscale `59d4bb8` moved to tailscale.com v1.104.0 (Go 1.27.1), plus
+  `scripts/mini/libtailscale.patch`: `tailscale_rebind` (LocalAPI `rebind` then `restun`)
+  and `tailscale_ping` (one disco ping). v1.104 keeps the netmap on disk when the tailnet
+  grants `cache-network-maps`, so a relaunched node can dial before control answers.
+  Regenerate the patch with `git diff` in a patched checkout at that commit.
 - App icon: `App/AppIcon.icon` (Icon Composer; flat SVG layers for fleece, face and
   prompt, lit by the system in Default, Dark, Clear and Tinted). Edit it in Icon Composer
   or by hand; `marketing/icon.png` is its Default export (`ictool --export-image`).

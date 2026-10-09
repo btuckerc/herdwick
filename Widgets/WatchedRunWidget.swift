@@ -42,6 +42,6 @@ struct WatchedRunWidget: Widget {
         switch status { case "blocked": "Needs you"; case "done": "Finished"; default: "Working" }
     }
     private func symbol(_ status: String) -> String {
-        switch status { case "blocked": "exclamationmark.bubble"; case "done": "checkmark"; default: "ellipsis" }
+        switch status { case "blocked": "exclamationmark.bubble"; case "done": "checkmark.circle"; default: "circle.dotted.circle" }
     }
 }

@@ -17,7 +17,7 @@ HOST=${MINI:-mini}
 ssh "$HOST" MODE="${1:-sim}" ASC_KEY_ID="${ASC_KEY_ID:-}" ASC_ISSUER_ID="${ASC_ISSUER_ID:-}" zsh -l <<'EOF'
 set -euo pipefail
 cd ~/src/herdwick
-[ -d Frameworks/TailscaleKit.xcframework ] || scripts/mini/build-tailscalekit.sh
+scripts/mini/build-tailscalekit.sh
 xcodegen generate --quiet
 if [ "$MODE" = sim ]; then
   xcodebuild -project Herdwick.xcodeproj -scheme Herdwick -destination 'generic/platform=iOS Simulator' \
@@ -32,6 +32,8 @@ allow_codesign
 if [ -z "$ASC_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ]; then
   source ~/.herdwick-signing/asc.env
 fi
+# Fails fast (or waits for the Account Holder) on an expired developer agreement.
+node scripts/mini/asc-ready.mjs
 AUTH=(-authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
       -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8")
 BUILD=$(date +%Y%m%d%H%M)

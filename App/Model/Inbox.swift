@@ -50,9 +50,10 @@ struct InboxSection: Identifiable {
     let idle: [Thread]
 }
 
-/// Recent is one timeline by last turn (a user message or a finished reply). Priority pins
-/// what needs you, then orders by status, then by last turn. Unknown times sort last; ties
-/// fall back to the address, never the title, so a rename cannot move a row.
+/// Recent is one timeline by last turn (a user message or a finished reply). Priority orders
+/// by status, then by last turn. Either way what needs you is pinned above, by its rank, so a
+/// held order holds Needs You's membership too. Unknown times sort last; ties fall back to the
+/// address, never the title, so a rename cannot move a row.
 @MainActor
 func inboxSections(
     _ threads: [Thread],
@@ -65,9 +66,8 @@ func inboxSections(
 ) -> (needsYou: [Thread], sections: [InboxSection], hidden: [Thread]) {
     let ranks = Dictionary(threads.map { ($0.address, rank($0)) }) { first, _ in first }
     let visible = threads.filter { !hidden($0) }
-    let pins = sort == .priority
-    let urgent = pins ? visible.filter { $0.agent.agentStatus == .blocked } : []
-    let rest = pins ? visible.filter { $0.agent.agentStatus != .blocked } : visible
+    let urgent = visible.filter { ranks[$0.address]!.priority == 0 }
+    let rest = visible.filter { ranks[$0.address]!.priority != 0 }
     func precedes(_ lhs: Thread, _ rhs: Thread) -> Bool {
         let left = ranks[lhs.address]!, right = ranks[rhs.address]!
         if sort == .priority, left.priority != right.priority { return left.priority < right.priority }
@@ -114,12 +114,27 @@ func inboxSections(
     return (urgent.sorted(by: precedes), sections, threads.filter(hidden).sorted(by: precedes))
 }
 extension AppModel {
+    /// What the scene's inbox lists before search: one host or all of them, and only what
+    /// needs you under Needs You Only.
+    func inboxThreads(in scene: SceneState) -> [Thread] {
+        let all = settings.allHosts && demo == nil
+        let host = all ? nil : connection(in: scene)
+        return threads.filter { thread in
+            (all || thread.connection === host) && (!scene.needsYouOnly || thread.agent.agentStatus == .blocked)
+        }
+    }
+
+    /// What the agent dock offers: the inbox's scope without Hidden or Ended.
+    func dockThreads(in scene: SceneState) -> [Thread] {
+        inboxThreads(in: scene).filter { $0.connection.hidden[$0.agent.paneID] == nil }
+    }
+
     var threads: [Thread] {
         connections.flatMap { connection in
             guard let snapshot = connection.snapshot, connection.activeSession != nil else { return [Thread]() }
             let workspaces = Dictionary(uniqueKeysWithValues: snapshot.workspaces.map { ($0.id, $0) })
             let tabs = Dictionary(uniqueKeysWithValues: snapshot.tabs.map { ($0.id, $0) })
-            return snapshot.agents.map { agent in
+            return snapshot.agents.filter { !connection.closing.contains($0.paneID) }.map { agent in
                 Thread(address: connection.address(paneID: agent.paneID), connection: connection,
                        agent: agent, workspace: workspaces[agent.workspaceID], tab: tabs[agent.tabID])
             }

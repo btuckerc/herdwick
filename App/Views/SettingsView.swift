@@ -11,7 +11,108 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var settings = settings
         NavigationStack {
+            // iOS order: the hosts (Settings' account row) and how to reach them, then what's used
+            // daily, then look, then About. Rows are names; what a name doesn't say sits behind ⓘ.
             Form {
+                Section("Hosts") {
+                    ForEach(model.profiles) { profile in
+                        NavigationLink {
+                            HostEditor(profile: profile)
+                        } label: {
+                            // Stacked for every host: LabeledContent sets a short name's address
+                            // beside it and a long one's below, so the list zigzags.
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(profile.name)
+                                    Text(profile.address).font(.subheadline).foregroundStyle(.secondary)
+                                }
+                                if !profile.isEnabled {
+                                    Spacer()
+                                    Text("Off").foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .swipeActions {
+                            Button(profile.isEnabled ? "Turn Off" : "Turn On") {
+                                model.setEnabled(!profile.isEnabled, for: profile.id)
+                            }
+                            .tint(profile.isEnabled ? .orange : .green)
+                        }
+                    }
+                    .onMove { model.moveProfiles(from: $0, to: $1) }
+                    Button("Add Host…", systemImage: "plus") { addingHost = true }
+                }
+
+                Section {
+                    NavigationLink("SSH Key") { KeySettings() }
+                    if tailnet.state == .off {
+                        LabeledContent("Tailscale", value: "Off")
+                    } else {
+                        NavigationLink { TailscaleSettings() } label: {
+                            LabeledContent("Tailscale", value: tailscaleStatus)
+                        }
+                    }
+                }
+
+                Section("Inbox") {
+                    SettingsMenuRow("View", value: settings.inboxView.label) {
+                        Picker("View", selection: $settings.inboxView) {
+                            ForEach(InboxKind.allCases) { Text($0.label).tag($0) }
+                        }
+                    }
+                    Toggle("All Hosts", isOn: $settings.allHosts)
+                    SettingsMenuRow("Group", value: settings.inboxGrouping.label) {
+                        Picker("Group", selection: $settings.inboxGrouping) {
+                            ForEach(InboxGrouping.allCases) { Text($0.label).tag($0) }
+                        }
+                    }
+                    SettingsMenuRow("Sort", value: settings.inboxSort.label) {
+                        Picker("Sort", selection: $settings.inboxSort) {
+                            ForEach(InboxSort.allCases) { Text($0.label).tag($0) }
+                        }
+                    }
+                    Toggle("Collapse Idle Agents", isOn: $settings.collapseIdle)
+                    Toggle("Message Previews", isOn: $settings.inboxPreviews)
+                }
+
+                Section("Conversations") {
+                    SettingsMenuRow("Detail", value: DetailLevelOptions.title(settings.detailLevel)) {
+                        DetailLevelOptions(selection: $settings.detailLevel)
+                    }
+                    Toggle("Agent Dock", isOn: $settings.showsDock)
+                    if settings.showsDock {
+                        SettingsMenuRow("Dock Order", value: settings.dockOrder.label) {
+                            Picker("Dock Order", selection: $settings.dockOrder) {
+                                ForEach(DockOrder.allCases) { Text($0.label).tag($0) }
+                            }
+                        }
+                    }
+                    NavigationLink("Launch Presets") { PresetsEditor() }
+                }
+
+                Section("Composer") {
+                    Toggle("Autocorrect", isOn: $settings.composerAutocorrect)
+                    Toggle("On-screen Return Sends", isOn: $settings.returnKeySends)
+                    NavigationLink("Snippets") { SnippetsEditor() }
+                    SettingsMenuRow("Keep Uploads", value: settings.attachmentRetention.label,
+                                    info: "Expired uploads are removed from the host at your next upload.") {
+                        Picker("Keep Uploads", selection: $settings.attachmentRetention) {
+                            ForEach(AttachmentRetention.allCases) { Text($0.label).tag($0) }
+                        }
+                    }
+                }
+
+                Section("Dictation") {
+                    Toggle("Show Live Transcript", isOn: $settings.showsLiveTranscript)
+                    NavigationLink("Dictionary") { DictionaryEditor() }
+                }
+
+                Section {
+                    NavigationLink("Notifications") { NotificationSettings() }
+                }
+
+                PrivacySettings()
+
                 Section("Appearance") {
                     Picker("Appearance", selection: $settings.appearance) {
                         Text("System").tag(Appearance.system)
@@ -19,6 +120,18 @@ struct SettingsView: View {
                         Text("Dark").tag(Appearance.dark)
                     }
                     .pickerStyle(.segmented)
+                    Toggle("Haptics", isOn: $settings.haptics)
+                }
+
+                Section("Terminal") {
+                    SettingsMenuRow("Font", value: settings.font.label) {
+                        Picker("Font", selection: $settings.font) {
+                            ForEach(TerminalFont.allCases) { Text($0.label).tag($0) }
+                        }
+                    }
+                    Stepper(value: $settings.fontSize, in: 8...20, step: 1) {
+                        LabeledContent("Size", value: "\(Int(settings.fontSize)) pt")
+                    }
                     NavigationLink {
                         ThemePicker(selection: $settings.darkThemeID, dark: true)
                     } label: {
@@ -29,95 +142,8 @@ struct SettingsView: View {
                     } label: {
                         LabeledContent("Light Theme", value: TerminalTheme.named(settings.lightThemeID).name)
                     }
-                }
-
-                Section("Conversations") {
-                    LabeledContent("Detail") {
-                        Menu {
-                            DetailLevelOptions(selection: $settings.detailLevel)
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text(DetailLevelOptions.title(settings.detailLevel))
-                                Image(systemName: "chevron.up.chevron.down").imageScale(.small)
-                            }
-                            .foregroundStyle(.secondary)
-                        }
-                        .tint(.secondary)
-                    }
-                    NavigationLink("Launch Presets") { PresetsEditor() }
-                }
-
-                Section("Inbox") {
-                    Picker("View", selection: $settings.inboxView) {
-                        ForEach(InboxKind.allCases) { Text($0.label).tag($0) }
-                    }
-                    Toggle("All Hosts", isOn: $settings.allHosts)
-                    Picker("Group", selection: $settings.inboxGrouping) {
-                        ForEach(InboxGrouping.allCases) { Text($0.label).tag($0) }
-                    }
-                    Picker("Sort", selection: $settings.inboxSort) {
-                        ForEach(InboxSort.allCases) { Text($0.label).tag($0) }
-                    }
-                    Toggle("Collapse Idle Agents", isOn: $settings.collapseIdle)
-                    Toggle("Message Previews", isOn: $settings.inboxPreviews)
-                }
-                NotificationSettings()
-                PrivacySettings()
-                Section("Terminal") {
-                    Picker("Font", selection: $settings.font) {
-                        ForEach(TerminalFont.allCases) { Text($0.label).tag($0) }
-                    }
-                    Stepper(value: $settings.fontSize, in: 8...20, step: 1) {
-                        LabeledContent("Size", value: "\(Int(settings.fontSize)) pt")
-                    }
                     TerminalPreview()
                         .listRowInsets(EdgeInsets())
-                }
-
-                Section {
-                    Toggle("Haptics", isOn: $settings.haptics)
-                }
-
-                Section {
-                    Toggle("Autocorrect", isOn: $settings.composerAutocorrect)
-                    Toggle("On-screen Return Sends", isOn: $settings.returnKeySends)
-                    Picker("Keep Uploads", selection: $settings.attachmentRetention) {
-                        ForEach(AttachmentRetention.allCases) { Text($0.label).tag($0) }
-                    }
-                    NavigationLink("Snippets") { SnippetsEditor() }
-                } header: {
-                    Text("Messages")
-                } footer: {
-                    Text("Expired uploads are removed from the host at your next upload.")
-                }
-
-                Section {
-                    ForEach(model.profiles) { profile in
-                        NavigationLink {
-                            HostEditor(profile: profile)
-                        } label: {
-                            LabeledContent(profile.name, value: profile.address)
-                        }
-                    }
-                    .onMove { model.moveProfiles(from: $0, to: $1) }
-                    Button("Add Host…", systemImage: "plus") { addingHost = true }
-                } header: {
-                    Text("Hosts")
-                }
-
-                AuthorizedKeySection()
-
-                Section("Tailscale") {
-                    switch tailnet.state {
-                    case .running:
-                        if let name = tailnet.tailnetName { LabeledContent("Tailnet", value: name) }
-                        LabeledContent("Device", value: "herdwick-\(UIDeviceName.short)")
-                        Button("Sign Out of Tailscale", role: .destructive) { Task { await tailnet.signOut() } }
-                    case .off:
-                        Text("Not signed in").foregroundStyle(.secondary)
-                    default:
-                        Text("Starting…").foregroundStyle(.secondary)
-                    }
                 }
 
                 Section("About") {
@@ -134,6 +160,95 @@ struct SettingsView: View {
             .sheet(isPresented: $addingHost) { AddHostView() }
         }
     }
+
+    private var tailscaleStatus: String {
+        switch tailnet.state {
+        case .running: tailnet.tailnetName ?? "On"
+        case .off: "Off"
+        default: "Starting…"
+        }
+    }
+}
+
+/// This device's SSH identity: the line to authorize, and replacing it.
+private struct KeySettings: View {
+    var body: some View {
+        Form {
+            AuthorizedKeySection()
+            Section {
+                NavigationLink("Replace Key…") { DeviceKeyReplacement() }
+            }
+        }
+        .navigationTitle("SSH Key")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct TailscaleSettings: View {
+    @Environment(Tailnet.self) private var tailnet
+
+    var body: some View {
+        Form {
+            switch tailnet.state {
+            case .running:
+                Section {
+                    if let name = tailnet.tailnetName { LabeledContent("Tailnet", value: name) }
+                    LabeledContent("Device", value: "herdwick-\(UIDeviceName.short)")
+                }
+                Section {
+                    Button("Sign Out of Tailscale", role: .destructive) { Task { await tailnet.signOut() } }
+                }
+            case .off:
+                Text("Signed out").foregroundStyle(.secondary)
+            default:
+                Text("Starting…").foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Tailscale")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// An ⓘ that opens a short explanation, for what a setting's name doesn't say.
+struct InfoButton: View {
+    let text: String
+    @State private var shown = false
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Button { shown = true } label: {
+            Image(systemName: "info.circle")
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel("More Info")
+        .popover(isPresented: $shown) {
+            Text(text)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(idealWidth: 300)
+                .padding()
+                .presentationCompactAdaptation(.popover)
+        }
+    }
+}
+
+/// A row title with its ⓘ beside it.
+struct InfoLabel: View {
+    let title: String
+    let info: String
+
+    init(_ title: String, info: String) {
+        self.title = title
+        self.info = info
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+            InfoButton(info)
+        }
+    }
 }
 
 private struct PrivacySettings: View {
@@ -143,17 +258,16 @@ private struct PrivacySettings: View {
 
     var body: some View {
         @Bindable var settings = settings
-        Section {
-            Toggle("App Lock", isOn: $settings.appLock)
-            Toggle("Keep Offline Copies", isOn: Binding(get: { settings.offlineTranscripts }, set: { on in
+        Section("Privacy") {
+            Toggle(isOn: $settings.appLock) {
+                InfoLabel("App Lock", info: "Asks for Face ID or your passcode at launch and after 30 seconds away, and hides Herdwick in the app switcher.")
+            }
+            Toggle(isOn: Binding(get: { settings.offlineTranscripts }, set: { on in
                 if on { settings.offlineTranscripts = true }
                 else { deletingCopies = true }
-            }))
-            NavigationLink("Replace This Device's Key…") { DeviceKeyReplacement() }
-        } header: {
-            Text("Privacy")
-        } footer: {
-            Text("App Lock requires Face ID or your passcode at launch and after 30 seconds away, and hides Herdwick in the app switcher. Offline copies keep up to 20 conversations, at most 4 MB each, protected while your device is locked. Turning this off deletes the copies.")
+            })) {
+                InfoLabel("Keep Offline Copies", info: "Up to 20 conversations, at most 4 MB each, protected while your device is locked. Turning this off deletes them.")
+            }
         }
         .confirmationDialog("Delete all offline copies?", isPresented: $deletingCopies, titleVisibility: .visible) {
             Button("Delete Copies", role: .destructive) {
@@ -266,44 +380,46 @@ private struct NotificationSettings: View {
     @State private var denied = false
 
     var body: some View {
-        Section {
-            Toggle("Needs You", isOn: binding(\.notifyNeedsYou))
-            Toggle("Finished", isOn: binding(\.notifyFinished))
-            if denied {
-                Link("Allow Notifications in Settings", destination: URL(string: UIApplication.openNotificationSettingsURLString)!)
-            }
-        } header: {
-            Text("Notifications")
-        }
-        if Push.relay != nil {
+        Form {
             Section {
-                Toggle("Alerts While Away", isOn: Binding {
-                    settings.pushWhileAway
-                } set: { on in
-                    settings.pushWhileAway = on
-                    if on { model.registerForPush() }
-                })
-                .disabled(!settings.notifyNeedsYou && !settings.notifyFinished)
-                NavigationLink("How It Works") { PushDisclosure() }
-                if settings.pushWhileAway, let push = model.push {
-                    ForEach(push.coverage.values.sorted { $0.id < $1.id }) { row in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("\(model.profiles.first { $0.id == row.hostID }?.name ?? "Host") · \(row.session)")
-                            Group {
-                                if row.message == "Last armed", let date = row.lastArmed {
-                                    Text("Last armed \(date.formatted(date: .abbreviated, time: .shortened))")
-                                } else {
-                                    Text(row.message)
+                Toggle("Needs You", isOn: binding(\.notifyNeedsYou))
+                Toggle("Finished", isOn: binding(\.notifyFinished))
+                if denied {
+                    Link("Allow Notifications in Settings", destination: URL(string: UIApplication.openNotificationSettingsURLString)!)
+                }
+            }
+            if Push.relay != nil {
+                Section {
+                    Toggle("Alerts While Away", isOn: Binding {
+                        settings.pushWhileAway
+                    } set: { on in
+                        settings.pushWhileAway = on
+                        if on { model.registerForPush() }
+                    })
+                    .disabled(!settings.notifyNeedsYou && !settings.notifyFinished)
+                    NavigationLink("How It Works") { PushDisclosure() }
+                    if settings.pushWhileAway, let push = model.push {
+                        ForEach(push.coverage.values.sorted { $0.id < $1.id }) { row in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(model.profiles.first { $0.id == row.hostID }?.name ?? "Host") · \(row.session)")
+                                Group {
+                                    if row.message == "Last armed", let date = row.lastArmed {
+                                        Text("Last armed \(date.formatted(date: .abbreviated, time: .shortened))")
+                                    } else {
+                                        Text(row.message)
+                                    }
                                 }
+                                .font(.caption).foregroundStyle(.secondary)
                             }
-                            .font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                } footer: {
+                    Text("Last armed is when a watcher was handed off, not proof of delivery. Watchers expire after 24 hours; hosts that weren't connected aren't covered.")
                 }
-            } footer: {
-                Text("No names, paths or conversation content are sent. Last armed is when a watcher was handed off, not proof of delivery; watchers expire after 24 hours, and hosts that weren't connected aren't covered.")
             }
         }
+        .navigationTitle("Notifications")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     /// Turning an alert on asks for permission first and stays off if it isn't given.
@@ -355,6 +471,50 @@ struct DetailLevelOptions: View {
     var body: some View {
         ForEach(DetailLevel.allCases) { level in
             Toggle(Self.title(level), isOn: Binding(get: { selection == level }, set: { if $0 { selection = level } }))
+        }
+    }
+}
+
+/// A setting chosen from a menu. Not a menu-style Picker: iOS 26 can animate a closing menu's
+/// value at its old screen position, so a list scrolled while it closed left the value floating
+/// where the row had been (and the row blank) until the morph ended. An identity-glass label in
+/// its own container keeps the value in the row. The menu sprouts from its label, so the label is
+/// the trailing value alone, as a menu Picker's is.
+private struct SettingsMenuRow<Options: View>: View {
+    let title: String
+    let value: String
+    let info: String?
+    let options: Options
+
+    init(_ title: String, value: String, info: String? = nil, @ViewBuilder options: () -> Options) {
+        self.title = title
+        self.value = value
+        self.info = info
+        self.options = options()
+    }
+
+    var body: some View {
+        LabeledContent {
+            GlassEffectContainer {
+                Menu {
+                    options
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(value)
+                        Image(systemName: "chevron.up.chevron.down").imageScale(.small)
+                    }
+                    .foregroundStyle(.secondary)
+                    .glassEffect(.identity)
+                }
+                .tint(.primary)
+                .accessibilityLabel(title)
+                .accessibilityValue(value)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(title).accessibilityHidden(true)
+                if let info { InfoButton(info) }
+            }
         }
     }
 }
@@ -440,15 +600,19 @@ struct HostEditor: View {
     @State var profile: HostProfile
     @State private var address = ""
     @State private var password = ""
+    @State private var lanAddress = ""
     @State private var confirmDelete = false
     @State private var confirmForgetKey = false
 
     var body: some View {
         Form {
-            Section("Name") {
+            Section {
                 TextField("Name", text: $profile.name)
+                Toggle(isOn: $profile.isEnabled) {
+                    InfoLabel("Connect", info: "Off keeps the host saved but never connects to it, until you turn it back on.")
+                }
             }
-            Section("Connection") {
+            Section {
                 switch profile.route {
                 case .direct:
                     TextField("Address", text: $address)
@@ -461,12 +625,25 @@ struct HostEditor: View {
                 TextField("Username", text: $profile.username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Picker("Sign in with", selection: $profile.auth) {
-                    ForEach(HostProfile.Auth.allCases.filter { $0 != .tailscaleSSH || profile.isTailnet }) { Text($0.label).tag($0) }
+                SettingsMenuRow("Sign in with", value: profile.auth.label) {
+                    Picker("Sign in with", selection: $profile.auth) {
+                        ForEach(HostProfile.Auth.allCases.filter { $0 != .tailscaleSSH || profile.isTailnet }) { Text($0.label).tag($0) }
+                    }
                 }
                 if profile.auth == .password {
                     SecureField("New password (leave empty to keep)", text: $password)
                 }
+                if profile.auth != .tailscaleSSH {
+                    HStack {
+                        TextField("LAN address (optional)", text: $lanAddress)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                        InfoButton("On Wi-Fi, the LAN address is tried alongside \(profile.isTailnet ? "Tailscale" : "the address above") and whichever answers first is used. It must present this host's pinned key.")
+                    }
+                }
+            } header: {
+                Text("Connection")
             }
             if let link = model.connections.first(where: { $0.profile.id == profile.id }), !link.missingIntegrations.isEmpty {
                 Section {
@@ -484,20 +661,17 @@ struct HostEditor: View {
                     } message: {
                         Text("The next connection trusts whatever key the host presents, including an impostor's.")
                     }
-            } footer: {
-                Text("The next connection trusts whatever key the host presents.")
-            }
-            Section {
                 Button("Remove Host", role: .destructive) { confirmDelete = true }
             }
         }
         .navigationTitle(profile.name)
         .onAppear {
             if case .direct(let host, let port) = profile.route { address = port == 22 ? host : "\(host):\(port)" }
+            lanAddress = profile.lanAddress ?? ""
         }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save", action: save).disabled(profile.username.isEmpty)
+                Button("Save", action: save).disabled(profile.username.isEmpty || !lanAddressValid)
             }
         }
         .confirmationDialog("Remove \(profile.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
@@ -508,7 +682,14 @@ struct HostEditor: View {
         }
     }
 
+    private var lanAddressValid: Bool {
+        let trimmed = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || HostAddress.parse(trimmed) != nil
+    }
+
     private func save() {
+        let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.lanAddress = lan.isEmpty ? nil : lan
         if case .direct = profile.route, let parsed = HostAddress.parse(address) {
             profile.route = .direct(host: parsed.host, port: parsed.port ?? 22)
         }
@@ -546,6 +727,48 @@ private struct SnippetsEditor: View {
     }
 }
 
+/// Words dictation should spell a certain way, and phrases it keeps mishearing, fixed before its
+/// words reach the draft.
+private struct DictionaryEditor: View {
+    @Environment(Settings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        Form {
+            Section {
+                TextField("GitHub, PostgreSQL, herdr", text: $settings.dictationTerms, axis: .vertical)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+            } header: {
+                Text("Known Terms")
+            } footer: {
+                Text("Names and jargon, separated by commas or lines. Dictation listens for them, and writes them as entered here when it hears them with any capitalization or spacing (\"git hub\", \"R and D\") or, for longer terms, a near miss (\"poster SQL\").")
+            }
+            Section {
+                ForEach($settings.dictationReplacements) { $rule in
+                    HStack {
+                        TextField("Heard", text: $rule.heard)
+                        Image(systemName: "arrow.right").foregroundStyle(.secondary).accessibilityHidden(true)
+                        TextField("Write", text: $rule.write)
+                    }
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                }
+                .onDelete { settings.dictationReplacements.remove(atOffsets: $0) }
+                Button("Add Replacement", systemImage: "plus") {
+                    settings.dictationReplacements.append(WordReplacement(heard: "", write: ""))
+                }
+            } header: {
+                Text("Replacements")
+            } footer: {
+                Text("When dictation hears a word or phrase on the left, it writes the right side exactly as entered. Matches whole words, ignoring capitalization and how the words are joined (\"poster SQL\", \"poster-SQL\"); the longest match wins. Applied before known terms. Typed text is never changed.")
+            }
+        }
+        .navigationTitle("Dictation Dictionary")
+        .toolbar { EditButton() }
+    }
+}
+
 /// A named agent start: its kind plus arguments passed exactly as written, one per line.
 private struct PresetsEditor: View {
     @Environment(Settings.self) private var settings
@@ -557,8 +780,10 @@ private struct PresetsEditor: View {
                 ForEach($settings.launchPresets) { $preset in
                     VStack(alignment: .leading) {
                         TextField("Name", text: $preset.name).font(.headline)
-                        Picker("Agent", selection: $preset.kind) {
-                            ForEach(["omp", "claude", "codex"], id: \.self) { Text(agentKindLabel($0)).tag($0) }
+                        SettingsMenuRow("Agent", value: agentKindLabel(preset.kind)) {
+                            Picker("Agent", selection: $preset.kind) {
+                                ForEach(["omp", "claude", "codex"], id: \.self) { Text(agentKindLabel($0)).tag($0) }
+                            }
                         }
                         TextField("Arguments, one per line", text: Binding {
                             preset.arguments.joined(separator: "\n")

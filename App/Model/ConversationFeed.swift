@@ -3,9 +3,9 @@ import HerdrAPI
 
 /// One agent's transcript, followed live while its conversation is on screen.
 ///
-/// It reads the file's first line for the title (omp rewrites it in place), then the
-/// last `window` bytes, then keeps one `tail -F` channel open for appends. Leaving the
-/// screen cancels the task, which closes the channel and ends the remote `tail`.
+/// One `tail -F` channel brings the file's first bytes for the title (omp rewrites it in
+/// place), then its last `window` bytes, then every append, so opening costs one exec.
+/// Leaving the screen cancels the task, which closes the channel and ends the remote `tail`.
 @MainActor @Observable
 final class ConversationFeed {
     enum State: Equatable {
@@ -30,6 +30,58 @@ final class ConversationFeed {
     private var paintedPath: String?
     private(set) var offlineDate: Date?
     var isOfflineCopy: Bool { offlineDate != nil }
+    var isRenderable: Bool { !conversation.items.isEmpty }
+    private(set) var isCaughtUp = false
+    private(set) var isFollowing = false
+    /// The view whose task follows this feed; another window showing it shares that follow.
+    private(set) var follower: UUID?
+    private(set) var revision = 0
+    private var resumeOffset: Int?
+    /// Where the parsed bytes begin; bounds how far an unopened conversation grows.
+    private var loadedFrom = 0
+    /// The offline copy as last saved and the file offset it ends at; a follow resumes onto it.
+    private var savedCopy: (bytes: Data, end: Int)?
+
+    func markStale() { isCaughtUp = false }
+
+    func discardParsedData() {
+        guard !isFollowing else { return }
+        conversation = Conversation()
+        title = nil
+        offlineDate = nil
+        paintedPath = nil
+        paintedHost = nil
+        resumeOffset = nil
+        savedCopy = nil
+        hasEarlier = false
+        isCaughtUp = false
+        state = .loading
+        revision += 1
+    }
+
+    /// Nil once the conversation has grown past twice the window: a fresh tail replaces it.
+    func warmSnapshot(location: TranscriptLocation?) -> WarmConversation? {
+        guard let location, paintedPath == location.path, let resumeOffset, !isOfflineCopy,
+              resumeOffset - loadedFrom <= 2 * window else { return nil }
+        return WarmConversation(location: location, conversation: conversation, start: loadedFrom,
+                                offset: resumeOffset, hasEarlier: hasEarlier, title: title)
+    }
+
+    func warm(_ data: WarmConversation, host: SessionAddress) {
+        guard !isFollowing else { return }
+        if data.location.path != paintedPath || host != paintedHost { savedCopy = nil }
+        conversation = data.conversation
+        title = data.title ?? title
+        hasEarlier = data.hasEarlier
+        resumeOffset = data.offset
+        loadedFrom = data.start
+        paintedPath = data.location.path
+        paintedHost = host
+        offlineDate = nil
+        isCaughtUp = false
+        state = .loading
+        revision += 1
+    }
     func discardOfflineCopy() {
         guard isOfflineCopy else { return }
         conversation = Conversation()
@@ -38,6 +90,8 @@ final class ConversationFeed {
         paintedPath = nil
         paintedHost = nil
         state = .loading
+        resumeOffset = nil
+        isCaughtUp = false
     }
     private var paintedHost: SessionAddress?
     private var generation = 0
@@ -51,6 +105,9 @@ final class ConversationFeed {
         state = .loading
         paintedPath = location.path
         paintedHost = host
+        resumeOffset = nil
+        savedCopy = nil
+        isCaughtUp = false
         guard let copy = TranscriptCache.load(host: host, path: location.path) else { return }
         var reader = TranscriptReader(format: location.format)
         conversation.apply(records: reader.appendRecords(Array(copy.bytes)))
@@ -61,6 +118,9 @@ final class ConversationFeed {
 
     func showEarlier() {
         window *= 4
+        resumeOffset = nil
+        isCaughtUp = false
+        revision += 1
     }
 
     /// Loads and follows the transcript until cancelled or the channel ends. The view keys
@@ -68,9 +128,14 @@ final class ConversationFeed {
     /// channel. A conversation already on screen stays there: a lost transport (the app went
     /// to the background) is not a transcript problem, so only a first read that never
     /// painted reports `unavailable`.
-    func follow(_ location: TranscriptLocation, client: HerdrClient, host: SessionAddress? = nil) async {
+    func follow(_ location: TranscriptLocation, client: HerdrClient, host: SessionAddress? = nil, follower: UUID? = nil) async {
         generation += 1
         let generation = generation
+        revision += 1
+        isFollowing = true
+        self.follower = follower
+        isCaughtUp = false
+        defer { if generation == self.generation { isFollowing = false; self.follower = nil; isCaughtUp = false } }
         let path = location.path
         if let host {
             restore(location, host: host)
@@ -102,9 +167,12 @@ final class ConversationFeed {
         }
         defer { liveness.cancel() }
         if state != .live || paintedPath != path { state = .loading }
-        var raw = Data()
-        var cacheRevision = TranscriptCache.revision
         var caching = TranscriptCache.isEnabled && host != nil
+        // A saved copy needs the bytes before the offset; without them the window is read again
+        // behind what's painted.
+        let resume = paintedPath == path && !isOfflineCopy && (!caching || savedCopy?.end == resumeOffset) ? resumeOffset : nil
+        var raw = resume != nil ? savedCopy?.bytes ?? Data() : Data()
+        var cacheRevision = TranscriptCache.revision
         var dropsFirstLine = false
         var cacheHasEarlier = false
         var lastSave = Date.distantPast
@@ -114,30 +182,49 @@ final class ConversationFeed {
             let complete = raw.lastIndex(of: 10).map { Data(raw[...$0]) } ?? Data()
             TranscriptCache.save(host: host, path: path, title: title,
                                  bytes: complete, hasEarlier: cacheHasEarlier)
+            if let resumeOffset { savedCopy = (complete, resumeOffset) }
             lastSave = .now
         }
         defer { saveCopy() }
         do {
-            let head = try await client.readFileTail(path: path, from: 0, limit: 4096)
-            guard !Task.isCancelled, generation == self.generation else { return }
-            title = TranscriptReader.title(inHead: head.bytes, format: location.format)
-            let start = max(0, head.fileSize - window)
-            hasEarlier = start > 0
-            dropsFirstLine = start > 0
-            cacheHasEarlier = hasEarlier
-            var reader = TranscriptReader(format: location.format, startsMidFile: start > 0)
+            var reader = TranscriptReader(format: location.format)
             var staging: Conversation? = Conversation()
-            var painted = head.fileSize == 0
-            if painted {
-                conversation = staging!
-                staging = nil
-                paintedPath = path
-                offlineDate = nil
-                state = .live
-                receivedLiveCopy = true
-            }
-            for try await chunk in client.followFile(path: path, from: start) {
+            var painted = false
+            var backlog = 0
+            var received = 0
+            var streamStart = 0
+            var hasCompleteBoundary = false
+            for try await event in client.followFile(path: path, lastBytes: window, headLimit: 4096, resumeOffset: resume) {
                 guard !Task.isCancelled, generation == self.generation else { return }
+                let chunk: [UInt8]
+                switch event {
+                case .opened(let fileSize, let start, let head):
+                    title = TranscriptReader.title(inHead: head, format: location.format)
+                    streamStart = start
+                    let continuing = resume != nil && start == resume
+                    hasCompleteBoundary = continuing || start == 0
+                    if continuing { staging = conversation }
+                    else { resumeOffset = nil; loadedFrom = start; raw = Data() }
+                    hasEarlier = continuing ? hasEarlier : start > 0
+                    dropsFirstLine = !continuing && start > 0
+                    cacheHasEarlier = hasEarlier
+                    reader = TranscriptReader(format: location.format, startsMidFile: !continuing && start > 0)
+                    backlog = fileSize - start
+                    if backlog == 0 {
+                        conversation = staging!
+                        staging = nil
+                        painted = true
+                        paintedPath = path
+                        offlineDate = nil
+                        state = .live
+                        receivedLiveCopy = true
+                        resumeOffset = start
+                        isCaughtUp = true
+                    }
+                    continue
+                case .bytes(let bytes):
+                    chunk = bytes
+                }
                 let enabled = TranscriptCache.isEnabled && host != nil
                 if caching != enabled || cacheRevision != TranscriptCache.revision {
                     raw = Data()
@@ -165,28 +252,36 @@ final class ConversationFeed {
                     }
                 }
                 let records = reader.appendRecords(chunk)
+                received += chunk.count
+                if chunk.contains(10) { hasCompleteBoundary = true }
+                // Where the painted conversation ends: it moves only with what is painted. A follow
+                // cut off mid-backlog (cancelled, dropped) leaves its staged records unpainted, and
+                // the next follow must read them again rather than resume past them.
+                let offset = hasCompleteBoundary ? streamStart + reader.consumedBytes : nil
                 if painted {
                     conversation.apply(records: records)
                 } else {
                     staging?.apply(records: records)
                 }
                 // The first read arrives in pieces; paint once the backlog is in.
-                if painted || reader.consumedBytes >= head.fileSize - start {
+                if painted || received >= backlog {
                     if let initial = staging {
                         conversation = initial
                         staging = nil
                     }
                     painted = true
+                    resumeOffset = offset
                     paintedPath = path
                     offlineDate = nil
                     state = .live
                     receivedLiveCopy = true
+                    isCaughtUp = true
                     if !dropsFirstLine, Date.now.timeIntervalSince(lastSave) >= 2 { saveCopy() }
                 }
             }
         } catch {
-            guard !Task.isCancelled, generation == self.generation, state != .live else { return }
-            state = .unavailable("Couldn't read this agent's transcript.")
+            guard !Task.isCancelled, generation == self.generation else { return }
+            if !isRenderable { state = .unavailable("Couldn't read this agent's transcript.") }
         }
     }
 

@@ -94,10 +94,14 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
         return try await setup.finish(channel: channel, timeout: timeout, keepaliveInterval: keepaliveInterval)
     }
 
+    /// Returns once the channel is open and the exec request is on the wire, without waiting
+    /// for the server's reply: stdin written now follows the request in order, which OpenSSH
+    /// and Tailscale SSH both deliver to the command. A rejection, or no reply within 60 s,
+    /// ends `output` with that error and closes the channel.
     public func exec(_ command: String) async throws -> any ExecChannel {
         try Task.checkCancellation()
         let operation = PendingChannel(eventLoop: channel.eventLoop)
-        let exec = ExecHandler(eventLoop: channel.eventLoop)
+        let exec = ExecHandler()
         operation.result.futureResult.whenFailure { exec.failedToOpen($0) }
         let child = try await withTaskCancellationHandler {
             channel.eventLoop.execute { [handler] in
@@ -122,7 +126,10 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
                     }
                     return child.triggerUserOutboundEvent(
                         SSHChannelRequestEvent.ExecRequest(command: command, wantReply: true)
-                    ).flatMap { exec.accepted.futureResult }.map { child }
+                    ).map {
+                        exec.expectReply(on: child, within: .seconds(60))
+                        return child
+                    }
                 }.whenComplete { operation.complete($0) }
             }
             return try await operation.result.futureResult.get()
@@ -399,18 +406,20 @@ private final class AuthWatcher: ChannelInboundHandler, @unchecked Sendable {
     }
 }
 
+/// Every method runs on the channel's event loop.
 private final class ExecHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = SSHChannelData
 
-    let accepted: EventLoopPromise<Void>
     let output: AsyncThrowingStream<[UInt8], any Error>
     private let continuation: AsyncThrowingStream<[UInt8], any Error>.Continuation
     private var exitStatus: Int32?
     private var stderr: [UInt8] = []
-    private var pendingAccept = true
+    /// The exec request is sent and its reply hasn't arrived; nil once settled either way.
+    private var replyDeadline: Scheduled<Void>?
+    /// Set when the server refused the request or never answered: the stream ends with it.
+    private var failure: (any Error)?
 
-    init(eventLoop: any EventLoop) {
-        accepted = eventLoop.makePromise()
+    init() {
         (output, continuation) = AsyncThrowingStream.makeStream()
     }
 
@@ -420,8 +429,22 @@ private final class ExecHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     func failedToOpen(_ error: any Error) {
-        settle(error)
         continuation.finish(throwing: error)
+    }
+
+    /// Called once the request is written; the caller already holds the channel.
+    func expectReply(on channel: Channel, within limit: TimeAmount) {
+        replyDeadline = channel.eventLoop.scheduleTask(in: limit) { [self] in
+            replyDeadline = nil
+            fail(channel, SSHError.timedOut)
+        }
+    }
+
+    private func fail(_ channel: Channel, _ error: any Error) {
+        guard failure == nil else { return }
+        failure = error
+        continuation.finish(throwing: error)
+        channel.close(promise: nil)
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -437,9 +460,12 @@ private final class ExecHandler: ChannelInboundHandler, @unchecked Sendable {
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         switch event {
         case is ChannelSuccessEvent:
-            settle(nil)
+            replyDeadline?.cancel()
+            replyDeadline = nil
         case is ChannelFailureEvent:
-            settle(SSHError.execRejected)
+            replyDeadline?.cancel()
+            replyDeadline = nil
+            fail(context.channel, SSHError.execRejected)
         case let status as SSHChannelRequestEvent.ExitStatus:
             exitStatus = Int32(truncatingIfNeeded: status.exitStatus)
         default:
@@ -449,12 +475,13 @@ private final class ExecHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
-        settle(error)
         context.close(promise: nil)
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        settle(SSHError.connectionClosed)
+        replyDeadline?.cancel()
+        replyDeadline = nil
+        // Finishing again after `fail` is a no-op.
         switch exitStatus {
         case 0?:
             continuation.finish()
@@ -464,12 +491,6 @@ private final class ExecHandler: ChannelInboundHandler, @unchecked Sendable {
             continuation.finish(throwing: CommandError.channelClosed)
         }
         context.fireChannelInactive()
-    }
-
-    private func settle(_ error: (any Error)?) {
-        guard pendingAccept else { return }
-        pendingAccept = false
-        if let error { accepted.fail(error) } else { accepted.succeed(()) }
     }
 }
 

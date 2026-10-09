@@ -136,4 +136,42 @@ import Testing
         let tail = try await client.readFileTail(path: path, from: 2, limit: 3)
         #expect(tail.fileSize == 6 && tail.bytes == Array("cde".utf8))
     }
+
+    /// One exec measures the file and sends its head, then its last bytes, then appends; a
+    /// transcript that doesn't exist yet opens empty and is followed once it appears.
+    @Test(.timeLimit(.minutes(1))) func followSendsHeadThenLastBytesThenAppends() async throws {
+        let client = HerdrClient(runner: LocalProcessRunner())
+        let directory = FileManager.default.temporaryDirectory
+        let url = directory.appendingPathComponent("it's \(UUID().uuidString).jsonl")
+        try Data("0123456789".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        var stream = client.followFile(path: url.path, lastBytes: 4, headLimit: 3).makeAsyncIterator()
+        #expect(try await stream.next() == .opened(fileSize: 10, start: 6, head: Array("012".utf8)))
+        #expect(try await stream.next() == .bytes(Array("6789".utf8)))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("ab".utf8))
+        try handle.close()
+        #expect(try await stream.next() == .bytes(Array("ab".utf8)))
+
+        let missing = directory.appendingPathComponent("\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: missing) }
+        var empty = client.followFile(path: missing.path, lastBytes: 4, headLimit: 3).makeAsyncIterator()
+        #expect(try await empty.next() == .opened(fileSize: 0, start: 0, head: []))
+        try Data("new\n".utf8).write(to: missing)
+        #expect(try await empty.next() == .bytes(Array("new\n".utf8)))
+    }
+
+    @Test(.timeLimit(.minutes(1))) func followResumesAndFallsBackPastEnd() async throws {
+        let client = HerdrClient(runner: LocalProcessRunner())
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("resume \(UUID().uuidString).jsonl")
+        try Data("0123456789".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        var resumed = client.followFile(path: url.path, lastBytes: 4, headLimit: 3, resumeOffset: 8).makeAsyncIterator()
+        #expect(try await resumed.next() == .opened(fileSize: 10, start: 8, head: Array("012".utf8)))
+        #expect(try await resumed.next() == .bytes(Array("89".utf8)))
+        var fallback = client.followFile(path: url.path, lastBytes: 4, headLimit: 3, resumeOffset: 11).makeAsyncIterator()
+        #expect(try await fallback.next() == .opened(fileSize: 10, start: 6, head: Array("012".utf8)))
+        #expect(try await fallback.next() == .bytes(Array("6789".utf8)))
+    }
 }

@@ -68,6 +68,18 @@ private let authRejected = ConnectionFailure("key rejected", retryable: false)
         #expect(s.handle(.foregrounded) == [.cancelRetry, .connect])
     }
 
+    @Test func retryRestartsAnAttemptInProgressButForegroundLeavesIt() {
+        var s = ConnectionSupervisor()
+        _ = s.handle(.start)
+        // Every return to the app sends this; a healthy attempt must not start over each time.
+        #expect(s.handle(.foregrounded) == [])
+        // The user asked: the attempt may be stuck, so a fresh one replaces it.
+        #expect(s.handle(.userRetry) == [.cancelRetry, .connect])
+        #expect(s.phase == .connecting(attempt: 1))
+        // An attempt out of time fails like any other and backs off.
+        #expect(s.handle(.connectFailed(transient)) == [.disconnect, .scheduleRetry(.milliseconds(500))])
+    }
+
     @Test func networkChangeReplacesLiveConnection() {
         var s = ConnectionSupervisor()
         _ = s.handle(.start)
@@ -91,6 +103,19 @@ private let authRejected = ConnectionFailure("key rejected", retryable: false)
         #expect(s.handle(.backgrounded) == [.cancelRetry, .disconnect])
         #expect(s.handle(.connected) == [])
         #expect(s.phase == .suspended)
+    }
+
+    @Test func lanLinkOfATailnetHostIsReplacedOnNetworkChange() {
+        // The host is on the tailnet, but this link won over its LAN address: a new route
+        // strands it like any direct TCP connection.
+        var s = ConnectionSupervisor(migratesAcrossRoutes: true)
+        _ = s.handle(.start)
+        s.migratesAcrossRoutes = false
+        _ = s.handle(.connected)
+        #expect(s.handle(.pathChanged(satisfied: true)) == [.disconnect, .cancelRetry, .connect])
+        s.migratesAcrossRoutes = true
+        _ = s.handle(.connected)
+        #expect(s.handle(.pathChanged(satisfied: true)) == [.verify])
     }
 
     @Test func offlineWaitsForNetwork() {

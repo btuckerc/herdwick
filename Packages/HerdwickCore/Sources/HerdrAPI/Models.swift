@@ -60,7 +60,7 @@ public struct Pong: Decodable, Sendable, Equatable {
     }
 }
 
-public struct SessionInfo: Decodable, Sendable, Equatable, Identifiable {
+public struct SessionInfo: Codable, Sendable, Equatable, Identifiable {
     public var name: String
     public var isDefault: Bool
     public var running: Bool
@@ -76,7 +76,7 @@ struct SessionList: Decodable {
     var sessions: [SessionInfo]
 }
 
-public struct Workspace: Decodable, Sendable, Equatable, Identifiable {
+public struct Workspace: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var number: Int
     public var label: String
@@ -97,7 +97,7 @@ public struct Workspace: Decodable, Sendable, Equatable, Identifiable {
 }
 
 /// Snapshot metadata has no branch field; don't infer one from the checkout directory.
-public struct WorkspaceWorktreeInfo: Decodable, Sendable, Equatable {
+public struct WorkspaceWorktreeInfo: Codable, Sendable, Equatable {
     public var repoKey: String
     public var repoName: String
     public var repoRoot: String
@@ -123,7 +123,7 @@ public struct IntegrationInfo: Decodable, Sendable, Identifiable {
     public var id: String { target }
 }
 
-public struct Tab: Decodable, Sendable, Equatable, Identifiable {
+public struct Tab: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var workspaceID: String
     public var number: Int
@@ -139,7 +139,7 @@ public struct Tab: Decodable, Sendable, Equatable, Identifiable {
     }
 }
 
-public struct Pane: Decodable, Sendable, Equatable, Identifiable {
+public struct Pane: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var workspaceID: String
     public var tabID: String
@@ -147,15 +147,21 @@ public struct Pane: Decodable, Sendable, Equatable, Identifiable {
     public var agentStatus: AgentStatus
     public var agent: String?
     public var displayAgent: String?
+    /// The shell's directory; herdr names a workspace after its first pane's.
     public var cwd: String?
+    /// The directory of the process in front of the shell, when one is running.
+    public var foregroundCwd: String?
     public var label: String?
     public var terminalTitle: String?
     public var revision: Int
     /// The pane's visible rows on the host. `observe` at fewer rows shows only the top ones.
     public var viewportRows: Int? { scroll?.viewportRows }
     var scroll: Scroll?
+    /// Where whatever runs in the pane works: a program started elsewhere, or one that changed
+    /// directory, isn't where its shell is.
+    public var workingDirectory: String? { foregroundCwd ?? cwd }
 
-    struct Scroll: Decodable, Sendable, Equatable {
+    struct Scroll: Codable, Sendable, Equatable {
         var viewportRows: Int?
         enum CodingKeys: String, CodingKey { case viewportRows = "viewport_rows" }
     }
@@ -168,10 +174,11 @@ public struct Pane: Decodable, Sendable, Equatable, Identifiable {
         case agentStatus = "agent_status"
         case displayAgent = "display_agent"
         case terminalTitle = "terminal_title_stripped"
+        case foregroundCwd = "foreground_cwd"
     }
 }
 
-public struct Agent: Decodable, Sendable, Equatable, Identifiable {
+public struct Agent: Codable, Sendable, Equatable, Identifiable {
     public var paneID: String
     public var workspaceID: String
     public var tabID: String
@@ -179,7 +186,9 @@ public struct Agent: Decodable, Sendable, Equatable, Identifiable {
     public var agent: String?
     public var displayAgent: String?
     public var name: String?
+    /// The pane shell's directory, not necessarily the agent's: see `workingDirectory`.
     public var cwd: String?
+    public var foregroundCwd: String?
     public var terminalTitle: String?
     public var focused: Bool
     public var stateChangeSeq: Int?
@@ -187,7 +196,12 @@ public struct Agent: Decodable, Sendable, Equatable, Identifiable {
     public var agentSession: AgentSessionRef?
     /// True when a full-lifecycle integration reports status and herdr skips screen detection.
     public var screenDetectionSkipped: Bool?
+    /// The name a person gave the agent's pane in herdr (`pane.rename`). herdr reports it on the
+    /// pane, not the agent; `Snapshot` copies it here.
+    public var label: String? = nil
     public var id: String { paneID }
+    /// The agent's own directory, for its relative paths and for resuming it.
+    public var workingDirectory: String? { foregroundCwd ?? cwd }
 
     enum CodingKeys: String, CodingKey {
         case agent, name, cwd, focused
@@ -197,14 +211,16 @@ public struct Agent: Decodable, Sendable, Equatable, Identifiable {
         case agentStatus = "agent_status"
         case displayAgent = "display_agent"
         case terminalTitle = "terminal_title_stripped"
+        case foregroundCwd = "foreground_cwd"
         case stateChangeSeq = "state_change_seq"
         case agentSession = "agent_session"
         case screenDetectionSkipped = "screen_detection_skipped"
     }
 
-    /// Human title: explicit name, then the terminal title, then the agent kind.
+    /// Human title: the pane's given name, the explicit agent name, then the terminal title,
+    /// then the agent kind.
     public var title: String {
-        for candidate in [name, terminalTitle, displayAgent, agent] {
+        for candidate in [label, name, terminalTitle, displayAgent, agent] {
             if let candidate, !candidate.isEmpty { return candidate }
         }
         return paneID
@@ -230,7 +246,8 @@ public struct AgentSessionRef: Codable, Sendable, Equatable, Hashable {
     public var transcriptPath: String? { kind == "path" && value.hasPrefix("/") ? value : nil }
 }
 
-public struct Snapshot: Decodable, Sendable, Equatable {
+/// Codable in herdr's own wire shape, so a saved copy reads back exactly as a fresh one.
+public struct Snapshot: Codable, Sendable, Equatable {
     public var version: String
     public var protocolVersion: Int
     public var workspaces: [Workspace]
@@ -243,6 +260,19 @@ public struct Snapshot: Decodable, Sendable, Equatable {
         case version, workspaces, tabs, panes, agents
         case protocolVersion = "protocol"
         case focusedPaneID = "focused_pane_id"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(String.self, forKey: .version)
+        protocolVersion = try c.decode(Int.self, forKey: .protocolVersion)
+        workspaces = try c.decode([Workspace].self, forKey: .workspaces)
+        tabs = try c.decode([Tab].self, forKey: .tabs)
+        panes = try c.decode([Pane].self, forKey: .panes)
+        agents = try c.decode([Agent].self, forKey: .agents)
+        focusedPaneID = try c.decodeIfPresent(String.self, forKey: .focusedPaneID)
+        let labels = Dictionary(panes.compactMap { pane in pane.label.map { (pane.id, $0) } }) { first, _ in first }
+        for index in agents.indices { agents[index].label = labels[agents[index].paneID] }
     }
 
     /// Agents ordered by what needs attention, then by workspace order.

@@ -179,11 +179,7 @@ final class KeySetup {
             return try await SSHConnection.connect(host: host, port: port, username: profile.username, authentication: authentication, hostKeyValidator: validator)
         case .tailnet(let nodeID, _, let address):
             guard let tailnet else { throw TailnetError.notRunning }
-            let handle = try await tailnet.readyHandle()
-            let peer = tailnet.peer(id: nodeID)
-            let fd = try await withTimeout(.seconds(15)) {
-                try await tailnet.dial(address: peer?.address ?? address, port: 22, handle: handle)
-            }
+            let fd = try await tailnet.connect(to: nodeID, address: address, port: 22).fd
             return try await SSHConnection.connect(adoptingConnectedSocket: fd, username: profile.username, authentication: authentication, hostKeyValidator: validator)
         }
     }

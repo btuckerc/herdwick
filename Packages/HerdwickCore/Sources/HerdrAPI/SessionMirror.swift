@@ -57,6 +57,8 @@ extension HerdrClient {
                         }
                         continuation.yield(.live(current))
                         let inbox = EventInbox()
+                        let registration = mirrors.add(inbox, session: session)
+                        defer { mirrors.remove(registration) }
                         let reader = Task {
                             do {
                                 for try await event in events { inbox.add(event) }
@@ -102,6 +104,29 @@ extension HerdrClient {
     private func subscribe(session: String, panes: Set<String>?) async -> (panes: Set<String>, events: AsyncThrowingStream<HerdrEvent, any Error>)? {
         guard let panes, let events = try? await events(session: session, subscriptions: Self.subscriptions(panes)) else { return nil }
         return (panes, events)
+    }
+}
+
+/// The live mirrors' inboxes, so a change herdr doesn't announce (a pane rename) can still
+/// make each mirror of that session take a fresh snapshot.
+final class MirrorRegistry: Sendable {
+    private let inboxes = Mutex<[Int: (session: String, inbox: EventInbox)]>([:])
+    private let nextID = Atomic<Int>(0)
+
+    func add(_ inbox: EventInbox, session: String) -> Int {
+        let id = nextID.add(1, ordering: .relaxed).newValue
+        inboxes.withLock { $0[id] = (session, inbox) }
+        return id
+    }
+
+    func remove(_ id: Int) {
+        _ = inboxes.withLock { $0.removeValue(forKey: id) }
+    }
+
+    /// As if herdr had announced a change in `session`.
+    func touch(_ session: String) {
+        let matching = inboxes.withLock { $0.values.filter { $0.session == session }.map(\.inbox) }
+        for inbox in matching { inbox.add(HerdrEvent(kind: "pane.updated")) }
     }
 }
 

@@ -125,7 +125,7 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         guard blocked ? settings.notifyNeedsYou : settings.notifyFinished else { return }
         let content = UNMutableNotificationContent()
         content.title = agent.conversationTitle
-        content.subtitle = [link.profile.name, agent.cwd.map { ($0 as NSString).lastPathComponent }]
+        content.subtitle = [link.profile.name, agent.workingDirectory.map { ($0 as NSString).lastPathComponent }]
             .compactMap { $0 }.joined(separator: " · ")
         content.body = blocked ? "Needs you" : "Finished"
         content.sound = blocked ? .default : nil
@@ -168,7 +168,7 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
             for agent in link.snapshot?.agents ?? [] {
                 let address = link.address(paneID: agent.paneID)
                 let key = Self.key(address)
-                let place = [link.profile.name, agent.cwd.map { ($0 as NSString).lastPathComponent }]
+                let place = [link.profile.name, agent.workingDirectory.map { ($0 as NSString).lastPathComponent }]
                     .compactMap { $0 }.joined(separator: " · ")
                 names[key] = AttentionSnapshot.Name(title: agent.conversationTitle, place: place)
                 guard link.hidden[agent.paneID] == nil else { continue }

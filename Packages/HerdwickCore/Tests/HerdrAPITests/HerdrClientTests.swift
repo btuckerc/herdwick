@@ -82,6 +82,24 @@ struct LiveHerdrTests {
         }
     }
 
+    /// Hosts without perl: the lane's shell loop runs one `remote-api-bridge` per request and
+    /// asks again for the request it can't decode from the command line.
+    @Test func requestLaneWithoutPerl() async throws {
+        struct NoPerl: CommandRunner {
+            func exec(_ command: String) async throws -> any ExecChannel {
+                try await LocalProcessRunner().exec(command.replacingOccurrences(of: "command -v perl", with: "false"))
+            }
+        }
+        let client = HerdrClient(runner: NoPerl())
+        #expect(try await client.ping(session: "main").protocolVersion >= 22)
+        #expect(try await !client.snapshot(session: "main").workspaces.isEmpty)
+        await #expect(throws: HerdrError.self) {
+            let _: HerdrClient.Ignored = try await client.request("no.such.method", params: HerdrClient.EmptyParams(), session: "main")
+        }
+        // Returns only once herdr has acknowledged the subscription sent again on stdin.
+        _ = try await client.events(session: "main", subscriptions: Subscription.structural)
+    }
+
     @Test func observeStartsWithAFullFrame() async throws {
         let pane = try #require(try await client.snapshot(session: "main").panes.first).id
         let terminal = try await client.terminal(pane: pane, session: "main", cols: 80, rows: 24, control: false)
@@ -115,10 +133,12 @@ struct LiveHerdrTests {
     }
 
     private func exerciseWritePath(session: String) async throws {
+        // A headless server starts without a workspace.
+        _ = try await client.createWorkspace(label: "herdwick", cwd: nil, session: session)
         var snapshot: Snapshot?
         for _ in 0..<40 where snapshot?.panes.isEmpty ?? true {
-            try await Task.sleep(for: .milliseconds(250))
             snapshot = try? await client.snapshot(session: session)
+            if snapshot?.panes.isEmpty ?? true { try await Task.sleep(for: .milliseconds(250)) }
         }
         let pane = try #require(snapshot?.panes.first).id
 
@@ -158,5 +178,10 @@ struct LiveHerdrTests {
         repeat { latest = try await mirror.next()?.snapshot } while latest?.panes.count != 2
         let _: HerdrClient.Ignored = try await client.request("tab.rename", params: Rename(tab_id: tab, label: "mirrored"), session: session)
         repeat { latest = try await mirror.next()?.snapshot } while latest?.tabs.first?.label != "mirrored"
+        // A rename reaches every client's mirror, and blank clears it.
+        try await client.renamePane(pane, label: "  Deploy to staging ", session: session)
+        repeat { latest = try await mirror.next()?.snapshot } while latest?.panes.first { $0.id == pane }?.label != "Deploy to staging"
+        try await client.renamePane(pane, label: "", session: session)
+        repeat { latest = try await mirror.next()?.snapshot } while latest?.panes.first { $0.id == pane }?.label != nil
     }
 }

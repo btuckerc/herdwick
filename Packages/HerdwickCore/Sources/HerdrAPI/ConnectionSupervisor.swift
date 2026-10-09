@@ -64,9 +64,10 @@ public struct ConnectionSupervisor: Sendable, Equatable {
 
     public private(set) var phase: Phase = .idle
     private var networkAvailable = true
-    /// The transport rides a route of its own (the in-app tailnet), which moves to a new
+    /// The live link rides a route of its own (the in-app tailnet), which moves to a new
     /// physical path by itself; such a connection is checked on a route change, not replaced.
-    private let migratesAcrossRoutes: Bool
+    /// Set by the owner for each link that goes live, since a host's links may take different routes.
+    public var migratesAcrossRoutes: Bool
 
     public init(migratesAcrossRoutes: Bool = false) {
         self.migratesAcrossRoutes = migratesAcrossRoutes

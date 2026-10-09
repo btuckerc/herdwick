@@ -117,9 +117,11 @@ struct PaneView: View {
                 if !composerFocused || typing { restingSize = size }
                 viewHeight = size.height
             }
-
             controls
         }
+        // An agent's terminal opened as the thread itself (it has no transcript) keeps the
+        // dock, at the end of the keys' row; one pushed from its conversation goes back there.
+        .agentDock(current: connection.address(paneID: paneID), busy: sending)
         .navigationTitle(agent?.conversationTitle ?? pane?.label ?? workspaceLabel ?? pane?.terminalTitle ?? paneID)
         .navigationSubtitle(subtitle)
         .navigationBarTitleDisplayMode(.inline)
@@ -135,7 +137,7 @@ struct PaneView: View {
                     .disabled(!connection.isLive || pane == nil)
             }
         }
-        .sheet(isPresented: $showsText) { TerminalText(connection: connection, paneID: paneID, cwd: pane?.cwd) }
+        .sheet(isPresented: $showsText) { TerminalText(connection: connection, paneID: paneID, cwd: pane?.workingDirectory) }
         .onAppear { terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
         .onChange(of: theme) { _, theme in terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
         .onChange(of: settings.font) { terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
@@ -176,31 +178,41 @@ struct PaneView: View {
     private var subtitle: String {
         if let link = connection.statusText { return link }
         let status = agent.map(\.agentStatus.label) ?? (pane == nil ? nil : "Shell")
-        return [status, pane?.cwd.map(homeRelative)].compactMap { $0 }.joined(separator: " · ")
+        return [status, pane?.workingDirectory.map(homeRelative)].compactMap { $0 }.joined(separator: " · ")
     }
 
     // MARK: Controls
 
     private var controls: some View {
         VStack(spacing: 8) {
-            KeyBar(typing: $typing) { keys in
-                Task { await send(keys: keys) }
-            } onTypeToggle: {
-                typing.toggle()
-                if typing {
-                    composerFocused = false
-                    Task {
-                        try? await Task.sleep(for: .milliseconds(150))
-                        terminal.focusKeyboard()
+            HStack(spacing: 8) {
+                KeyBar(typing: $typing) { keys in
+                    Task { await send(keys: keys) }
+                } onTypeToggle: {
+                    typing.toggle()
+                    if typing {
+                        composerFocused = false
+                        Task {
+                            try? await Task.sleep(for: .milliseconds(150))
+                            terminal.focusKeyboard()
+                        }
                     }
                 }
+                .disabled(!connection.isLive || pane == nil)
+                // The composer keeps the dock on its send button; with the composer away it stands here.
+                if hasDock, typing { AgentDock.slot }
             }
             if !typing { composer }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 8)
-        .disabled(!connection.isLive || pane == nil)
+    }
+
+    private var hasDock: Bool {
+        guard settings.showsDock, agent != nil, scene.navigationPath.count == 1 else { return false }
+        let current = connection.address(paneID: paneID)
+        return model.dockThreads(in: scene).contains { $0.address != current }
     }
 
     /// Start an agent in this shell; sits under the header so the keyboard area stays for typing.
@@ -211,7 +223,7 @@ struct PaneView: View {
             } label: {
                 HStack {
                     if startFlow.running { ProgressView() }
-                    Text("Start \(agentKindLabel(connection.lastAgentKind))")
+                    Text("Start \(agentKindLabel(connection.lastAgentKind))").lineLimit(1)
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -233,8 +245,12 @@ struct PaneView: View {
 
     private var composer: some View {
         MessageComposer(draft: $draft, attachments: $attachments, sending: sending, focus: $composerFocused,
-                        placeholder: agent == nil ? "Run a command" : "Message") { Task { await sendDraft() } }
-            .disabled(startFlow.running)
+                        placeholder: agent == nil ? "Run a command" : "Message", docksAgents: hasDock,
+                        // `locked`, not `.disabled`: that would also disable a running dictation's Stop and Cancel.
+                        locked: !connection.isLive || pane == nil || startFlow.running,
+                        vocabulary: { DictationController.vocabulary(from: [pane?.workingDirectory, agent?.agent].compactMap { $0 }) }) {
+            Task { await sendDraft() }
+        }
     }
 
     private func start(_ kind: String) {

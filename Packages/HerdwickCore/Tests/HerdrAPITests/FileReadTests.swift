@@ -17,6 +17,8 @@ import Testing
             try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
             try Data().write(to: project.appendingPathComponent("session-id.jsonl"))
         }
+        let shellOnly = shell.appendingPathComponent("projects/project space/shell-only.jsonl")
+        try Data().write(to: shellOnly)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sleep")
         process.arguments = ["30"]
@@ -27,6 +29,14 @@ import Testing
         let ref = AgentSessionRef(source: "test", agent: "claude", kind: "id", value: "session-id")
         let location = try await client.locateTranscript(ref, pane: "pane", session: "test")
         #expect(location?.path == agent.appendingPathComponent("projects/project space/session-id.jsonl").path)
+        // One host command for several panes, each resolved on its own: the agent's directory,
+        // the shell's, or nothing.
+        func claude(_ id: String) -> AgentSessionRef { AgentSessionRef(source: "test", agent: "claude", kind: "id", value: id) }
+        let batch = try await client.locateTranscripts([("a", ref), ("b", claude("shell-only")), ("c", claude("absent"))], session: "test")
+        #expect(batch == [
+            "a": TranscriptLocation(path: agent.appendingPathComponent("projects/project space/session-id.jsonl").path, format: .claude),
+            "b": TranscriptLocation(path: shellOnly.path, format: .claude),
+        ])
     }
     #endif
 
@@ -48,9 +58,12 @@ private struct DiscoveryRunner: CommandRunner {
     let pid: Int32
     let shellDirectory: String
     func exec(_ command: String) async throws -> any ExecChannel {
-        if command.contains("remote-api-bridge") {
-            return try await LocalProcessRunner().exec("read line; printf '%s\\n' " +
-                shellQuote(#"{"result":{"process_info":{"foreground_processes":[{"pid":\#(pid)}]}}}"#))
+        if command.contains("HERDWICK_REQUEST") {
+            // A request lane on a host without perl: the request in the command line is asked
+            // for again, then each is answered with its own id and the status line.
+            let reply = #"{"id":"%s","result":{"process_info":{"foreground_processes":[{"pid":\#(pid)}]}}}\n\036%s\n"#
+            return try await LocalProcessRunner().exec("printf '\\036r\\n'; while IFS= read -r r; do id=${r#*\\\"id\\\":\\\"}; printf "
+                + shellQuote(reply) + " \"${id%%\\\"*}\" 0; done")
         }
         return try await LocalProcessRunner().exec("export CLAUDE_CONFIG_DIR=\(shellQuote(shellDirectory)); " + command)
     }

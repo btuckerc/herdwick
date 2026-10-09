@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct HerdwickApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @State private var dictation = DictationController()
     @State private var model = AppModel()
 
     var body: some Scene {
@@ -13,6 +14,7 @@ struct HerdwickApp: App {
                 .environment(model.settings)
                 .environment(model.tailnet)
                 .environment(model.demo)
+                .environment(dictation)
                 .preferredColorScheme(model.settings.appearance.colorScheme)
         }
         .commands { SceneCommands(model: model) }
@@ -22,6 +24,7 @@ struct HerdwickApp: App {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(DictationController.self) private var dictation
     @Environment(\.scenePhase) private var phase
     @Environment(\.horizontalSizeClass) private var width
     @State private var scene = SceneState()
@@ -34,8 +37,8 @@ struct RootView: View {
                     NavigationSplitView {
                         SessionView(connection: connection)
                     } detail: {
-                        NavigationStack(path: $scene.navigationPath) {
-                            ContentUnavailableView("Choose a conversation", systemImage: "bubble.left.and.bubble.right")
+                        NavigationStack(path: detailPath) {
+                            detailRoot
                                 .navigationDestination(for: Route.self) { destination($0) }
                         }
                     }
@@ -53,6 +56,7 @@ struct RootView: View {
         .onDisappear { model.unregister(scene) }
         .onChange(of: phase) { _, phase in
             model.scenePhaseChanged(phase, in: scene)
+            if phase == .background { dictation.backgrounded() }
             if phase == .active { SharedInbox.shared.refresh() }
         }
         .onOpenURL { model.open($0, in: scene) }
@@ -62,7 +66,29 @@ struct RootView: View {
         .modifier(AppPrivacyModifier())
     }
 
-    @ViewBuilder private func destination(_ route: Route) -> some View {
+    /// The split view's detail column shows the selected thread as its root, swapped in place;
+    /// only what that thread opens (its terminal, a subagent) is pushed. Pushing the selection
+    /// itself left the column blank whenever the selection changed (iOS 26 and 27).
+    private var detailPath: Binding<[Route]> {
+        Binding(get: { Array(scene.navigationPath.dropFirst()) },
+                set: { scene.navigationPath = Array(scene.navigationPath.prefix(1)) + $0 })
+    }
+
+    @ViewBuilder private var detailRoot: some View {
+        if let route = scene.navigationPath.first {
+            destination(route)
+        } else {
+            ContentUnavailableView("Choose a conversation", systemImage: "bubble.left.and.bubble.right")
+        }
+    }
+
+    /// One view per route: the agent dock replaces the root in place, and a reused view
+    /// would carry the last thread's composer, scroll and read state across.
+    private func destination(_ route: Route) -> some View {
+        destinationContent(route).id(route)
+    }
+
+    @ViewBuilder private func destinationContent(_ route: Route) -> some View {
         let address = route.address
         if let target = model.connection(for: address) {
             switch route {

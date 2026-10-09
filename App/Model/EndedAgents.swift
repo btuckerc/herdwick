@@ -40,7 +40,7 @@ final class EndedAgents {
             let workspace = snapshot.workspaces.first { $0.id == agent.workspaceID }
             var item = EndedAgent(hostID: hostID, session: session, harness: ref.agent, reference: ref,
                                   transcriptPath: paths[agent.paneID] ?? ref.transcriptPath, paneID: agent.paneID,
-                                  cwd: agent.cwd, workspaceID: agent.workspaceID, workspaceLabel: workspace?.label ?? agent.workspaceID,
+                                  cwd: agent.workingDirectory, workspaceID: agent.workspaceID, workspaceLabel: workspace?.label ?? agent.workspaceID,
                                   title: agent.conversationTitle, observedAt: now)
             live.insert(item.id)
             if let index = next.firstIndex(where: { $0.id == item.id }) {

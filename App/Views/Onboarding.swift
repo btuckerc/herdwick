@@ -498,12 +498,17 @@ private struct KeySetupSheet: View {
                  : "Compare it with the server's own (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). Your password is sent only after you continue.")
                 .foregroundStyle(.secondary)
             Text("Install this iPhone's key so future connections do not need the password.")
-            Button("Install this iPhone's key") { setup.install() }
+            VStack(spacing: 8) {
+                Button { setup.install() } label: {
+                    Text("Install This iPhone's Key").frame(maxWidth: .infinity)
+                }
                 .buttonStyle(.glassProminent)
-            Button("Keep using password") {
-                setup.keepPassword()
+                Button { setup.keepPassword() } label: {
+                    Text("Keep Using Password").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glass)
             }
-            .buttonStyle(.glass)
+            .controlSize(.large)
         }
     }
 }
