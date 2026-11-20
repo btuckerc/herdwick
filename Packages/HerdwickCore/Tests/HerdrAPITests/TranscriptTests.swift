@@ -90,6 +90,25 @@ struct AgentTranscriptTests {
         #expect(codex.users.last?.hasPrefix("Now use apply_patch") == true)
     }
 
+    /// agy 1.5.13: results follow their call's step in call order; the closing reply ends the turn.
+    @Test func agyLogReadsAsAConversation() throws {
+        let agy = try recorded("agy-transcript", .agy)
+        #expect(agy.users == ["Tidy the Neon docs in the fleet."])
+        #expect(agy.tools.map(\.name) == ["shell", "read", "shell"])
+        let status = agy.tools[0]
+        #expect(status.state == .succeeded)
+        #expect(status.output == "## master...origin/master")
+        guard case .shell(let command, _, let exit) = status.detail else { Issue.record("not a shell step"); return }
+        #expect(command == "git -C ~/src/boilerplate status -sb")
+        #expect(exit == 0)
+        #expect(agy.tools[1].output?.hasPrefix("Showing lines 1-2 of 25") == true)
+        #expect(agy.tools[2].state == .failed)
+        #expect(agy.items.contains { if case .thinking = $0 { true } else { false } })
+        #expect(agy.items.contains { if case .assistant(_, let text) = $0 { text == "Done: the docs are tidy." } else { false } })
+        #expect(!agy.users.contains { $0.contains("SYSTEM_MESSAGE") })
+        #expect(TranscriptFormat(agent: "agy") == .agy)
+    }
+
     /// Claude Code replaced TodoWrite with TaskCreate/TaskUpdate: ids come back in results.
     @Test func claudeTaskCallsFoldIntoOnePlan() throws {
         let claude = try recorded("claude-tasks", .claude)

@@ -15,6 +15,7 @@ extension HerdrClient {
     /// POSIX awk (BSD and GNU alike): bracketed braces and no interval expressions.
     static let usageScript = #"""
     function n(s, k) { return match(s, "\"" k "\":[0-9]+") ? substr(s, RSTART + length(k) + 3, RLENGTH - length(k) - 3) + 0 : 0 }
+    fmt == "agy" { if (/"type":"PLANNER_RESPONSE"/) { ti += n($0, "input_tokens") + n($0, "cache_read_tokens"); to += n($0, "output_tokens"); seen = 1 }; next }
     fmt == "codex" { if (match($0, /"total_token_usage":[{][^}]*[}]/)) { u = substr($0, RSTART, RLENGTH); ti = n(u, "input_tokens"); to = n(u, "output_tokens"); seen = 1 }; next }
     /"role":"assistant"/ && match($0, /"usage":[{][^{}]*([{][^{}]*[}][^{}]*)*[}]/) {
         u = substr($0, RSTART, RLENGTH); seen = 1

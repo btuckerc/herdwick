@@ -9,7 +9,7 @@ extension HerdrClient {
     /// maps a subagent id to the name its image is shown with.
     public func transcriptToolImages(path: String, format: TranscriptFormat, subagents: Bool = false,
                                      names: [String: String] = [:]) async throws -> [TranscriptImage] {
-        guard format != .codex else { return [] }
+        guard format != .codex, format != .agy else { return [] }
         // A subagent's transcript sits in a folder named after its parent's (Claude: `subagents/agent-<id>.jsonl`).
         let children = !subagents ? "" : format == .claude ? #"; for c in "${f%.jsonl}"/subagents/agent-*.jsonl; do [ -r "$c" ] && set -- "$@" "$c"; done"#
             : #"; for c in "${f%.jsonl}"/*.jsonl; do [ -r "$c" ] && set -- "$@" "$c"; done"#

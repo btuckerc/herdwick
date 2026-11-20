@@ -158,9 +158,10 @@ public struct TranscriptLocation: Sendable, Equatable, Hashable {
 }
 
 extension HerdrClient {
-    /// The transcript file behind `ref`. omp reports a path; Claude Code and Codex report
+    /// The transcript file behind `ref`. omp reports a path; Claude Code, Codex and agy report
     /// only a session id, which names a file under their config directory: the agent's own
-    /// `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (read from its process on Linux), then the shell's, then the default.
+    /// `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (read from its process on Linux), then the shell's, then the default;
+    /// agy's conversation log is always under `~/.gemini/antigravity-cli/brain/<id>/`.
     public func locateTranscript(_ ref: AgentSessionRef, pane: String, session: String) async throws -> TranscriptLocation? {
         try await locateTranscripts([(pane, ref)], session: session)[pane]
     }
@@ -200,11 +201,16 @@ extension HerdrClient {
         }
         var script = "for spec in"
         for item in search {
-            script += " " + shellQuote("\(item.pane)|\(item.format == .claude ? "claude" : "codex")|\(item.id)|\(pids[item.pane].map(String.init) ?? "")")
+            script += " " + shellQuote("\(item.pane)|\(item.format.rawValue)|\(item.id)|\(pids[item.pane].map(String.init) ?? "")")
         }
         script += """
         ; do
           pane=${spec%%|*}; rest=${spec#*|}; fmt=${rest%%|*}; rest=${rest#*|}; id=${rest%%|*}; p=${rest#*|}
+          if [ "$fmt" = agy ]; then
+            f=$HOME/.gemini/antigravity-cli/brain/$id/.system_generated/logs/transcript.jsonl
+            [ -f "$f" ] && printf '%s %s\\n' "$pane" "$f"
+            continue
+          fi
           if [ "$fmt" = claude ]; then var=CLAUDE_CONFIG_DIR own=${CLAUDE_CONFIG_DIR:-} base=$HOME/.claude
           else var=CODEX_HOME own=${CODEX_HOME:-} base=$HOME/.codex; fi
           agent_dir=""

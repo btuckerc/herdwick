@@ -32,7 +32,7 @@ public enum SubagentTranscript {
             guard filename.hasSuffix(".jsonl") else { return nil }
             let session = String(filename.dropLast(6))
             return directory + "/" + session + "/subagents/agent-" + subagentID + ".jsonl"
-        case .codex: return nil
+        case .codex, .agy: return nil
         }
     }
 

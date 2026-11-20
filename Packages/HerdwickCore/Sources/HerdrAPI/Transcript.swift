@@ -8,12 +8,13 @@ import Foundation
 // don't understand are kept as raw rows so a newer omp never silently loses content.
 
 public enum TranscriptFormat: String, Sendable, Codable {
-    case omp, claude, codex
+    case omp, claude, codex, agy
     public init?(agent: String) {
         switch agent.lowercased() {
         case "omp", "pi": self = .omp
         case "claude": self = .claude
         case "codex": self = .codex
+        case "agy", "antigravity", "antigravity-cli": self = .agy
         default: return nil
         }
     }
@@ -148,6 +149,13 @@ public struct TranscriptRecord: Sendable, Equatable {
                 // Claude emits multiple content blocks with the same API message id.
                 usageID = message["id"] as? String ?? r["uuid"] as? String
             }
+        } else if format == .agy {
+            if type == "PLANNER_RESPONSE" {
+                model = r["model"] as? String
+                usage = .init(inputTokens: (r["input_tokens"] as? Int ?? 0) + (r["cache_read_tokens"] as? Int ?? 0),
+                              outputTokens: r["output_tokens"] as? Int ?? 0, cost: nil)
+                usageID = (r["step_index"] as? Int).map { "agy-\($0)" }
+            }
         } else {
             let p = r["payload"] as? [String: Any] ?? [:]
             if type == "turn_context" {
@@ -239,6 +247,7 @@ public struct TranscriptReader: Sendable {
             return [entry]
         case .claude: return ClaudeTranscript.entries(line, parsed: parsed)
         case .codex: return CodexTranscript.entries(line, parsed: parsed)
+        case .agy: return AgyTranscript.entries(line, parsed: parsed)
         }
     }
 

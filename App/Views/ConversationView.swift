@@ -606,10 +606,10 @@ struct ConversationView: View {
         }
     }
 
-    /// Esc interrupts a running turn in omp, Claude Code and Codex alike.
+    /// Esc interrupts a running turn in omp, Claude Code, Codex and agy alike.
     private var canStop: Bool {
         guard let agent, !feed.isOfflineCopy, connection.isLive, agent.agentStatus == .working else { return false }
-        return ["omp", "claude", "codex"].contains(agent.agent)
+        return ["omp", "claude", "codex", "agy"].contains(agent.agent)
     }
 
     /// omp retries its last failed turn with Alt+R; offered once the turn has ended in an error.

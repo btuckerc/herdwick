@@ -47,6 +47,15 @@ import Testing
                         format: .codex, expect: (350, 40, nil))
     }
 
+    @Test func agySumsPlannerSteps() async throws {
+        try await check([
+            #"{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\n\"input_tokens\":9\n</USER_REQUEST>"}"#,
+            #"{"step_index":1,"type":"PLANNER_RESPONSE","model":"gemini-4-neon-high","input_tokens":100,"cache_read_tokens":20,"output_tokens":7,"thinking":"x"}"#,
+            #"{"step_index":2,"type":"GENERIC","content":"output"}"#,
+            #"{"step_index":3,"type":"PLANNER_RESPONSE","model":"gemini-4-neon-high","input_tokens":50,"cache_read_tokens":100,"output_tokens":3,"content":"done"}"#,
+        ], format: .agy, expect: (270, 10, nil))
+    }
+
     @Test func missingOrUsagelessTranscriptIsNil() async throws {
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).jsonl").path
         #expect(try await client.sessionUsage(path: missing, format: .omp) == nil)
