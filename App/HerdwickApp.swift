@@ -7,6 +7,10 @@ struct HerdwickApp: App {
     @State private var dictation = DictationController()
     @State private var model = AppModel()
 
+    init() {
+        AgentsTip.configure(demo: UserDefaults.standard.string(forKey: "HerdwickDemo")?.isEmpty == false)
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -15,6 +19,7 @@ struct HerdwickApp: App {
                 .environment(model.tailnet)
                 .environment(model.demo)
                 .environment(dictation)
+                .environment(model.decisionLog)
                 .preferredColorScheme(model.settings.appearance.colorScheme)
         }
         .commands { SceneCommands(model: model) }
@@ -28,6 +33,8 @@ struct RootView: View {
     @Environment(\.scenePhase) private var phase
     @Environment(\.horizontalSizeClass) private var width
     @State private var scene = SceneState()
+    /// The split view's width, for its sidebar's share.
+    @State private var windowWidth: CGFloat = 1_024
 
     var body: some View {
         @Bindable var scene = scene
@@ -35,14 +42,27 @@ struct RootView: View {
             if let connection = model.connection(in: scene) {
                 if width == .regular {
                     NavigationSplitView {
-                        SessionView(connection: connection)
+                        // As wide as a phone, whose rows these are: at the default 320 pt a title
+                        // wrapped and the last report and caution cut while the detail had room
+                        // (round 52: opus#11, sa#10, sb#4); in portrait no more than two-fifths of
+                        // the window, as Mail's and Notes' columns (round 70: opus#3, sa#3, at
+                        // 402 pt it took nearly half and pinched the thread).
+                        SessionView(connection: connection, sidebar: true)
+                            .navigationSplitViewColumnWidth(min: 320, ideal: min(402, max(320, (windowWidth * 0.4).rounded())), max: 440)
                     } detail: {
                         NavigationStack(path: detailPath) {
                             detailRoot
                                 .navigationDestination(for: Route.self) { destination($0) }
                         }
+                        // Beside, not over: an overlaid sidebar leaves the detail at the edge.
+                        .onGeometryChange(for: Bool.self) { $0.frame(in: .global).minX > 1 } action: { scene.sidebarBeside = $0 }
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { windowWidth = $0 }
                 } else {
+                    // A plain push, not a zoom out of the row (round 42: sa#4, sb#8, opus#4: the
+                    // 550 ms zoom, rows and transcript scaling, was conspicuous on the most
+                    // repeated move; a push settles in about 380). The row it came from shows as
+                    // selected on the way back, then fades, as UIKit lists deselect.
                     NavigationStack(path: $scene.navigationPath) {
                         SessionView(connection: connection)
                             .navigationDestination(for: Route.self) { destination($0) }
@@ -53,6 +73,7 @@ struct RootView: View {
         .environment(scene)
         .focusedSceneValue(\.herdwickScene, scene)
         .onAppear { model.register(scene); model.scenePhaseChanged(phase, in: scene); SharedInbox.shared.refresh() }
+        .onChange(of: width) { _, width in if width != .regular { scene.sidebarBeside = false } }
         .onDisappear { model.unregister(scene) }
         .onChange(of: phase) { _, phase in
             model.scenePhaseChanged(phase, in: scene)
@@ -78,7 +99,7 @@ struct RootView: View {
         if let route = scene.navigationPath.first {
             destination(route)
         } else {
-            ContentUnavailableView("Choose a conversation", systemImage: "bubble.left.and.bubble.right")
+            OverviewView()
         }
     }
 

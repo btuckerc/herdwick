@@ -1,0 +1,23 @@
+{
+  "extends": "approval",
+  "setup": [
+    {"do": "append", "pane": "p1", "records": "../studio/transcripts/p1-reply.jsonl"},
+    {"do": "append", "pane": "p1", "records": "../studio/transcripts/p1-done.jsonl"},
+    {"do": "screen", "pane": "p1", "screen": "../studio/screens/p1-deployed.screen"},
+    {"do": "status", "pane": "p1", "status": "done"},
+    {"do": "status", "pane": "p2", "status": "blocked"},
+    {"do": "screen", "pane": "p2", "screen": "../approval/screens/p2-approval.screen"}
+  ],
+  "timeline": [
+    {
+      "on": "send_keys",
+      "pane": "p2",
+      "then": [
+        {"after": 0.1, "do": "screen", "pane": "p2", "screen": "../studio/screens/p2-review.screen"},
+        {"after": 0.2, "do": "status", "pane": "p2", "status": "working"},
+        {"after": 1.5, "do": "append", "pane": "p2", "records": "../approval/transcripts/p2-approved.jsonl"},
+        {"after": 1.8, "do": "status", "pane": "p2", "status": "done"}
+      ]
+    }
+  ]
+}

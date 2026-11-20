@@ -12,9 +12,23 @@ import TailscaleKit
 final class HostConnection {
     private(set) var profile: HostProfile
     private(set) var phase: ConnectionSupervisor.Phase = .idle
-    private(set) var snapshot: Snapshot?
+    /// While the link is down: when the host was last heard from (a snapshot or an activity
+    /// read), so what's on screen is as of then (round 8: the time the loss was noticed, which
+    /// a quiet link could make minutes newer than the last word from the host).
+    private(set) var lostAt: Date?
+    @ObservationIgnored private var heardAt: Date?
+    private(set) var snapshot: Snapshot? { didSet { updateEpochs(from: oldValue) } }
+    /// Each pane's current agent's `AgentStamp.epoch`.
+    @ObservationIgnored private var epochs: [String: Int] = [:]
+    @ObservationIgnored private var lastEpoch = 0
+    /// When each pane's agent last went back to work, seen here: its status turning to working
+    /// or its screen prompt clearing. `stillSince` and `resumed` count from it.
+    @ObservationIgnored private var resumedAt: [String: Date] = [:]
     private(set) var sessions: [SessionInfo] = []
-    private(set) var activeSession: String?
+    private(set) var activeSession: String? {
+        // Pane IDs repeat across sessions: closes sent in another session don't hide this one's panes.
+        didSet { if let activeSession, activeSession != closingSession { closing = [] } }
+    }
     /// Bumps each time a fresh transport goes live. Views key their streams on it.
     private(set) var liveID = 0
     private(set) var client: HerdrClient?
@@ -22,6 +36,8 @@ final class HostConnection {
     private(set) var rejectedHostKey: SSHHostKey?
     /// Panes a close was sent for, kept out of every list until a snapshot drops them.
     private(set) var closing: Set<String> = []
+    /// The session `closing` belongs to.
+    private var closingSession: String?
     var hidden: [String: Int] = [:] {
         didSet {
             UserDefaults.standard.set(hidden, forKey: hiddenKey)
@@ -113,6 +129,7 @@ final class HostConnection {
         snapshot = copy.snapshot
         hidden = UserDefaults.standard.dictionary(forKey: hiddenKey) as? [String: Int] ?? [:]
         loadRead()
+        loadSeenWaits()
         loadActivity()
     }
 
@@ -212,22 +229,27 @@ final class HostConnection {
     /// Needs you or finished since it was last read on this phone. Reading never changes the
     /// host's own state.
     func isUnread(_ agent: Agent) -> Bool {
-        read.isUnread(pane: agent.paneID, status: agent.agentStatus, sequence: agent.stateChangeSeq ?? 0)
+        if let wait = wait(agent), !seenWaits.contains(wait.id) { return true }
+        return read.isUnread(pane: agent.paneID, status: agent.agentStatus, sequence: agent.stateChangeSeq ?? 0)
     }
 
-    /// The state a row shows: an unread finish is done, a read one idle.
+    /// The state a row shows: an unread finish is done, a read one idle; a wait herdr doesn't
+    /// report (see `Wait`) needs you.
     func presentedStatus(_ agent: Agent) -> AgentStatus {
-        read.presented(pane: agent.paneID, status: agent.agentStatus, sequence: agent.stateChangeSeq ?? 0)
+        if wait(agent) != nil { return .blocked }
+        return read.presented(pane: agent.paneID, status: agent.agentStatus, sequence: agent.stateChangeSeq ?? 0)
     }
 
     func markSeen(_ agent: Agent) {
         guard isUnread(agent) else { return }
+        if let wait = wait(agent) { seeWait(wait.id) }
         read.markRead(pane: agent.paneID, sequence: agent.stateChangeSeq ?? 0)
         saveRead()
         onAttentionChange?(self)
     }
 
     func markUnread(_ agent: Agent) {
+        if let wait = wait(agent) { seenWaits.removeAll { $0 == wait.id }; saveSeenWaits() }
         read.markUnread(pane: agent.paneID, sequence: agent.stateChangeSeq ?? 0)
         saveRead()
         onAttentionChange?(self)
@@ -241,19 +263,69 @@ final class HostConnection {
         hidden.removeValue(forKey: agent.paneID)
     }
 
+    /// The stamp of `agent` while the newest snapshot still has it in its pane, in this session.
+    func stamp(of agent: Agent) -> AgentStamp? {
+        guard let session = activeSession, let epoch = epochs[agent.paneID],
+              let current = snapshot?.agents.first(where: { $0.paneID == agent.paneID }),
+              Self.sameAgent(current, agent) else { return nil }
+        return AgentStamp(session: session, paneID: agent.paneID, epoch: epoch)
+    }
+
+    /// The agent `stamp` names, if it's still there and still the same one.
+    func agent(for stamp: AgentStamp) -> Agent? {
+        guard stamp.session == activeSession, epochs[stamp.paneID] == stamp.epoch else { return nil }
+        return snapshot?.agents.first { $0.paneID == stamp.paneID }
+    }
+
+    private static func sameAgent(_ a: Agent, _ b: Agent) -> Bool {
+        a.agent == b.agent && a.agentSession == b.agentSession
+    }
+
+    /// `agent` as the newest snapshot has it; nil once it's gone from its pane or replaced.
+    private func latest(_ agent: Agent) -> Agent? {
+        snapshot?.agents.first { $0.paneID == agent.paneID && Self.sameAgent($0, agent) }
+    }
+
+    /// A pane keeps its epoch while each snapshot shows the same agent in it; anything else in
+    /// the pane (gone, another kind, another conversation) gets a new one.
+    private func updateEpochs(from old: Snapshot?) {
+        guard let snapshot else {
+            epochs = [:]
+            return
+        }
+        let previous = Dictionary((old?.agents ?? []).map { ($0.paneID, $0) }, uniquingKeysWith: { first, _ in first })
+        var next: [String: Int] = [:]
+        for agent in snapshot.agents where next[agent.paneID] == nil {
+            if let prior = previous[agent.paneID], Self.sameAgent(prior, agent), let epoch = epochs[agent.paneID] {
+                next[agent.paneID] = epoch
+                if prior.agentStatus != .working && agent.agentStatus == .working { resumedAt[agent.paneID] = .now }
+            } else {
+                lastEpoch += 1
+                resumedAt[agent.paneID] = nil
+                next[agent.paneID] = lastEpoch
+            }
+        }
+        epochs = next
+        resumedAt = resumedAt.filter { next[$0.key] != nil }
+    }
+
     /// Ends an agent and its terminal. Its thread leaves every list as this is called (inside
     /// the caller's animation) rather than when herdr's next snapshot drops it, and comes back
-    /// if herdr refuses; the task carries herdr's answer.
+    /// if herdr refuses; the task carries herdr's answer. Nil, and nothing sent, when the agent
+    /// the user chose is no longer in its pane (`AgentStamp`).
     @discardableResult
-    func close(paneID: String) -> Task<Void, Error> {
-        closing.insert(paneID)
-        let client = client, session = activeSession
+    func close(_ stamp: AgentStamp) -> Task<Void, Error>? {
+        guard agent(for: stamp) != nil else { return nil }
+        if closingSession != activeSession { closing = [] }
+        closingSession = activeSession
+        closing.insert(stamp.paneID)
+        let client = client, session = stamp.session, paneID = stamp.paneID
         return Task {
             do {
-                guard let client, let session else { throw HerdrError.noResponse }
+                guard let client else { throw HerdrError.noResponse }
                 try await client.closePane(paneID, session: session)
             } catch {
-                closing.remove(paneID)
+                if closingSession == session { closing.remove(paneID) }
                 throw error
             }
         }
@@ -270,7 +342,7 @@ final class HostConnection {
     private func reconcileHidden(_ snapshot: Snapshot) {
         for agent in snapshot.agents {
             guard let sequence = hidden[agent.paneID] else { continue }
-            if agent.agentStatus == .blocked ||
+            if presentedStatus(agent) == .blocked ||
                 (agent.agentStatus == .done && (agent.stateChangeSeq ?? 0) > sequence) {
                 hidden.removeValue(forKey: agent.paneID)
             }
@@ -282,6 +354,201 @@ final class HostConnection {
         if read.observe(snapshot.agents.map { ($0.paneID, $0.agentStatus, $0.stateChangeSeq ?? 0) }) {
             saveRead()
         }
+    }
+
+    // MARK: Waits
+
+    /// A terminal-confirmed question/approval, Plan Review, or PTY input wait. Screen
+    /// prompts are probed even without a parsed transcript: integrations can report them
+    /// as working or idle instead of blocked.
+    struct Wait: Equatable, Sendable {
+        /// Unlike the pane's `state_change_seq`, which a wait doesn't move, this tells one
+        /// wait from the next: the PTY call's id, or the plan's.
+        let id: String
+        let ref: AgentSessionRef?
+        let console: ConsoleScreen?
+        let prompt: ScreenPrompt?
+
+        init(id: String, ref: AgentSessionRef?, console: ConsoleScreen?, prompt: ScreenPrompt? = nil) {
+            self.id = id; self.ref = ref; self.console = console; self.prompt = prompt
+        }
+
+        /// One line for the inbox: the console's prompt, or the screen prompt and what it's about
+        /// ("Allow bash? bun test"), so a halted agent says why. Its line breaks become spaces, so
+        /// a two-line row isn't spent on a wrapped command's first half.
+        var summary: String? {
+            if let prompt = console?.prompt { return prompt }
+            guard let prompt else { return nil }
+            return ([prompt.title] + (prompt.subject.map { [$0] } ?? [])).joined(separator: " ")
+                .split(whereSeparator: \.isNewline).joined(separator: " ")
+        }
+    }
+
+    private var waits: [String: Wait] = [:]
+    /// Pane → the console last read for a PTY call, and since when it has looked the same.
+    private var consoleReads: [String: (id: String, screen: ConsoleScreen, since: Date)] = [:]
+    private var waitProbe: Task<Void, Never>?
+    /// Pane → the `state_change_seq` its conversation was last checked for a wait at. A
+    /// finish isn't alerted before this passes it, so a Plan Review never alerts as "Finished".
+    private var waitChecked: [String: Int] = [:]
+    /// Waits present at the first check after the link went live: the push watcher alerted
+    /// for them while the app was away, so they don't alert again here.
+    private(set) var silentWaits: Set<String> = []
+    private var waitBaselinePending = true
+    private var consoleBaselinePending = true
+    /// PTY call id → its console at the first read after the link went live. A wait confirmed
+    /// on that same console is one the watcher could have alerted for; a later prompt isn't.
+    private var baselineConsoles: [String: ConsoleScreen] = [:]
+    private var seenWaits: [String] = []
+    private var seenWaitsKey: String { "waitsSeen.\(profile.id.uuidString).\(activeSession ?? "")" }
+
+    /// A screen-confirmed prompt holds while the agent isn't working (herdr may call it idle);
+    /// once it works again the prompt was answered, whatever the last probe saw.
+    func wait(_ agent: Agent) -> Wait? {
+        guard let wait = waits[agent.paneID], wait.ref == agent.agentSession else { return nil }
+        if wait.prompt != nil { return agent.agentStatus == .working ? nil : wait }
+        let working = agent.agentStatus == .working
+        return wait.console == nil ? (agent.agentStatus == .idle || agent.agentStatus == .done ? wait : nil)
+            : (working ? wait : nil)
+    }
+
+    /// Whether `agent`'s conversation was checked for a wait since its last state change.
+    func waitChecked(_ agent: Agent) -> Bool {
+        (waitChecked[agent.paneID] ?? -1) >= (agent.stateChangeSeq ?? 0)
+    }
+
+    private func seeWait(_ id: String) {
+        guard !seenWaits.contains(id) else { return }
+        seenWaits = Array((seenWaits + [id]).suffix(64))
+        saveSeenWaits()
+    }
+
+    private func loadSeenWaits() {
+        seenWaits = UserDefaults.standard.stringArray(forKey: seenWaitsKey) ?? []
+    }
+
+    private func saveSeenWaits() {
+        UserDefaults.standard.set(seenWaits, forKey: seenWaitsKey)
+    }
+
+    /// Plan Reviews settle from the transcript. Screens are read only where a prompt can be:
+    /// agents herdr calls blocked, stopped agents with a tool call still open (an approval
+    /// holds it) or with no transcript reference (omp without herdr's integration shows an
+    /// approval as idle), and PTY calls. A working agent's output is never read as a prompt.
+    /// PTY consoles retain their ten-second settling rule; a structured prompt settles at once.
+    private func updateWaits(_ agents: [Agent]) {
+        waitProbe?.cancel()
+        waitProbe = nil
+        let host = identity
+        var found: [String: Wait] = [:]
+        var candidates: [String: TerminalInputWait] = [:]
+        var probes: [Agent] = []
+        for agent in agents {
+            let conversation = conversations.parsed(host: host, agent: agent)
+            if let slug = conversation?.pendingPlanReview {
+                found[agent.paneID] = Wait(id: "plan:\(agent.agentSession?.value ?? agent.paneID):\(slug)",
+                                           ref: agent.agentSession, console: nil)
+            } else if agent.agentStatus == .working, let call = conversation?.pendingTerminalInput,
+                      call.startedAt.map({ Date.now.timeIntervalSince($0) >= 10 }) ?? true {
+                candidates[agent.paneID] = call
+            }
+            guard ["omp", "claude", "codex"].contains(agent.agent ?? "") else { continue }
+            let stopped = agent.agentStatus != .working
+            if candidates[agent.paneID] != nil || agent.agentStatus == .blocked
+                || stopped && (agent.agentSession == nil || conversation?.runningTools.isEmpty == false) {
+                probes.append(agent)
+            }
+        }
+        let checked = Dictionary(agents.map { ($0.paneID, $0.stateChangeSeq ?? 0) }) { first, _ in first }
+        let baseline = waitBaselinePending
+        waitBaselinePending = false
+        if baseline { silentWaits.formUnion(found.values.map(\.id)) }
+        var settled = found
+        for agent in probes {
+            if let wait = waits[agent.paneID], wait.ref == agent.agentSession,
+               wait.prompt != nil || wait.id == candidates[agent.paneID]?.toolCallId {
+                settled[agent.paneID] = wait
+            }
+        }
+        // Don't call a freshly finished agent done before checking its approval screen.
+        settleWaits(settled, checked: waitChecked)
+        let ids = Set(candidates.values.map(\.toolCallId))
+        baselineConsoles = baselineConsoles.filter { ids.contains($0.key) }
+        guard !probes.isEmpty, let client, let session = activeSession else {
+            settleWaits(found, checked: checked)
+            return
+        }
+        let generation = generation
+        waitProbe = Task { [weak self] in
+            var visible: [String: String] = [:]
+            var skipped: Set<String> = []
+            for agent in probes {
+                if Task.isCancelled { return }
+                // `probes` was chosen before these awaits: never read a screen whose agent has
+                // since started working (unless a terminal tool of its waits) or been replaced.
+                guard let latest = self?.latest(agent), self?.activeSession == session,
+                      latest.agentStatus != .working || candidates[agent.paneID] != nil else {
+                    skipped.insert(agent.paneID)
+                    continue
+                }
+                if let text = try? await withTimeout(.seconds(3), { try await client.readPane(agent.paneID, session: session).text }) {
+                    visible[agent.paneID] = text
+                }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.waitProbe = nil
+            guard generation == self.generation, session == self.activeSession else { return }
+            let consoleBaseline = self.consoleBaselinePending
+            self.consoleBaselinePending = false
+            var reads: [String: (id: String, screen: ConsoleScreen, since: Date)] = [:]
+            for agent in probes {
+                let pane = agent.paneID
+                if skipped.contains(pane) { continue }
+                guard let text = visible[pane] else {
+                    // A failed read isn't evidence that a known prompt closed.
+                    if let wait = self.waits[pane], wait.ref == agent.agentSession { found[pane] = wait }
+                    continue
+                }
+                let latest = self.latest(agent)
+                if let latest, latest.agentStatus != .working, let prompt = ScreenPrompt.parse(text),
+                   prompt.phase == .question || prompt.phase == .review {
+                    // Cursor/check changes don't create new debts; a new screen context does.
+                    let id: String
+                    if let previous = self.waits[pane], previous.ref == agent.agentSession,
+                       previous.prompt?.representsSameWait(as: prompt) == true {
+                        id = previous.id
+                    } else {
+                        id = "prompt:\(agent.agentSession?.value ?? pane):\(UUID().uuidString)"
+                    }
+                    found[pane] = Wait(id: id, ref: agent.agentSession, console: nil, prompt: prompt)
+                    // Herdr's blocked transition already owns its sequence-based alert.
+                    if baseline || latest.agentStatus == .blocked { self.silentWaits.insert(id) }
+                    continue
+                }
+                guard let call = candidates[pane], let screen = ConsoleScreen.parse(text) else { continue }
+                let id = call.toolCallId
+                if consoleBaseline { self.baselineConsoles[id] = screen }
+                let last = self.consoleReads[pane]
+                let since = last.flatMap { $0.id == id && $0.screen == screen ? $0.since : nil } ?? .now
+                reads[pane] = (id, screen, since)
+                if screen.asksForInput || Date.now.timeIntervalSince(since) >= 10 {
+                    if self.baselineConsoles[id] == screen { self.silentWaits.insert(id) }
+                    found[pane] = Wait(id: id, ref: agent.agentSession, console: screen)
+                }
+            }
+            self.consoleReads = reads
+            self.settleWaits(found, checked: checked)
+        }
+    }
+
+    private func settleWaits(_ found: [String: Wait], checked: [String: Int]) {
+        let changed = found != waits || checked.contains { waitChecked[$0.key] != $0.value }
+        for pane in waits.keys where found[pane] == nil { resumedAt[pane] = .now }
+        waits = found
+        waitChecked = checked
+        guard changed else { return }
+        if let snapshot { reconcileHidden(snapshot) }
+        onAttentionChange?(self)
     }
 
     // MARK: Message activity
@@ -313,6 +580,94 @@ final class HostConnection {
         return entry.transcript?.preview
     }
 
+    /// A finished agent's closing warning ("Before deploying: apply 0042 first"), for the rows
+    /// that show its verdict; message text, so only when `previews` allows it.
+    func caution(_ agent: Agent, status: AgentStatus, previews: Bool) -> String? {
+        guard previews, status == .done || status == .idle,
+              let entry = activity[agent.paneID], entry.ref == agent.agentSession else { return nil }
+        return entry.transcript?.caution
+    }
+
+    /// What `agent` is running now in its Now line's words ("Running swift test"); nil while
+    /// no call is open or unknown.
+    func step(_ agent: Agent) -> String? {
+        guard let entry = activity[agent.paneID], entry.ref == agent.agentSession else { return nil }
+        return entry.transcript?.step
+    }
+
+    /// A row's line under its title: for a working agent what it's running now, whatever the
+    /// previews setting (status, not message text; round 15: Working rows showed narration from
+    /// minutes before), else the newest message when `previews` allows it. A working agent with
+    /// no open call has none (round 25: its last message stood where current work goes); one
+    /// gone still says its step is the last reported (round 25: "Running uv run pipeline
+    /// backfill" beside "no update 7m" read as fresh progress).
+    func rowLine(_ agent: Agent, status: AgentStatus, previews: Bool, now: Date = .now) -> String? {
+        guard status == .working else { return previews ? preview(agent) : nil }
+        guard let step = step(agent) else { return nil }
+        guard let since = stillSince(agent), AgentRow.quiet(since: since, at: now) != nil else { return step }
+        return "Last reported: \(step)"
+    }
+
+    /// When `agent` last wrote anything, work inside a turn included; nil while unknown.
+    func activityAt(_ agent: Agent) -> Date? {
+        guard let entry = activity[agent.paneID], entry.ref == agent.agentSession else { return nil }
+        return entry.transcript?.activityAt
+    }
+
+    /// What a working agent's "no update 6m" counts from: its newest transcript record, or when
+    /// it was last seen going back to work, if later (round 24: an agent just approved read "no
+    /// update 45m", counting from the record before it asked).
+    func stillSince(_ agent: Agent) -> Date? {
+        let resumed = resumedAt[agent.paneID]
+        guard let active = activityAt(agent) else { return resumed }
+        return resumed.map { max($0, active) } ?? active
+    }
+
+    /// When `agent` was last seen going back to work, here: after an answer, the start of what
+    /// it's doing now.
+    func resumed(_ agent: Agent) -> Date? { resumedAt[agent.paneID] }
+
+    /// When a working agent's current run began: the message that started its turn, or its
+    /// going back to work after an answer, if later. Nil for any other status.
+    func workingSince(_ agent: Agent, status: AgentStatus) -> Date? {
+        guard status == .working, let started = lastTurnAt(agent) else { return nil }
+        return resumed(agent).map { max($0, started) } ?? started
+    }
+
+    /// "no update 6m" for a working agent whose transcript has gone still, else nil
+    /// (`AgentRow.quiet`).
+    func quiet(_ agent: Agent, now: Date = .now) -> String? {
+        guard presentedStatus(agent) == .working, let since = stillSince(agent) else { return nil }
+        return AgentRow.quiet(since: since, at: now)
+    }
+
+    /// What a row's age counts from: for an agent waiting on the user, its newest record (the
+    /// question it asked; round 15: its turn's start read as how long it had waited), else its
+    /// last turn. None while it works: that turn may be a prompt or an earlier turn's end, and a
+    /// bare "1m" there read as how long it had run (round 18). Its step line says it's live; the
+    /// thread's subtitle how long its turn has run, where that's known.
+    func ageDate(_ agent: Agent, status: AgentStatus) -> Date? {
+        if status == .working { return nil }
+        return status == .blocked ? activityAt(agent) ?? lastTurnAt(agent) : lastTurnAt(agent)
+    }
+
+    /// `ageDate` as VoiceOver says it: "asked 4 minutes ago" or "last turn 5 minutes ago"
+    /// (round 15: VoiceOver in the dock and Overview read the turn's start while the row said
+    /// how long it had waited). A working agent gone quiet says so, as its rows show it
+    /// (round 21: the dock showed "quiet 6m" and said nothing), and one at work says for how
+    /// long, as the rows show "for 12m" (round 45: sb#5, the dock showed it and said nothing).
+    func spokenAge(_ agent: Agent, status: AgentStatus, now: Date = .now) -> String? {
+        if status == .working {
+            if let since = stillSince(agent), AgentRow.quiet(since: since, at: now) != nil {
+                return AgentRow.spokenQuiet(since: since)
+            }
+            return workingSince(agent, status: status).flatMap { since in
+                AgentRow.working(since: since, at: now).map { _ in AgentRow.spokenWorking(since: since) }
+            }
+        }
+        return ageDate(agent, status: status).map { status == .blocked ? AgentRow.spokenWaiting(since: $0) : AgentRow.spokenAge(of: $0) }
+    }
+
     private var activityKey: String { "turns.\(profile.id.uuidString).\(activeSession ?? "")" }
 
     private func loadActivity() {
@@ -337,7 +692,7 @@ final class HostConnection {
         let inputs = conversations.warmInputs(host: host, agents: agents,
                                               lastTurn: current.compactMapValues { $0.transcript?.lastTurnAt })
         activityRead = Task { [weak self] in
-            let (updated, warm) = await Self.readActivity(current, agents: agents, client: client, session: session, warm: inputs.mapValues(\.state))
+            let (updated, warm, heard) = await Self.readActivity(current, agents: agents, client: client, session: session, warm: inputs.mapValues(\.state))
             guard let self else { return }
             self.activityRead = nil
             if generation == self.generation, session == self.activeSession, updated != self.activity {
@@ -345,7 +700,9 @@ final class HostConnection {
                 UserDefaults.standard.set(try? JSONEncoder().encode(updated), forKey: self.activityKey)
             }
             if generation == self.generation, session == self.activeSession {
+                if heard { self.heardAt = .now }
                 self.conversations.publish(warm, revisions: inputs.mapValues(\.revision), host: host, agents: agents)
+                self.updateWaits(agents)
             }
             if self.activityPending {
                 self.activityPending = false
@@ -355,11 +712,13 @@ final class HostConnection {
     }
 
     /// A failed read keeps what was known; the snapshot is authoritative for which panes remain.
+    /// `heard`: the host answered at least one read.
     nonisolated private static func readActivity(_ current: [String: PaneActivity], agents: [Agent],
                                                  client: HerdrClient, session: String,
-                                                 warm: [String: WarmConversation?]) async -> ([String: PaneActivity], [String: WarmConversation?]) {
+                                                 warm: [String: WarmConversation?]) async -> ([String: PaneActivity], [String: WarmConversation?], Bool) {
         var next: [String: PaneActivity] = [:]
         var warmed = warm
+        var heard = false
         var missing: [(String, AgentSessionRef)] = []
         for agent in agents {
             guard let ref = agent.agentSession, TranscriptFormat(agent: ref.agent) != nil else { continue }
@@ -372,6 +731,7 @@ final class HostConnection {
         }
         if !missing.isEmpty, !Task.isCancelled,
            let located = try? await client.locateTranscripts(missing.map { (pane: $0.0, ref: $0.1) }, session: session) {
+            heard = true
             for (pane, ref) in missing {
                 if let location = located[pane], next[pane]?.ref == ref {
                     next[pane]?.transcript = TranscriptActivity(path: location.path, format: location.format)
@@ -382,6 +742,7 @@ final class HostConnection {
         for _ in 0..<12 {
             let reads = next.filter { panes.contains($0.key) }.compactMapValues { entry in entry.transcript.map { ($0.path, $0.nextRead) } }
             guard !Task.isCancelled, !reads.isEmpty, let chunks = try? await client.readChunks(reads) else { break }
+            heard = true
             for (pane, chunk) in chunks {
                 if let transcript = next[pane]?.transcript, !transcript.isLookingBack, warmed.keys.contains(pane) {
                     let initial = transcript.offset == nil
@@ -395,7 +756,7 @@ final class HostConnection {
             panes = panes.filter { next[$0]?.transcript?.needsMore == true }
             if panes.isEmpty { break }
         }
-        return (next, warmed)
+        return (next, warmed, heard)
     }
 
     /// Messages can arrive without any status change, so a live link also looks on a timer.
@@ -419,6 +780,7 @@ final class HostConnection {
         let wasLive = isLive
         let effects = supervisor.handle(input)
         phase = supervisor.phase
+        if isLive { lostAt = nil } else if wasLive { lostAt = heardAt ?? .now }
         for effect in effects {
             switch effect {
             case .connect:
@@ -646,6 +1008,7 @@ final class HostConnection {
                 if demo == nil { Self.remember(session: session, for: profile) }
                 self.hidden = UserDefaults.standard.dictionary(forKey: self.hiddenKey) as? [String: Int] ?? [:]
                 self.loadRead()
+                self.loadSeenWaits()
                 self.loadActivity()
                 self.onSessions?(self)
 
@@ -735,6 +1098,7 @@ final class HostConnection {
             SnapshotStore.save(.init(hostID: profile.id, session: session, sessions: sessions, snapshot: snapshot))
         }
         self.snapshot = snapshot
+        heardAt = .now
         recordBaseline(snapshot)
         reconcileHidden(snapshot)
         // A close holds its pane out until a snapshot no longer has it.
@@ -755,6 +1119,12 @@ final class HostConnection {
         activityTimer?.cancel()
         activityTimer = nil
         activityRead?.cancel()
+        waitProbe?.cancel()
+        waitProbe = nil
+        // The next live link's first check is a baseline again; see `silentWaits`.
+        waitBaselinePending = true
+        consoleBaselinePending = true
+        baselineConsoles = [:]
         client = nil
         if let ssh {
             self.ssh = nil
@@ -862,6 +1232,13 @@ final class HostConnection {
             return ConnectionFailure("herdr isn't running on \(profile.address).", retryable: false, herdrStopped: true)
         case TailnetError.signedOut:
             return ConnectionFailure("This iPhone is signed out of Tailscale.", retryable: false)
+        case SSHError.connectionRefused, TailnetError.refused:
+            // Retrying can't help until something listens there, so say what to turn on.
+            let hint = switch profile.auth {
+            case .tailscaleSSH: "Turn on Tailscale SSH there (sudo tailscale set --ssh)"
+            case .deviceKey, .password: "Turn on its SSH server (Linux: sudo systemctl enable --now sshd; macOS: Remote Login)"
+            }
+            return ConnectionFailure("\(profile.address) refused the connection: nothing is accepting SSH there. \(hint), then tap Retry.", retryable: false)
         case let error as CommandError:
             if case .exited(_, let stderr) = error, !stderr.isEmpty {
                 return ConnectionFailure(stderr.trimmingCharacters(in: .whitespacesAndNewlines), retryable: true)
@@ -950,9 +1327,11 @@ struct ConnectTrace: Sendable {
             switch error {
             case .notRunning: "tailnet not running"
             case .signedOut: "tailnet signed out"
+            case .refused: "tailnet refused"
             case .dialFailed: "tailnet dial"
             }
         case is TimeoutError: "timeout"
+        case SSHError.connectionRefused: "refused"
         case is SSHError: "ssh"
         case is CommandError: "command"
         case is HerdrError: "herdr"

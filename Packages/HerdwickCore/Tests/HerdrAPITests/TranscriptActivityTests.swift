@@ -63,6 +63,32 @@ import HerdrTestSupport
         #expect(TranscriptActivity.scan(Array(finished.utf8), format: .omp, startsMidFile: false, flush: true).0 == Self.date("2026-09-25T10:05:00Z"))
     }
 
+    /// A working agent's step is its newest unanswered call, in the Now line's words, until the
+    /// call's result or the turn's end; a blocked agent's wait starts at its newest record.
+    @Test func tracksTheOpenStepAndTheNewestRecord() throws {
+        let call: [String: Any] = ["type": "toolCall", "id": "c", "name": "bash", "arguments": ["command": "swift test"]]
+        let record: [String: Any] = ["type": "message", "id": "m", "timestamp": "2026-09-25T10:03:00Z",
+                                     "message": ["role": "assistant", "content": [call], "stopReason": "toolUse"]]
+        let calling = Self.omp("user", "run the tests", at: "2026-09-25T10:00:00Z")
+            + String(decoding: try JSONSerialization.data(withJSONObject: record), as: UTF8.self) + "\n"
+        var activity = TranscriptActivity(path: "/t", format: .omp)
+        activity.absorb(size: calling.utf8.count, from: 0, bytes: Array(calling.utf8))
+        #expect(activity.step == "Running swift test")
+        #expect(activity.activityAt == Self.date("2026-09-25T10:03:00Z"))
+        #expect(activity.lastTurnAt == Self.date("2026-09-25T10:00:00Z"))
+
+        let answered = calling + Self.omp("toolResult", "ok", at: "2026-09-25T10:04:00Z")
+        activity.absorb(size: answered.utf8.count, from: calling.utf8.count, bytes: Array(answered.utf8.dropFirst(calling.utf8.count)))
+        #expect(activity.step == nil)
+        #expect(activity.activityAt == Self.date("2026-09-25T10:04:00Z"))
+
+        let again = answered + Self.omp("narration", "Once more.", at: "2026-09-25T10:05:00Z")
+            + Self.omp("assistant", "Green.", at: "2026-09-25T10:06:00Z")
+        activity.absorb(size: again.utf8.count, from: answered.utf8.count, bytes: Array(again.utf8.dropFirst(answered.utf8.count)))
+        #expect(activity.step == nil)
+        #expect(activity.lastTurnAt == Self.date("2026-09-25T10:06:00Z"))
+    }
+
     @Test func followsAppendsAndLooksBackPastLongToolRuns() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString) it's.jsonl")
         defer { try? FileManager.default.removeItem(at: url) }

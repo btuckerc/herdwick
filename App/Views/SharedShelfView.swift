@@ -146,7 +146,7 @@ private struct ThreadLabel: View {
     var body: some View {
         VStack(alignment: .leading) {
             Text(thread.agent.conversationTitle).foregroundStyle(Color.primary)
-            Text([thread.connection.profile.name, thread.workspace?.label].compactMap { $0 }.joined(separator: " · "))
+            Text([thread.connection.profile.name, thread.workspace?.displayLabel].compactMap { $0 }.joined(separator: " · "))
                 .font(.caption).foregroundStyle(Color.secondary)
         }
     }

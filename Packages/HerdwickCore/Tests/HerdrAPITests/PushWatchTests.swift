@@ -55,6 +55,107 @@ private let stubActivityHerdr = #"""
     esac
     """#
 
+private let scenarioHerdr = #"""
+    #!/bin/sh
+    shift 2
+    case "$1 $2 $3" in
+    "agent list ") echo '{"result":{"agents":[{"pane_id":"w1:p1"}]}}' ;;
+    "agent wait "*)
+        if [ "$5" = working ]; then
+            if [ -e "$STUB_DIR/finished" ]; then exec sleep 300; fi
+            printf '{"result":{"agent":{"agent":"omp","agent_status":"working","pane_id":"w1:p1","state_change_seq":5,"agent_session":{"kind":"path","value":"%s"}}}}\n' "$TRANSCRIPT"
+        else
+            if [ "$STUB_MODE" = pty ] || [ "$STUB_MODE" = no-overlay ] || [ "$STUB_MODE" = changing ]; then sleep 3; fi
+            : > "$STUB_DIR/finished"
+            seq=6; [ "$STUB_MODE" != plan ] || seq=8
+            printf '{"result":{"agent":{"agent":"omp","agent_status":"idle","pane_id":"w1:p1","state_change_seq":%s,"agent_session":{"kind":"path","value":"%s"}}}}\n' "$seq" "$TRANSCRIPT"
+        fi ;;
+    "pane read "*)
+        case "$STUB_MODE" in
+        pty)
+            # The spinner before the command turns between reads; the prompt stays put.
+            n=0; [ ! -f "$STUB_DIR/read-count" ] || n=$(cat "$STUB_DIR/read-count")
+            n=$((n + 1)); echo "$n" > "$STUB_DIR/read-count"
+            spin='⠋'; [ $((n % 2)) = 0 ] || spin='⠙'
+            printf '╭─ %s Console command ⟨running⟩ ─╮\n│ prompt text\n│ force-kill · input forwarded to PTY\n╰─╯\n' "$spin" ;;
+        changing)
+            n=0; [ ! -f "$STUB_DIR/read-count" ] || n=$(cat "$STUB_DIR/read-count")
+            n=$((n + 1)); echo "$n" > "$STUB_DIR/read-count"
+            printf '╭─ Console command ⟨running⟩ ─╮\n│ prompt %s\n│ force-kill · input forwarded to PTY\n╰─╯\n' "$n" ;;
+        *) echo 'ordinary pane content' ;;
+        esac ;;
+    esac
+    """#
+
+private let planTranscript = #"""
+    {"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"toolu_plan","name":"write","arguments":{"path":"xd://propose","content":"review me"}}],"timestamp":1760000000000}}
+    {"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"toolu_plan","toolName":"write"}}
+    {"type":"message","message":{"role":"toolResult","toolCallId":"toolu_plan","toolName":"write","content":[{"type":"text","text":"Plan ready for review."}],"isError":false}}
+    """#
+
+private let ptyTranscript = #"""
+    {"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"toolu_pty","name":"bash","arguments":{"command":"read -p 'Overwrite config.yml? [y/N] '","pty":true}}],"timestamp":1760000000000}}
+    {"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"toolu_pty","toolName":"bash","args":{"command":"read -p 'Overwrite config.yml? [y/N] '}}}
+    """#
+
+/// With only the record's ISO 8601 time and no epoch `message.timestamp`.
+private let ptyRecordTranscript = #"""
+    {"type":"message","timestamp":"2025-10-09T08:53:20.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"toolu_pty","name":"bash","arguments":{"command":"read -p 'Overwrite config.yml? [y/N] '","pty":true}}]}}
+    {"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"toolu_pty","toolName":"bash","args":{"command":"read -p 'Overwrite config.yml? [y/N] '}}}
+    """#
+
+@Test(.serialized, arguments: ["plan", "pty", "pty-record", "no-overlay", "changing", "no-jsonpp"])
+func watcherDetectsOmpWaits(mode: String) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let home = root.appendingPathComponent("home"), bin = root.appendingPathComponent("bin")
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let transcript = root.appendingPathComponent("transcript.jsonl")
+    let body = switch mode { case "plan": planTranscript; case "pty-record": ptyRecordTranscript; default: ptyTranscript }
+    try body.write(to: transcript, atomically: true, encoding: .utf8)
+    for (name, body) in [("herdr", scenarioHerdr), ("curl", stubCurl)] {
+        let file = bin.appendingPathComponent(name)
+        try body.write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+    }
+    if mode == "no-jsonpp" {
+        let perl = bin.appendingPathComponent("perl")
+        try "#!/bin/sh\nexit 2\n".write(to: perl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: perl.path)
+    }
+    // A stub written a moment ago can still be held open by a process another test is forking
+    // (ETXTBSY): the watcher would stop at a failed `agent list` or lose a post to `curl`, so
+    // wait until both run (the probe's post goes to a scratch directory).
+    let scratch = root.appendingPathComponent("probe")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    #expect(await eventuallyAsync {
+        guard let channel = try? await LocalProcessRunner().exec(
+            "\(bin.path)/herdr --session s1 agent list >/dev/null && STUB_DIR=\(scratch.path) \(bin.path)/curl </dev/null"
+        ) else { return false }
+        return (try? await HerdrClient.collect(channel)) != nil
+    })
+    let stub = mode == "pty-record" ? "pty" : mode
+    let runner = EnvRunner(prefix: "HOME=\(home.path) STUB_DIR=\(root.path) TRANSCRIPT=\(transcript.path) STUB_MODE=\(stub) HW_PROBE=1 PATH=\(bin.path):$PATH ")
+    let host = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    let config = PushWatch.Config(relay: URL(string: "https://relay.example")!, deviceToken: "ab12",
+                                  environment: "development", hostID: host, states: ["blocked", "done"],
+                                  installationID: UUID(), secret: "abcd")
+    try await PushWatch.arm(config, session: "s1", herdrPath: bin.appendingPathComponent("herdr").path, runner: runner)
+    let posts = root.appendingPathComponent("posts")
+    let expected = mode == "plan" ? ["blocked:8"] :
+        (stub == "pty" ? ["blocked:5", "done:6"] : ["done:6"])
+    #expect(await eventually {
+        guard let text = try? String(contentsOf: posts, encoding: .utf8) else { return false }
+        return text.split(separator: "\n").count >= expected.count
+    })
+    let events = (try String(contentsOf: posts, encoding: .utf8)).split(separator: "\n").compactMap {
+        try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+    }
+    #expect(events.map { "\($0["state"] as? String ?? ""):\($0["seq"] as? Int ?? 0)" } == expected)
+    try await PushWatch.disarm(installationID: config.installationID, hostID: host, session: "s1", runner: runner)
+}
+
 private let stubCurl = """
     #!/bin/sh
     cat >> "$STUB_DIR/posts"
@@ -68,6 +169,14 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
         try? await Task.sleep(for: .milliseconds(100))
     }
     return condition()
+}
+
+private func eventuallyAsync(_ condition: () async -> Bool) async -> Bool {
+    for _ in 0..<50 {
+        if await condition() { return true }
+        try? await Task.sleep(for: .milliseconds(100))
+    }
+    return false
 }
 
 @Test(.serialized, arguments: ["none", "active", "expired", "reused", "unsigned", "activity", "activity-muted", "activity-other"])

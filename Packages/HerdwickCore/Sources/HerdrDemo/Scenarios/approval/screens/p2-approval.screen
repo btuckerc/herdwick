@@ -1,0 +1,19 @@
+<b>›</> review PR #412: cache invalidation when a chart moves teams
+
+<b>•</> Ran <cyan>git diff main...HEAD -- src/charts db/migrations</>
+  <gray>└</> src/charts/cache.ts: cache keys now include team_id
+    src/charts/move.ts: deletes the old team's cache first
+    db/migrations/0042_backfill_team_ids.sql
+
+The move path invalidates the old key inside the same
+transaction as the ownership update. Checking rollback.
+
+<footer>
+╭─ Allow tool: bash ───────────────────────────────────────╮
+│ Command: bun test src/charts/move.test.ts                │
+│  Approve                                                │
+│   Approve bash for this session                          │
+│   Deny                                                   │
+├──────────────────────────────────────────────────────────┤
+│ ↑/↓ choose · Enter select · Esc deny                     │
+╰──────────────────────────────────────────────────────────╯

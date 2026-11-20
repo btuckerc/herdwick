@@ -64,48 +64,85 @@ public enum PromptDriver {
         }
 
         var screen = try await current(io)
-        guard screen.style != .choice, screen.phase == .question else { throw PromptDriverError.noPrompt }
-        guard matches(screen, ask.questions[0]) else { throw PromptDriverError.questionMismatch }
+        guard screen.style != .choice else { throw PromptDriverError.noPrompt }
+        guard belongs(screen, to: ask) else { throw PromptDriverError.questionMismatch }
         if screen.style != .ompAsk && zip(ask.questions, replies).contains(where: {
             ($0.0.multi && $0.1.custom != nil) || $0.1.note != nil
         }) { throw PromptDriverError.unsupported }
-
-        var answered = -1
+        if screen.phase == .review { return try await submit(review: screen, ask, replies: replies, io: io, settle: settle, confirmTimeout: confirmTimeout) }
+        guard screen.phase == .question else { throw PromptDriverError.noPrompt }
+        let initial = ask.questions.indices.filter { matches(screen, ask.questions[$0]) }
+        guard initial.count == 1, let first = initial.first else { throw PromptDriverError.questionMismatch }
+        var answered = first - 1
         for _ in 0..<(ask.questions.count + 2) {
+            guard belongs(screen, to: ask) else { throw PromptDriverError.questionMismatch }
             switch screen.phase {
             case .review:
-                guard answered == ask.questions.count - 1,
-                      let submit = screen.options.firstIndex(where: { $0.isSubmit || $0.label == "Submit answers" })
-                else { throw PromptDriverError.unexpectedScreen }
-                _ = try await move(to: submit, on: screen, io: io, settle: settle) { $0.cursor }
-                try await io.send(keys: ["enter"])
-                return try await confirm(ask, io: io, timeout: confirmTimeout)
+                guard answered == ask.questions.count - 1 else { throw PromptDriverError.unexpectedScreen }
+                return try await submit(review: screen, ask, replies: replies, io: io, settle: settle, confirmTimeout: confirmTimeout)
             case .customInput, .noteInput:
                 throw PromptDriverError.unexpectedScreen
             case .question:
-                // Two questions that read alike on a cut-down screen can't be told apart.
                 let candidates = ask.questions.indices.filter { matches(screen, ask.questions[$0]) }
                 guard candidates.count == 1, let index = candidates.first else {
-                    throw PromptDriverError.questionMismatch
+                    throw answered < 0 ? PromptDriverError.questionMismatch : PromptDriverError.unexpectedScreen
                 }
                 guard index == answered + 1 else { throw PromptDriverError.unexpectedScreen }
-                try await answer(ask.questions[index], with: replies[index], on: screen, io: io, settle: settle)
+                try await answer(ask.questions[index], with: replies[index], belongingTo: ask, on: screen, io: io, settle: settle)
                 answered = index
             }
-            // Wait for the prompt to leave the question just answered.
+            // Wait for the prompt to settle past the question just answered. The screen lags the
+            // keys: the next reads can still show the free-text box closing, or a frame drawn
+            // halfway that parses as no prompt or an unknown question.
             let question = ask.questions[answered]
+            let last = answered == ask.questions.count - 1
             let moved = try await awaitScreen(io, timeout: settle) { next in
-                guard let next else { return true }
-                return next.phase != .question || !matches(next, question)
+                guard let next else { return last }
+                switch next.phase {
+                case .review: return true
+                case .customInput, .noteInput: return false
+                case .question: return !matches(next, question) && ask.questions.contains { matches(next, $0) }
+                }
             }
             guard let moved else { throw PromptDriverError.unexpectedScreen }
             guard let next = moved else {
-                guard answered == ask.questions.count - 1 else { throw PromptDriverError.unexpectedScreen }
-                return try await confirm(ask, io: io, timeout: confirmTimeout)
+                return try await finish(ask, replies: replies, io: io, settle: settle, confirmTimeout: confirmTimeout)
             }
             screen = next
         }
         throw PromptDriverError.unexpectedScreen
+    }
+
+    /// Submits a review page that shows exactly these replies.
+    private static func submit<IO: PromptIO>(review screen: ScreenPrompt, _ ask: AskActivity, replies: [QuestionReply], io: IO,
+                                             settle: Duration, confirmTimeout: Duration) async throws {
+        guard reviewAgrees(screen, with: ask, replies: replies),
+              let submit = screen.options.firstIndex(where: { $0.isSubmit || $0.label == "Submit answers" })
+        else { throw PromptDriverError.unexpectedScreen }
+        _ = try await move(to: submit, on: screen, io: io, settle: settle) {
+            belongs($0, to: ask) && reviewAgrees($0, with: ask, replies: replies) ? $0.cursor : nil
+        }
+        try await io.send(keys: ["enter"])
+        try await confirm(ask, io: io, timeout: confirmTimeout)
+    }
+
+    /// After the last question the prompt looked closed, but a frame caught mid-redraw reads as
+    /// no prompt too, and the review page may only be drawing. Until the agent logs the result,
+    /// keep looking: a review page of this ask showing these answers is still submitted. Taking
+    /// the blank frame as the end is what left asks on "Review answers" for the user to submit.
+    private static func finish<IO: PromptIO>(_ ask: AskActivity, replies: [QuestionReply], io: IO,
+                                             settle: Duration, confirmTimeout: Duration) async throws {
+        let deadline = ContinuousClock.now + confirmTimeout
+        while ContinuousClock.now < deadline {
+            let poll = min(.milliseconds(250), deadline - ContinuousClock.now)
+            if try await io.waitForResult(toolCallId: ask.toolCallId, timeout: poll) { return }
+            if let screen = ScreenPrompt.parse(try await io.readVisible()), screen.phase == .review, belongs(screen, to: ask),
+               ContinuousClock.now < deadline {
+                return try await submit(review: screen, ask, replies: replies, io: io, settle: settle,
+                                        confirmTimeout: max(.seconds(1), deadline - ContinuousClock.now))
+            }
+        }
+        throw PromptDriverError.notConfirmed
     }
 
     /// Picks `label` on a numbered choice prompt (a permission or approval) that still looks
@@ -120,6 +157,12 @@ public enum PromptDriver {
             throw PromptDriverError.optionNotFound
         }
         _ = try await move(to: target, on: screen, io: io, settle: settle) { sameChoice($0, screen) ? $0.cursor : nil }
+        // A newly painted approval can precede its input handler becoming ready. Live omp
+        // drops an immediate Enter on the already-selected row. Give that first frame time
+        // to settle, then revalidate both the entire choice and the selected logical row.
+        try await Task.sleep(for: .milliseconds(500))
+        let ready = try await current(io)
+        guard sameChoice(ready, expected), ready.cursor == target else { throw PromptDriverError.questionMismatch }
         try await io.send(keys: ["enter"])
         let gone = try await awaitScreen(io, timeout: confirmTimeout) { next in
             guard let next else { return true }
@@ -133,15 +176,17 @@ public enum PromptDriver {
     /// Rows are logical: the question's options, then the agent's free-text row, then Claude's
     /// `Submit` row. A pane smaller than the prompt shows only some of them (omp scrolls its
     /// list), so every step locates the cursor by what the rows say, not where they sit.
-    private static func answer<IO: PromptIO>(_ question: AskQuestion, with reply: QuestionReply, on screen: ScreenPrompt,
-                                             io: IO, settle: Duration) async throws {
+    private static func answer<IO: PromptIO>(_ question: AskQuestion, with reply: QuestionReply, belongingTo ask: AskActivity,
+                                             on screen: ScreenPrompt, io: IO, settle: Duration) async throws {
         let other = question.options.count
         func index(of label: String) throws -> Int {
             guard let index = question.options.firstIndex(where: { $0.label == label }) else { throw PromptDriverError.optionNotFound }
             return index
         }
         func move(to target: Int, on screen: ScreenPrompt) async throws -> ScreenPrompt {
-            try await PromptDriver.move(to: target, on: screen, io: io, settle: settle) { cursorRow($0, question) }
+            try await PromptDriver.move(to: target, on: screen, io: io, settle: settle) {
+                belongs($0, to: ask) && matches($0, question) ? cursorRow($0, question) : nil
+            }
         }
         var screen = screen
         if let note = reply.note, !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -264,7 +309,7 @@ public enum PromptDriver {
             try await io.send(keys: [down ? "down" : "up"])
             let landed = try await awaitScreen(io, timeout: settle) { next in
                 guard let next else { return false }
-                return next.title == screen.title && locate(next) == expected
+                return locate(next) == expected
             }
             guard let landed, let next = landed else { throw PromptDriverError.cursorLost }
             current = next; cursor = expected
@@ -281,11 +326,15 @@ public enum PromptDriver {
     /// The screen is asking `question`: its title, and rows that are the transcript's options
     /// in order. A title cut short (`…`) or wrapped, and a label cut short, match as a prefix.
     static func matches(_ screen: ScreenPrompt, _ question: AskQuestion) -> Bool {
-        var shown = screen.title
-        if shown.hasSuffix("…") { shown.removeLast() }
-        let title = comparable(shown), expected = comparable(question.question)
-        guard !title.isEmpty, title == expected || expected.hasPrefix(title) || title.hasPrefix(expected) else { return false }
+        guard titleMatches(screen.title, question.question) else { return false }
         return rows(screen, question)?.isEmpty == false
+    }
+
+    private static func titleMatches(_ shown: String, _ expected: String) -> Bool {
+        let cut = shown.hasSuffix("…")
+        let title = comparable(cut ? String(shown.dropLast()) : shown)
+        let expected = comparable(expected)
+        return !title.isEmpty && (title == expected || (cut && expected.hasPrefix(title)))
     }
 
     /// The logical row of each visible row (options, then the free-text row, then Claude's
@@ -345,7 +394,9 @@ public enum PromptDriver {
     /// question and its labels as markdown: emphasis and code markers dropped, a link as its
     /// text, entities decoded, paragraphs run together. Both sides lose markup and spacing.
     static func comparable(_ text: String) -> String {
-        var text = text.replacing(/\[([^\]]*)\]\([^)]*\)/) { String($0.output.1) }
+        var text = text.replacing(/(?m)^ {0,3}#{1,6} +/, with: "")
+            .replacing(/(?m)^ *(```|~~~)[^\n]*$/, with: "")
+            .replacing(/\[([^\]]*)\]\([^)]*\)/) { String($0.output.1) }
         for (entity, character) in [("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&")] {
             text = text.replacingOccurrences(of: entity, with: character)
         }
@@ -354,7 +405,84 @@ public enum PromptDriver {
     }
 
     private static func sameChoice(_ a: ScreenPrompt, _ b: ScreenPrompt) -> Bool {
-        a.style == b.style && a.title == b.title && a.context == b.context && a.options.map(\.label) == b.options.map(\.label)
+        a.style == .choice && b.style == .choice && a.representsSameWait(as: b)
+    }
+    /// A tab row, when present, identifies the ask independently of the active question.
+    /// This is essential when resuming from a later question or its review page. Only a
+    /// single question may show none (omp's single-select); any tab shown must match.
+    static func belongs(_ screen: ScreenPrompt, to ask: AskActivity) -> Bool {
+        if ask.questions.count == 1 && screen.tabs.isEmpty { return true }
+        guard screen.tabs.count == ask.questions.count else { return false }
+        return zip(screen.tabs, ask.questions).allSatisfy { tab, question in
+            let expected = question.header ?? question.id
+            return comparable(tab) == comparable(expected)
+        }
+    }
+
+    /// Review pages show the answers already entered. Never submit one unless every recorded
+    /// answer agrees with the replies the app is about to claim it sent.
+    private static func reviewAgrees(_ screen: ScreenPrompt, with ask: AskActivity,
+                                     replies: [QuestionReply]) -> Bool {
+        guard screen.phase == .review, screen.context.count >= ask.questions.count else { return false }
+        for (question, reply) in zip(ask.questions, replies) {
+            let expectedAnswers = reply.selected + (reply.custom.map { [$0] } ?? [])
+            guard !expectedAnswers.isEmpty else { return false }
+            let recorded: String
+            switch screen.style {
+            case .ompAsk:
+                let identifier = question.header ?? question.id
+                // The whole row label (`1. toppings:`), so one id can't match inside another.
+                let label = comparable(identifier) + ":"
+                guard let row = screen.context.firstIndex(where: { comparable($0).replacing(/^\d+\./, with: "", maxReplacements: 1).hasPrefix(label) }),
+                      let colon = screen.context[row].firstIndex(of: ":") else { return false }
+                let line = screen.context[row]
+                recorded = String(line[line.index(after: colon)...])
+                // A note shows on the next row; one there that the replies don't carry (or a
+                // different one) means the page records something else. Only a row cut short
+                // with "…" may show less than the reply's note.
+                let next = screen.context.indices.contains(row + 1) ? comparable(screen.context[row + 1]) : ""
+                let cut = next.hasSuffix("…")
+                let shown = next.hasPrefix("Note:") ? String(next.dropFirst(5)).replacingOccurrences(of: "…", with: "") : nil
+                let note = reply.note.map(comparable).flatMap { $0.isEmpty ? nil : $0 }
+                switch (note, shown) {
+                case (nil, nil): break
+                case let (note?, shown?) where note == shown || (cut && !shown.isEmpty && note.hasPrefix(shown)): break
+                default: return false
+                }
+                // Text typed into "Other" shows as `Other: …`; none was sent, so none may be recorded.
+                if reply.custom == nil && comparable(recorded).contains("Other:") { return false }
+            case .claudeAsk:
+                guard let index = screen.context.indices.first(where: {
+                    comparable(screen.context[$0]).contains(comparable(question.question))
+                }), screen.context.indices.contains(index + 1) else { return false }
+                recorded = screen.context[index + 1].replacingOccurrences(of: "→", with: "")
+            case .choice:
+                return false
+            }
+            let answer = comparable(recorded)
+            guard expectedAnswers.allSatisfy({ containsAnswer(answer, $0) }) else { return false }
+            let unselected = question.options.map(\.label).filter { !reply.selected.contains($0) }
+            guard !unselected.contains(where: { containsAnswer(answer, $0) }) else { return false }
+        }
+        return true
+    }
+
+    private static func containsAnswer(_ answer: String, _ label: String) -> Bool {
+        let label = comparable(label)
+        guard !label.isEmpty else { return false }
+        var search = answer.startIndex..<answer.endIndex
+        while let match = answer.range(of: label, range: search) {
+            let before = match.lowerBound == answer.startIndex ? nil : answer[..<match.lowerBound].last
+            let after = match.upperBound == answer.endIndex ? nil : answer[match.upperBound]
+            if answerBoundary(before) && answerBoundary(after) { return true }
+            search = match.upperBound..<answer.endIndex
+        }
+        return false
+    }
+
+    private static func answerBoundary(_ character: Character?) -> Bool {
+        guard let character else { return true }
+        return [",", ":", "“", "”", "\"", "'"].contains(character)
     }
 }
 

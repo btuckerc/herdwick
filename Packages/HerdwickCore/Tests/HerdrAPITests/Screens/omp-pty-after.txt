@@ -1,0 +1,7 @@
+ Run this exact command with the bash tool using pty: true: read -p 'Overwrite config.yml? [y/N] ' a; echo got:$a
+
+Done. The command ran with the interactive prompt and captured the input. When you answered y, it echoed got:y.
+
+╭── 󰪣 Haiku 4.5   work-pty ─────────────────────────────────────────────────────────────────|─────────── 58.1 tok/s ──╮
+╰─                                                                                                                   ──╯
+work-pty

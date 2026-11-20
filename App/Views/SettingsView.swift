@@ -9,10 +9,10 @@ struct SettingsView: View {
     @State private var addingHost = false
 
     var body: some View {
-        @Bindable var settings = settings
         NavigationStack {
             // iOS order: the hosts (Settings' account row) and how to reach them, then what's used
-            // daily, then look, then About. Rows are names; what a name doesn't say sits behind ⓘ.
+            // daily, then look, then About. The root is a short list of pages, like Settings; rows
+            // are names, and what a name doesn't say sits behind ⓘ on its page.
             Form {
                 Section("Hosts") {
                     ForEach(model.profiles) { profile in
@@ -44,118 +44,56 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    NavigationLink("SSH Key") { KeySettings() }
+                    NavigationLink { KeySettings() } label: { SettingsLabel("SSH Key", symbol: "key") }
                     if tailnet.state == .off {
-                        LabeledContent("Tailscale", value: "Off")
+                        SettingsLabel("Tailscale", symbol: "point.3.connected.trianglepath.dotted", value: "Off")
                     } else {
                         NavigationLink { TailscaleSettings() } label: {
-                            LabeledContent("Tailscale", value: tailscaleStatus)
+                            SettingsLabel("Tailscale", symbol: "point.3.connected.trianglepath.dotted", value: tailscaleStatus)
                         }
                     }
-                }
-
-                Section("Inbox") {
-                    SettingsMenuRow("View", value: settings.inboxView.label) {
-                        Picker("View", selection: $settings.inboxView) {
-                            ForEach(InboxKind.allCases) { Text($0.label).tag($0) }
-                        }
+                    // The page's state on its row, as Settings shows Wi-Fi's network (round 95:
+                    // opus#14, three chevrons gave no hint of what was set behind them).
+                    NavigationLink { NotificationSettings() } label: {
+                        SettingsLabel("Notifications", symbol: "bell.badge",
+                                      value: settings.notifyNeedsYou || settings.notifyFinished ? "On" : "Off")
                     }
-                    Toggle("All Hosts", isOn: $settings.allHosts)
-                    SettingsMenuRow("Group", value: settings.inboxGrouping.label) {
-                        Picker("Group", selection: $settings.inboxGrouping) {
-                            ForEach(InboxGrouping.allCases) { Text($0.label).tag($0) }
-                        }
-                    }
-                    SettingsMenuRow("Sort", value: settings.inboxSort.label) {
-                        Picker("Sort", selection: $settings.inboxSort) {
-                            ForEach(InboxSort.allCases) { Text($0.label).tag($0) }
-                        }
-                    }
-                    Toggle("Collapse Idle Agents", isOn: $settings.collapseIdle)
-                    Toggle("Message Previews", isOn: $settings.inboxPreviews)
-                }
-
-                Section("Conversations") {
-                    SettingsMenuRow("Detail", value: DetailLevelOptions.title(settings.detailLevel)) {
-                        DetailLevelOptions(selection: $settings.detailLevel)
-                    }
-                    Toggle("Agent Dock", isOn: $settings.showsDock)
-                    if settings.showsDock {
-                        SettingsMenuRow("Dock Order", value: settings.dockOrder.label) {
-                            Picker("Dock Order", selection: $settings.dockOrder) {
-                                ForEach(DockOrder.allCases) { Text($0.label).tag($0) }
-                            }
-                        }
-                    }
-                    NavigationLink("Launch Presets") { PresetsEditor() }
-                }
-
-                Section("Composer") {
-                    Toggle("Autocorrect", isOn: $settings.composerAutocorrect)
-                    Toggle("On-screen Return Sends", isOn: $settings.returnKeySends)
-                    NavigationLink("Snippets") { SnippetsEditor() }
-                    SettingsMenuRow("Keep Uploads", value: settings.attachmentRetention.label,
-                                    info: "Expired uploads are removed from the host at your next upload.") {
-                        Picker("Keep Uploads", selection: $settings.attachmentRetention) {
-                            ForEach(AttachmentRetention.allCases) { Text($0.label).tag($0) }
-                        }
-                    }
-                }
-
-                Section("Dictation") {
-                    Toggle("Show Live Transcript", isOn: $settings.showsLiveTranscript)
-                    NavigationLink("Dictionary") { DictionaryEditor() }
+                    NavigationLink { PrivacySettings() } label: { SettingsLabel("Privacy", symbol: "hand.raised") }
                 }
 
                 Section {
-                    NavigationLink("Notifications") { NotificationSettings() }
-                }
-
-                PrivacySettings()
-
-                Section("Appearance") {
-                    Picker("Appearance", selection: $settings.appearance) {
-                        Text("System").tag(Appearance.system)
-                        Text("Light").tag(Appearance.light)
-                        Text("Dark").tag(Appearance.dark)
+                    NavigationLink { ConversationSettings() } label: {
+                        SettingsLabel("Conversations", symbol: "bubble.left.and.text.bubble.right")
                     }
-                    .pickerStyle(.segmented)
-                    Toggle("Haptics", isOn: $settings.haptics)
+                    NavigationLink { ComposerSettings() } label: { SettingsLabel("Composer & Dictation", symbol: "keyboard") }
+                    NavigationLink { AppearanceSettings() } label: {
+                        SettingsLabel("Appearance & Terminal", symbol: "paintbrush", value: settings.appearance.label)
+                    }
                 }
 
-                Section("Terminal") {
-                    SettingsMenuRow("Font", value: settings.font.label) {
-                        Picker("Font", selection: $settings.font) {
-                            ForEach(TerminalFont.allCases) { Text($0.label).tag($0) }
+                Section {
+                    // Says where it goes and that it leaves the app, as an outbound row should
+                    // (round 55: opus#13, sa#15, a bare green "herdr" read as a stray link).
+                    Link(destination: URL(string: "https://herdr.dev")!) {
+                        LabeledContent("herdr Website") {
+                            Image(systemName: "arrow.up.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
                         }
+                        .foregroundStyle(Color.primary)
                     }
-                    Stepper(value: $settings.fontSize, in: 8...20, step: 1) {
-                        LabeledContent("Size", value: "\(Int(settings.fontSize)) pt")
-                    }
-                    NavigationLink {
-                        ThemePicker(selection: $settings.darkThemeID, dark: true)
-                    } label: {
-                        LabeledContent("Dark Theme", value: TerminalTheme.named(settings.darkThemeID).name)
-                    }
-                    NavigationLink {
-                        ThemePicker(selection: $settings.lightThemeID, dark: false)
-                    } label: {
-                        LabeledContent("Light Theme", value: TerminalTheme.named(settings.lightThemeID).name)
-                    }
-                    TerminalPreview()
-                        .listRowInsets(EdgeInsets())
-                }
-
-                Section("About") {
-                    LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
-                    Link("herdr", destination: URL(string: "https://herdr.dev")!)
+                    .accessibilityHint("Opens herdr.dev in Safari")
                     NavigationLink("Acknowledgements") { Acknowledgements() }
+                } header: {
+                    Text("About")
+                } footer: {
+                    Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
                 }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            // The close button every browsing sheet has, top trailing; settings save as they
+            // change, so there's nothing to confirm (round 81: opus#8, Done here, an X elsewhere).
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) { Button(role: .close) { dismiss() } }
             }
             .sheet(isPresented: $addingHost) { AddHostView() }
         }
@@ -167,6 +105,128 @@ struct SettingsView: View {
         case .off: "Off"
         default: "Starting…"
         }
+    }
+}
+
+/// A monochrome symbol in a fixed column, the setting's name, and an optional value.
+private struct SettingsLabel: View {
+    let title: String
+    let symbol: String
+    var value: String?
+    @ScaledMetric(relativeTo: .body) private var iconWidth: CGFloat = 28
+
+    init(_ title: String, symbol: String, value: String? = nil) {
+        self.title = title
+        self.symbol = symbol
+        self.value = value
+    }
+
+    var body: some View {
+        HStack(spacing: Tokens.Space.m) {
+            Image(systemName: symbol)
+                .foregroundStyle(.secondary)
+                .frame(width: iconWidth)
+                .accessibilityHidden(true)
+            Text(title)
+            if let value {
+                Spacer(minLength: Tokens.Space.s)
+                Text(value).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+    }
+}
+
+/// How threads read and what the inbox shows of them. Grouping, order and idle folding live in
+/// the inbox's View menu, where their effect is in sight.
+private struct ConversationSettings: View {
+    @Environment(Settings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        Form {
+            Section {
+                Toggle(isOn: $settings.inboxPreviews) {
+                    InfoLabel("Message Previews", info: "Shows a line of each agent's newest message in the inbox and the dock. Search finds it either way.")
+                }
+            }
+            Section {
+                SettingsMenuRow("Thread View", value: DetailLevelOptions.title(settings.detailLevel)) {
+                    DetailLevelOptions(selection: $settings.detailLevel)
+                }
+                Toggle("Agent Dock", isOn: $settings.showsDock)
+                NavigationLink("Launch Presets") { PresetsEditor() }
+            }
+        }
+        .navigationTitle("Conversations")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct ComposerSettings: View {
+    @Environment(Settings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        Form {
+            Section("Composer") {
+                Toggle("Autocorrect", isOn: $settings.composerAutocorrect)
+                Toggle("On-screen Return Sends", isOn: $settings.returnKeySends)
+                NavigationLink("Snippets") { SnippetsEditor() }
+                SettingsMenuRow("Keep Uploads", value: settings.attachmentRetention.label,
+                                info: "Expired uploads are removed from the host at your next upload.") {
+                    Picker("Keep Uploads", selection: $settings.attachmentRetention) {
+                        ForEach(AttachmentRetention.allCases) { Text($0.label).tag($0) }
+                    }
+                }
+            }
+            Section("Dictation") {
+                Toggle("Show Live Transcript", isOn: $settings.showsLiveTranscript)
+                NavigationLink("Dictionary") { DictionaryEditor() }
+            }
+        }
+        .navigationTitle("Composer & Dictation")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct AppearanceSettings: View {
+    @Environment(Settings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        Form {
+            Section {
+                Picker("Appearance", selection: $settings.appearance) {
+                    ForEach(Appearance.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Toggle("Haptics", isOn: $settings.haptics)
+            }
+            Section("Terminal") {
+                SettingsMenuRow("Font", value: settings.font.label) {
+                    Picker("Font", selection: $settings.font) {
+                        ForEach(TerminalFont.allCases) { Text($0.label).tag($0) }
+                    }
+                }
+                Stepper(value: $settings.fontSize, in: Settings.fontSizes, step: 1) {
+                    LabeledContent("Size", value: "\(Int(settings.fontSize)) pt")
+                }
+                NavigationLink {
+                    ThemePicker(selection: $settings.darkThemeID, dark: true)
+                } label: {
+                    LabeledContent("Dark Theme", value: TerminalTheme.named(settings.darkThemeID).name)
+                }
+                NavigationLink {
+                    ThemePicker(selection: $settings.lightThemeID, dark: false)
+                } label: {
+                    LabeledContent("Light Theme", value: TerminalTheme.named(settings.lightThemeID).name)
+                }
+                TerminalPreview()
+                    .listRowInsets(EdgeInsets())
+            }
+        }
+        .navigationTitle("Appearance & Terminal")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -258,24 +318,29 @@ private struct PrivacySettings: View {
 
     var body: some View {
         @Bindable var settings = settings
-        Section("Privacy") {
-            Toggle(isOn: $settings.appLock) {
-                InfoLabel("App Lock", info: "Asks for Face ID or your passcode at launch and after 30 seconds away, and hides Herdwick in the app switcher.")
-            }
-            Toggle(isOn: Binding(get: { settings.offlineTranscripts }, set: { on in
-                if on { settings.offlineTranscripts = true }
-                else { deletingCopies = true }
-            })) {
-                InfoLabel("Keep Offline Copies", info: "Up to 20 conversations, at most 4 MB each, protected while your device is locked. Turning this off deletes them.")
+        Form {
+            Section {
+                Toggle(isOn: $settings.appLock) {
+                    InfoLabel("App Lock", info: "Asks for Face ID or your passcode at launch and after 30 seconds away, and hides Herdwick in the app switcher.")
+                }
+                Toggle(isOn: Binding(get: { settings.offlineTranscripts }, set: { on in
+                    if on { settings.offlineTranscripts = true }
+                    else { deletingCopies = true }
+                })) {
+                    InfoLabel("Keep Offline Copies", info: "Up to 20 conversations, at most 4 MB each, protected while your device is locked. Turning this off deletes them.")
+                }
             }
         }
-        .confirmationDialog("Delete all offline copies?", isPresented: $deletingCopies, titleVisibility: .visible) {
+        .navigationTitle("Privacy")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("Delete all offline copies?", isPresented: $deletingCopies) {
             Button("Delete Copies", role: .destructive) {
                 do {
                     try TranscriptCache.removeAll()
                     settings.offlineTranscripts = false
                 } catch { failure = error.localizedDescription }
             }
+            Button("Cancel", role: .cancel) {}
         }
         .alert("Couldn't Delete Copies", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK") { failure = nil }
@@ -341,7 +406,7 @@ private struct DeviceKeyReplacement: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { includeNewHosts() }
         .onChange(of: model.profiles) { includeNewHosts() }
-        .confirmationDialog("Permanently remove the old private key?", isPresented: $confirmingRemoval, titleVisibility: .visible) {
+        .alert("Permanently remove the old private key?", isPresented: $confirmingRemoval) {
             Button("Remove Old Key", role: .destructive) {
                 guard let pending else { return }
                 do {
@@ -350,6 +415,7 @@ private struct DeviceKeyReplacement: View {
                     completed = true
                 } catch { failure = error.localizedDescription }
             }
+            Button("Cancel", role: .cancel) {}
         }
         .alert("Key Replacement Failed", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK") { failure = nil }
@@ -380,11 +446,19 @@ private struct NotificationSettings: View {
     @State private var denied = false
 
     var body: some View {
+        @Bindable var settings = settings
         Form {
             Section {
                 Toggle("Needs You", isOn: binding(\.notifyNeedsYou))
-                Toggle("Finished", isOn: binding(\.notifyFinished))
-                if denied {
+                Toggle("Done", isOn: binding(\.notifyFinished))
+            }
+            Section {
+                Toggle("Answer from Notifications", isOn: $settings.answerFromNotifications)
+            } footer: {
+                Text("Approve, deny or reply from an alert or the Lock Screen. Face ID or your passcode is asked first.")
+            }
+            if denied {
+                Section {
                     Link("Allow Notifications in Settings", destination: URL(string: UIApplication.openNotificationSettingsURLString)!)
                 }
             }
@@ -457,20 +531,31 @@ private struct PushDisclosure: View {
     }
 }
 
-/// The detail levels as checkmarked menu items.
+/// The detail levels as checkmarked menu items, named by what a thread then shows, each with
+/// what it leaves out (round 16: "Folded" and "Digest" named the mechanism, not the result).
 struct DetailLevelOptions: View {
     @Binding var selection: DetailLevel
 
     static func title(_ level: DetailLevel) -> String {
         switch level {
-        case .folded: "Folded"
-        case .digest: "Digest"
+        case .folded: "Messages and Steps"
+        case .digest: "Messages Only"
+        }
+    }
+
+    static func subtitle(_ level: DetailLevel) -> String {
+        switch level {
+        case .folded: "Each run of steps on one line"
+        case .digest: "Steps only while running or failed"
         }
     }
 
     var body: some View {
         ForEach(DetailLevel.allCases) { level in
-            Toggle(Self.title(level), isOn: Binding(get: { selection == level }, set: { if $0 { selection = level } }))
+            Toggle(isOn: Binding(get: { selection == level }, set: { if $0 { selection = level } })) {
+                Text(Self.title(level))
+                Text(Self.subtitle(level))
+            }
         }
     }
 }
@@ -656,11 +741,6 @@ struct HostEditor: View {
             }
             Section {
                 Button("Forget Pinned Host Key…", role: .destructive) { confirmForgetKey = true }
-                    .confirmationDialog("Forget the pinned host key?", isPresented: $confirmForgetKey, titleVisibility: .visible) {
-                        Button("Forget Key", role: .destructive) { Keychain.delete(profile.hostKeyAccount) }
-                    } message: {
-                        Text("The next connection trusts whatever key the host presents, including an impostor's.")
-                    }
                 Button("Remove Host", role: .destructive) { confirmDelete = true }
             }
         }
@@ -674,11 +754,18 @@ struct HostEditor: View {
                 Button("Save", action: save).disabled(profile.username.isEmpty || !lanAddressValid)
             }
         }
-        .confirmationDialog("Remove \(profile.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
+        .alert("Forget the pinned host key?", isPresented: $confirmForgetKey) {
+            Button("Forget Key", role: .destructive) { Keychain.delete(profile.hostKeyAccount) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The next connection trusts whatever key the host presents, including an impostor's.")
+        }
+        .alert("Remove \(profile.name)?", isPresented: $confirmDelete) {
             Button("Remove", role: .destructive) {
                 model.delete(profile.id)
                 dismiss()
             }
+            Button("Cancel", role: .cancel) {}
         }
     }
 

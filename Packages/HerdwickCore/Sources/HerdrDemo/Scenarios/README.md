@@ -82,6 +82,12 @@ ANSI colours are used so the user's theme recolours the screen.
   pane opens, a reply is typed and sent, the agent finishes, the list returns, and the link
   drops for 2.5 s and recovers.
 - `replied`: `studio` after the reply, with p1 done and its deploy output on screen.
+- `approval`: extends `studio`; `p2` is blocked on an omp "Allow tool: bash" approval
+  (Approve / Approve bash for this session / Deny) with the tool call still running in its
+  transcript. Enter approves: the tests finish and the agent is done.
+- `approval-last`: extends `approval` with p1 already replied and done (as in `replied`), so
+  p2's approval is the only thing that needs you: approving it from the inbox empties Needs
+  You ("All caught up").
 - `loop`: extends `studio`; `p5` becomes a long hill-climb loop ("Hill-climb the rate
   limiter"): briefs to and replies from subagents, a NO-GO then GO council, edits, bench
   images, and a background soak the agent is still waiting on.
@@ -99,7 +105,7 @@ No special capture script is needed; these run the actual conversation UI.
 | Working subagents (Now line) and completed subagent | `-HerdwickScene pane:p5 -detailLevel folded` |
 | Long agent loop (use `-HerdwickDemo loop`) | `-HerdwickScene pane:p5 -detailLevel folded` (or `digest`) |
 | Catch-up line ("Since 9:41 · …") | add `-HerdwickSeen <item id>` (e.g. `c17` in `loop`, `diff` on `pane:p2`) |
-| Machines | `-HerdwickScene agents -inboxView machines` |
+| Panes (host › workspace › tab › pane) | `-HerdwickScene panes` |
 | Forced terminal, even with a transcript | `-HerdwickScene terminal:p1` |
 
 `pane:<id>` and `openPane` select conversation using the same `hasTranscript` rule as

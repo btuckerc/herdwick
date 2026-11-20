@@ -11,12 +11,12 @@ public final class DemoHost: CommandRunner {
     public let cues: AsyncStream<DemoCue>
     private let engine: DemoEngine
 
-    /// `dropAfterReady` kills the link for good once the app has its first live snapshot,
-    /// which holds the UI on its reconnecting state.
-    public init(scenario: DemoScenario, dropAfterReady: Bool = false) {
+    /// `dropAfterReady` kills the link for good shortly after the first transcript is served,
+    /// or after a fallback delay if the scene never opens a transcript.
+    public init(scenario: DemoScenario, dropAfterReady: Bool = false, scriptedReplyDelay: Duration = .seconds(3.5)) {
         let (cues, continuation) = AsyncStream<DemoCue>.makeStream()
         self.cues = cues
-        engine = DemoEngine(scenario: scenario, cues: continuation, dropAfterReady: dropAfterReady)
+        engine = DemoEngine(scenario: scenario, cues: continuation, dropAfterReady: dropAfterReady, scriptedReplyDelay: scriptedReplyDelay)
     }
 
     /// Starts the timeline; `t` in the scenario counts from here. Idempotent.
@@ -33,7 +33,9 @@ private actor DemoEngine {
     private let scenario: DemoScenario
     private let cues: AsyncStream<DemoCue>.Continuation
     private let dropAfterReady: Bool
+    private let scriptedReplyDelay: Duration
 
+    private var nextDemoID = 1
     private var snapshot: [String: Any]
     private var screens: [String: String]
     private var transcripts: [String: Data]
@@ -41,6 +43,7 @@ private actor DemoEngine {
     private var clockStarted = false
     private var dropped = false
     private var dropScheduled = false
+    private var transcriptFollowOpened = false
 
     private enum Role {
         case bridge
@@ -59,19 +62,21 @@ private actor DemoEngine {
 
     private var channels: [ObjectIdentifier: Open] = [:]
 
-    init(scenario: DemoScenario, cues: AsyncStream<DemoCue>.Continuation, dropAfterReady: Bool) {
+    init(scenario: DemoScenario, cues: AsyncStream<DemoCue>.Continuation, dropAfterReady: Bool, scriptedReplyDelay: Duration) {
         self.scenario = scenario
         self.cues = cues
         self.dropAfterReady = dropAfterReady
+        self.scriptedReplyDelay = scriptedReplyDelay
+        let now = Date()
         var snapshot = (try? JSONSerialization.jsonObject(with: scenario.snapshotJSON) as? [String: Any]) ?? [:]
         var screens = scenario.screens
         var transcripts = Dictionary(uniqueKeysWithValues: scenario.transcripts.map {
-            (DemoScenario.transcriptPath($0.key), scenario.transcriptFiles[$0.value] ?? Data())
+            (DemoScenario.transcriptPath($0.key), Self.timestamped(scenario.transcriptFiles[$0.value] ?? Data(), pane: $0.key, now: now))
         })
         for (pane, children) in scenario.childTranscripts {
             for (id, file) in children {
                 if let path = SubagentTranscript.path(parentPath: DemoScenario.transcriptPath(pane), format: .omp, subagentID: id) {
-                    transcripts[path] = scenario.transcriptFiles[file]
+                    transcripts[path] = Self.timestamped(scenario.transcriptFiles[file] ?? Data(), pane: pane, now: now)
                 }
             }
         }
@@ -86,7 +91,7 @@ private actor DemoEngine {
             switch action {
             case .status(let pane, let status): Self.apply(status, pane: pane, to: &snapshot)
             case .screen(let pane, let path): screens[pane] = path
-            case .append(let pane, let path): transcripts[DemoScenario.transcriptPath(pane), default: Data()].append(scenario.transcriptFiles[path] ?? Data())
+            case .append(let pane, let path): transcripts[DemoScenario.transcriptPath(pane), default: Data()].append(Self.timestamped(scenario.transcriptFiles[path] ?? Data(), pane: pane, now: now))
             case .cue, .drop: break
             }
         }
@@ -128,6 +133,10 @@ private actor DemoEngine {
                 channel.send("\(data.count) \(start)\n\(Data(data.prefix(headLimit)).base64EncodedString())\n")
                 if data.count > start { channel.send(Data(data.dropFirst(start))) }
                 channels[channel.id] = Open(channel: channel, role: .file(path: path, offset: data.count))
+                if dropAfterReady, !transcriptFollowOpened {
+                    transcriptFollowOpened = true
+                    scheduleDrop(after: .milliseconds(300), fallback: false)
+                }
             }
         } else if command.contains("for spec in"), command.contains("p.tombstone") {
             let script = command.replacingOccurrences(of: "'\\''", with: "'")
@@ -163,6 +172,22 @@ private actor DemoEngine {
             channel.finish(throwing: CommandError.exited(status: 127, stderr: "demo host: unsupported command"))
         }
         return channel
+    }
+
+    /// A `fallback` drop (no transcript yet) stands down if one opens before it fires; that
+    /// transcript's own drop follows it, so a slow open is never cut off before it renders.
+    private func scheduleDrop(after delay: Duration, fallback: Bool) {
+        guard !fallback || !dropScheduled else { return }
+        dropScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            await self?.drop(fallback: fallback)
+        }
+    }
+
+    private func drop(fallback: Bool) {
+        guard !dropped, !(fallback && transcriptFollowOpened) else { return }
+        schedule([TimedStep(at: 0, action: .drop(nil))])
     }
 
     /// Like a host without perl: a request carried in the command line is asked for again on stdin.
@@ -211,6 +236,55 @@ private actor DemoEngine {
         return nil
     }
 
+    /// Rebases timestamps into the pane's age while preserving record order and never placing
+    /// an event after `now`; live appends land at the current time.
+    private static func timestamped(_ data: Data, pane: String, now: Date, live: Bool = false) -> Data {
+        let age: TimeInterval
+        switch pane {
+        case _ where live: age = 0
+        case "p1": age = 4 * 60
+        case "p2": age = 45 * 60
+        // Its screen reads "Working (6m 40s …)" from the request, 20 s before the run.
+        case "p3": age = 6 * 60 + 20
+        case "p4": age = 90 * 60
+        case "p5": age = 25
+        case "p7": age = 3 * 60 * 60
+        default: age = 90
+        }
+        let end = now.addingTimeInterval(-age)
+        func date(_ value: Any?) -> Date? {
+            guard let string = value as? String else { return nil }
+            return (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(string))
+                ?? (try? Date.ISO8601FormatStyle().parse(string))
+        }
+        let lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
+        let records = lines.map { line in
+            line.isEmpty ? nil : (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
+        }
+        let shift = records.compactMap { date($0?["timestamp"]) }.max().map { end.timeIntervalSince($0) } ?? 0
+        var previous: Date?
+        return Data(zip(lines, records).map { line, record -> String in
+            guard var record else { return String(line) }
+            if let stamp = date(record["timestamp"]) {
+                let rebased = min(end, stamp.addingTimeInterval(shift))
+                let ordered = max(previous ?? rebased, rebased)
+                // Fractional seconds: whole ones could land a live append before a decision
+                // made a second and a half earlier ("Took …" then had nothing to count).
+                record["timestamp"] = Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(ordered)
+                previous = ordered
+            } else if record["type"] as? String == "message" {
+                let stamp = min(end, previous ?? end)
+                record["timestamp"] = ISO8601DateFormatter().string(from: stamp)
+                previous = stamp
+            } else {
+                return String(line)
+            }
+            guard let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                  let result = String(data: encoded, encoding: .utf8) else { return String(line) }
+            return result
+        }.joined(separator: "\n").utf8)
+    }
+
     func received(_ bytes: [UInt8], on id: ObjectIdentifier) {
         guard var open = channels[id] else { return }
         open.pending += bytes
@@ -253,8 +327,7 @@ private actor DemoEngine {
         case "session.snapshot":
             reply(["snapshot": snapshot])
             if dropAfterReady, !dropScheduled, channels.values.contains(where: { if case .events = $0.role { true } else { false } }) {
-                dropScheduled = true
-                schedule([TimedStep(at: 0.3, action: .drop(nil))])
+                scheduleDrop(after: .seconds(5), fallback: true)
             }
         case "events.subscribe":
             reply(["subscribed": true])
@@ -268,6 +341,13 @@ private actor DemoEngine {
         case "pane.send_input", "pane.send_keys":
             reply([String: Any]())
             let pane = params["pane_id"] as? String
+            // An agent started from New Agent answers with a canned reply; the scenario's own
+            // panes keep their scripted triggers.
+            if let pane, pane.hasPrefix("demo-pane-"), method == "pane.send_input", let text = params["text"] as? String {
+                scriptReply(to: text, pane: pane)
+                answered(open, on: id)
+                return
+            }
             if let pane, method == "pane.send_keys", let keys = params["keys"] as? [String],
                let markup = screenOverrides[pane] ?? screens[pane].flatMap({ scenario.screenFiles[$0] }),
                ScreenPrompt.parse(ScreenMarkup.text(markup, cols: 80, rows: 40).joined(separator: "\n"))?.style == .ompAsk {
@@ -299,6 +379,65 @@ private actor DemoEngine {
             } else {
                 open.channel.send(["id": requestID, "error": ["code": "pane_not_found", "message": "pane \(pane) not found"]])
             }
+        case "tab.create":
+            let workspaceID = params["workspace_id"] as? String ?? ""
+            guard let workspace = (snapshot["workspaces"] as? [[String: Any]] ?? []).first(where: { $0["workspace_id"] as? String == workspaceID }) else {
+                open.channel.send(["id": requestID, "error": ["code": "workspace_not_found", "message": "workspace not found"]])
+                break
+            }
+            let tabID = "demo-tab-\(nextDemoID)", paneID = "demo-pane-\(nextDemoID)"
+            nextDemoID += 1
+            let tabs = snapshot["tabs"] as? [[String: Any]] ?? []
+            let number = tabs.filter { $0["workspace_id"] as? String == workspaceID }.count + 1
+            let tab: [String: Any] = ["tab_id": tabID, "workspace_id": workspaceID, "number": number,
+                                      "label": params["label"] as? String ?? "Tab \(number)", "focused": false, "agent_status": "idle"]
+            let pane: [String: Any] = ["pane_id": paneID, "workspace_id": workspaceID, "tab_id": tabID, "focused": false,
+                                       "agent_status": "idle", "cwd": params["cwd"] as? String ?? workspace["cwd"] as? String ?? "",
+                                       "revision": 1]
+            snapshot["tabs"] = tabs + [tab]
+            snapshot["panes"] = (snapshot["panes"] as? [[String: Any]] ?? []) + [pane]
+            reply(["tab": tab, "root_pane": pane])
+            broadcast("pane_created", ["pane": pane])
+        case "workspace.create":
+            let workspaceID = "demo-workspace-\(nextDemoID)", tabID = "demo-tab-\(nextDemoID)", paneID = "demo-pane-\(nextDemoID)"
+            nextDemoID += 1
+            let number = (snapshot["workspaces"] as? [[String: Any]] ?? []).count + 1
+            let workspace: [String: Any] = ["workspace_id": workspaceID, "number": number,
+                                             "label": params["label"] as? String ?? "Demo workspace \(number)", "focused": false, "agent_status": "idle"]
+            let tab: [String: Any] = ["tab_id": tabID, "workspace_id": workspaceID, "number": 1, "label": "Tab 1", "focused": false, "agent_status": "idle"]
+            let pane: [String: Any] = ["pane_id": paneID, "workspace_id": workspaceID, "tab_id": tabID, "focused": false,
+                                       "agent_status": "idle", "cwd": params["cwd"] as? String ?? "", "revision": 1]
+            snapshot["workspaces"] = (snapshot["workspaces"] as? [[String: Any]] ?? []) + [workspace]
+            snapshot["tabs"] = (snapshot["tabs"] as? [[String: Any]] ?? []) + [tab]
+            snapshot["panes"] = (snapshot["panes"] as? [[String: Any]] ?? []) + [pane]
+            reply(["workspace": workspace, "tab": tab, "root_pane": pane])
+            broadcast("pane_created", ["pane": pane])
+        case "agent.start":
+            let paneID = params["pane_id"] as? String ?? "", kind = params["kind"] as? String ?? "omp"
+            let name = params["name"] as? String ?? "demo-agent"
+            guard var panes = snapshot["panes"] as? [[String: Any]],
+                  let index = panes.firstIndex(where: { $0["pane_id"] as? String == paneID }) else {
+                open.channel.send(["id": requestID, "error": ["code": "pane_not_found", "message": "pane not found"]])
+                break
+            }
+            panes[index]["agent"] = kind
+            panes[index]["display_agent"] = kind
+            snapshot["panes"] = panes
+            let pane = panes[index]
+            let agent: [String: Any] = ["pane_id": paneID, "workspace_id": pane["workspace_id"] ?? "", "tab_id": pane["tab_id"] ?? "",
+                                        "agent_status": "idle", "agent": kind, "display_agent": kind, "name": name, "focused": false,
+                                        "state_change_seq": 0, "agent_session": ["source": "herdr:omp", "agent": "omp", "kind": "path",
+                                                                                 "value": DemoScenario.transcriptPath(paneID)]]
+            snapshot["agents"] = (snapshot["agents"] as? [[String: Any]] ?? []) + [agent]
+            transcripts[DemoScenario.transcriptPath(paneID)] = Data()
+            reply(["agent": agent, "argv": params["args"] as? [String] ?? []])
+            broadcast("pane_updated", ["pane": pane])
+        case "agent.get":
+            if let agent = (snapshot["agents"] as? [[String: Any]] ?? []).first(where: { $0["pane_id"] as? String == params["target"] as? String }) {
+                reply(["agent": agent])
+            } else {
+                open.channel.send(["id": requestID, "error": ["code": "agent_not_found", "message": "agent not found"]])
+            }
         default:
             open.channel.send(["id": requestID, "error": ["code": "unsupported", "message": "demo host: \(method)"]])
         }
@@ -312,6 +451,91 @@ private actor DemoEngine {
         } else {
             channels[id] = nil
             open.channel.finish()
+        }
+    }
+
+    private func scriptReply(to text: String, pane: String) {
+        guard isAgent(pane) else { return }
+        let stamp = { Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(Date()) }
+        appendTranscript(record: ["type": "message", "id": UUID().uuidString, "timestamp": stamp(),
+                                  "message": ["role": "user", "content": text]], pane: pane)
+        nameAfterFirstMessage(text, pane: pane)
+        setStatus(.working, pane: pane)
+        Task {
+            // A turn as a harness writes it: a test run the thread shows as a live step, then a
+            // reply that ends the turn, so it lands on the Done card with "Took" like any other
+            // (round 22: the bare paragraph under Done had no card, no step and no time, and the
+            // thread sat empty for the whole wait).
+            let call = UUID().uuidString
+            try? await Task.sleep(for: scriptedReplyDelay * 0.15)
+            guard isAgent(pane) else { return }
+            appendTranscript(record: ["type": "message", "id": UUID().uuidString, "timestamp": stamp(),
+                                      "message": ["role": "assistant", "stopReason": "toolUse", "content": [
+                                          ["type": "toolCall", "id": call, "name": "bash", "arguments": ["command": "bun test --changed"]]]]], pane: pane)
+            try? await Task.sleep(for: scriptedReplyDelay * 0.7)
+            guard isAgent(pane) else { return }
+            appendTranscript(record: ["type": "message", "id": UUID().uuidString, "timestamp": stamp(),
+                                      "message": ["role": "toolResult", "toolCallId": call, "content": "12 pass · 0 fail"]], pane: pane)
+            try? await Task.sleep(for: scriptedReplyDelay * 0.15)
+            guard isAgent(pane) else { return }
+            // A finished turn that did the work, so Done is true (round 20: "I'd first check…"
+            // under Done read as work never done; round 21: "Say go and I'll start" under Done),
+            // naming what was asked (round 23: "Made the smallest change…" could have answered anything).
+            let ask = Self.restated(text)
+            let response = "Done: \(ask)\(ask.hasSuffix("…") ? "" : ".")\n\n- **Tests:** 12 pass, 0 fail.\n- **Diff:** in the working tree for you to review; nothing committed."
+            appendTranscript(record: ["type": "message", "id": UUID().uuidString, "timestamp": stamp(),
+                                      "message": ["role": "assistant", "content": response, "stopReason": "stop"]], pane: pane)
+            setStatus(.done, pane: pane)
+        }
+    }
+
+    /// The ask as the reply restates it: its first line, without closing punctuation, lowercased
+    /// at the start unless that's an acronym ("PR"), cut at a word past 90 characters.
+    static func restated(_ text: String) -> String {
+        var ask = text.split(whereSeparator: \.isNewline).first.map(String.init)?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        while let last = ask.last, ".!?".contains(last) { ask.removeLast() }
+        if ask.count > 90 {
+            let cut = ask.prefix(90)
+            ask = (cut.lastIndex(of: " ").map { String(cut[..<$0]) } ?? String(cut)) + "…"
+        }
+        if let first = ask.first, ask.dropFirst().first?.isUppercase != true {
+            ask = first.lowercased() + ask.dropFirst()
+        }
+        return ask.isEmpty ? "made the change" : ask
+    }
+
+    private func isAgent(_ pane: String) -> Bool {
+        (snapshot["agents"] as? [[String: Any]] ?? []).contains { $0["pane_id"] as? String == pane }
+    }
+
+    /// An agent started here has no terminal title until its first message, which its harness
+    /// turns into one (omp's "π: <title>"): the message's opening words stand in for that.
+    private func nameAfterFirstMessage(_ text: String, pane: String) {
+        var agents = snapshot["agents"] as? [[String: Any]] ?? []
+        guard let index = agents.firstIndex(where: { $0["pane_id"] as? String == pane }),
+              (agents[index]["terminal_title_stripped"] as? String ?? "").isEmpty else { return }
+        let title = TranscriptActivity.previewLine(text, limit: 40)
+        agents[index]["terminal_title_stripped"] = title
+        snapshot["agents"] = agents
+        var panes = snapshot["panes"] as? [[String: Any]] ?? []
+        guard let paneIndex = panes.firstIndex(where: { $0["pane_id"] as? String == pane }) else { return }
+        panes[paneIndex]["terminal_title_stripped"] = title
+        snapshot["panes"] = panes
+        broadcast("pane_updated", ["pane": panes[paneIndex]])
+    }
+
+    private func appendTranscript(record: [String: Any], pane: String) {
+        guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) else { return }
+        let path = DemoScenario.transcriptPath(pane)
+        let addition = Data(bytes + [0x0A])
+        transcripts[path, default: Data()].append(addition)
+        guard let data = transcripts[path] else { return }
+        for (id, open) in channels {
+            if case .file(let filePath, let offset) = open.role, filePath == path {
+                if data.count > offset { open.channel.send(Data(data.dropFirst(offset))) }
+                channels[id]?.role = .file(path: path, offset: data.count)
+            }
         }
     }
 
@@ -388,7 +612,7 @@ private actor DemoEngine {
             }
         case .append(let pane, let path):
             let hostPath = DemoScenario.transcriptPath(pane)
-            transcripts[hostPath, default: Data()].append(scenario.transcriptFiles[path] ?? Data())
+            transcripts[hostPath, default: Data()].append(Self.timestamped(scenario.transcriptFiles[path] ?? Data(), pane: pane, now: Date(), live: true))
             guard let data = transcripts[hostPath] else { return }
             for (id, open) in channels {
                 if case .file(let path, let offset) = open.role, path == hostPath {

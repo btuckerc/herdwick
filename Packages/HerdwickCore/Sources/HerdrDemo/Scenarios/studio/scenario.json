@@ -38,7 +38,7 @@
       {"pane_id": "p7", "workspace_id": "w4", "tab_id": "t6", "agent_status": "idle", "agent": "claude", "display_agent": "claude", "name": null, "cwd": "/Users/alex/src/docs", "terminal_title_stripped": "API reference pass", "focused": true, "state_change_seq": 6}
     ]
   },
-  "transcripts": {"p1": "transcripts/p1.jsonl", "p2": "transcripts/p2.jsonl", "p5": "transcripts/p5.jsonl"},
+  "transcripts": {"p1": "transcripts/p1.jsonl", "p2": "transcripts/p2.jsonl", "p3": "transcripts/p3.jsonl", "p4": "transcripts/p4.jsonl", "p5": "transcripts/p5.jsonl", "p7": "transcripts/p7.jsonl"},
   "childTranscripts": {"p5": {"redis-check": "transcripts/redis-check.jsonl", "boundary-tests": "transcripts/boundary-tests.jsonl"}},
   "screens": {
     "p1": "screens/p1-question.screen",

@@ -1,0 +1,61 @@
+{
+  "extends": "studio",
+  "transcripts": {
+    "p1": "../studio/transcripts/p1.jsonl",
+    "p2": "transcripts/p2.jsonl",
+    "p3": "../studio/transcripts/p3.jsonl",
+    "p4": "../studio/transcripts/p4.jsonl",
+    "p5": "../studio/transcripts/p5.jsonl",
+    "p7": "../studio/transcripts/p7.jsonl"
+  },
+  "childTranscripts": {
+    "p5": {
+      "redis-check": "../studio/transcripts/redis-check.jsonl",
+      "boundary-tests": "../studio/transcripts/boundary-tests.jsonl"
+    }
+  },
+  "setup": [
+    {
+      "do": "status",
+      "pane": "p2",
+      "status": "blocked"
+    },
+    {
+      "do": "screen",
+      "pane": "p2",
+      "screen": "screens/p2-approval.screen"
+    }
+  ],
+  "timeline": [
+    {
+      "on": "send_keys",
+      "pane": "p2",
+      "then": [
+        {
+          "after": 0.1,
+          "do": "screen",
+          "pane": "p2",
+          "screen": "../studio/screens/p2-review.screen"
+        },
+        {
+          "after": 0.2,
+          "do": "status",
+          "pane": "p2",
+          "status": "working"
+        },
+        {
+          "after": 3.9,
+          "do": "append",
+          "pane": "p2",
+          "records": "transcripts/p2-approved.jsonl"
+        },
+        {
+          "after": 4.2,
+          "do": "status",
+          "pane": "p2",
+          "status": "done"
+        }
+      ]
+    }
+  ]
+}

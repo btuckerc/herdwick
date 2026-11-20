@@ -1,0 +1,4 @@
+ Run this exact command with the bash tool using pty: true: read -p 'Overwrite config.yml? [y/N] ' a; echo got:$a
+
+╭── 󰪣 Haiku 4.5   work-pty ─────────────────────────────────────────────────────────────────|─────────── 88.3 tok/s ──╮
+╰─                                                                                                                   ──╯

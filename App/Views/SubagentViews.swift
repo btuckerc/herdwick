@@ -48,7 +48,7 @@ struct SubagentGroupRow: View {
         } label: {
             Text(summary)
         }
-        .disclosureGroupStyle(QuietDisclosure())
+        .disclosureGroupStyle(QuietDisclosure(symbol: "person.2.fill"))
     }
 
     private var summary: String { "\(activities.count) subagents · " + (workingCount == 0 ? "all done" : "\(workingCount) working") }
@@ -72,6 +72,7 @@ struct SubagentConversationView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 ForEach(ConversationRow.rows(feed.conversation.items, answered: feed.conversation.items.answeredBriefs(),
+                                             finished: feed.conversation.finishedTurns,
                                              subagents: { feed.conversation.subagents(spawnedBy: $0) })) { row in row.view }
             }.padding(16)
         }

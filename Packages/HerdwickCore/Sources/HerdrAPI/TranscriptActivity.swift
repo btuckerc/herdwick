@@ -22,6 +22,15 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
     /// Newest observed user/assistant text, independently of turn-completion time.
     public private(set) var preview: String?
     public private(set) var previewAt: Date?
+    /// The preview's message's closing warning callout, if any (`caution(_:)`).
+    public private(set) var caution: String?
+    /// The newest record's own time, work inside a turn included: when a blocked agent started
+    /// waiting (its question or approval is the last thing it wrote).
+    public private(set) var activityAt: Date?
+    /// The newest unanswered tool call in the Now line's words ("Running swift test",
+    /// "Editing Store.swift"); nil once its result, the user or the turn's end follows it.
+    public private(set) var step: String?
+    private var stepCall: String?
     /// End of the last complete line read; appends are read from here. Nil before the first read.
     public private(set) var offset: Int?
     /// While looking back for a message: the end of the next page, and pages read so far.
@@ -74,7 +83,8 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
             return
         }
         if let lookBack {
-            let (found, _, text, at) = Self.scanDetails(bytes, format: format, startsMidFile: from > 0, flush: true)
+            // Older pages: the tail already read set where the work stands now.
+            let (found, _, text, at, _) = Self.scanDetails(bytes, format: format, startsMidFile: from > 0, flush: true)
             absorbPreview(text, at: at)
             lastTurnAt = found
             self.lookBack = found == nil && from > 0 && lookBack.pages + 1 < Self.maxLookBackPages
@@ -84,8 +94,9 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
         guard let offset else {
             // First read: the tail. Its last line may still be being written; counting it now
             // is harmless, as it is read again from `offset` once complete.
-            let (found, consumed, text, at) = Self.scanDetails(bytes, format: format, startsMidFile: from > 0, flush: true)
+            let (found, consumed, text, at, entries) = Self.scanDetails(bytes, format: format, startsMidFile: from > 0, flush: true)
             absorbPreview(text, at: at)
+            absorbWork(entries)
             lastTurnAt = found
             self.offset = from + consumed
             if found == nil, from > 0 { lookBack = LookBack(end: from + Self.partialLineLength(bytes), pages: 0) }
@@ -96,8 +107,9 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
             self = TranscriptActivity(path: path, format: format)
             return
         }
-        let (found, consumed, text, at) = Self.scanDetails(bytes, format: format, startsMidFile: midLine, flush: false)
+        let (found, consumed, text, at, entries) = Self.scanDetails(bytes, format: format, startsMidFile: midLine, flush: false)
         absorbPreview(text, at: at)
+        absorbWork(entries)
         if let found { lastTurnAt = max(lastTurnAt ?? found, found) }
         let full = bytes.count >= Self.forwardLimit
         if consumed == 0, full {
@@ -118,14 +130,41 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
         return (result.0, result.1)
     }
 
-    private mutating func absorbPreview(_ text: String?, at: Date?) {
+    private mutating func absorbPreview(_ text: (text: String, caution: String?)?, at: Date?) {
         guard let text else { return }
         if preview == nil || (at != nil && (previewAt == nil || at! >= previewAt!)) {
-            preview = text; previewAt = at
+            preview = text.text; caution = text.caution; previewAt = at
         }
     }
 
-    private static func scanDetails(_ bytes: [UInt8], format: TranscriptFormat, startsMidFile: Bool, flush: Bool) -> (Date?, Int, String?, Date?) {
+    /// Follows `activityAt` and `step` through records in file order.
+    private mutating func absorbWork(_ entries: [TranscriptEntry]) {
+        for entry in entries {
+            switch entry {
+            case .message(let message):
+                if let at = message.timestamp { activityAt = max(activityAt ?? at, at) }
+                switch message.role {
+                case .user: step = nil; stepCall = nil
+                case .toolResult:
+                    if message.toolCallId == stepCall { step = nil; stepCall = nil }
+                case .assistant:
+                    guard !message.toolCalls.isEmpty else { continue }
+                    var conversation = Conversation()
+                    conversation.apply(.message(message))
+                    guard let tool = conversation.runningTools.first else { continue }
+                    // A bare `wait` names nothing a row can use; the row keeps its preview.
+                    step = tool.name == "wait" ? nil : StepRun([.tool(tool)]).running
+                    stepCall = tool.id
+                }
+            case .turnEnded(let at):
+                if let at { activityAt = max(activityAt ?? at, at) }
+                step = nil; stepCall = nil
+            default: break
+            }
+        }
+    }
+
+    private static func scanDetails(_ bytes: [UInt8], format: TranscriptFormat, startsMidFile: Bool, flush: Bool) -> (Date?, Int, (text: String, caution: String?)?, Date?, [TranscriptEntry]) {
         var reader = TranscriptReader(format: format, startsMidFile: startsMidFile)
         var entries = reader.append(bytes)
         // This reader is recreated each scan; leave an unterminated skipped line to
@@ -140,26 +179,136 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
             default: nil
             }
         }.max()
-        var preview: String?, previewAt: Date?
+        var preview: (text: String, caution: String?)?, previewAt: Date?
         for entry in entries {
             guard case .message(let message) = entry, message.role != .toolResult,
                   !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             if preview == nil || message.timestamp == nil || previewAt == nil || message.timestamp! >= previewAt! {
-                var short = "", count = 0, space = false
-                for character in message.text {
-                    if character.isWhitespace { space = !short.isEmpty; continue }
-                    if space {
-                        short.append(" "); count += 1; space = false
-                        if count == 140 { break }
-                    }
-                    short.append(character); count += 1
-                    if count == 140 { break }
-                }
-                preview = short
+                preview = (previewLine(message.text), caution(message.text))
                 previewAt = message.timestamp
             }
         }
-        return (newest, consumed, preview, previewAt)
+        return (newest, consumed, preview, previewAt, entries)
+    }
+
+    /// A message's closing warning callout on one line ("Before deploying: apply 0042 first; …"),
+    /// for a row whose verdict alone would read as all clear (round 41: sa#1, sb#1, opus#2, "No
+    /// blocking findings in PR #412" hid "apply 0042 first"). Only a final top-level paragraph
+    /// counts, as the Done card moves only that one under its verdict, and only its first
+    /// sentence, the thing to do (round 53: sb#10, opus#3, "I left the working tree unchanged"
+    /// took a third loud line in every row). Up to 140 characters: rows give it two lines
+    /// (round 42: at 90 it was cut before "need team IDs").
+    public static func caution(_ text: String) -> String? {
+        guard let last = text.components(separatedBy: "\n\n").map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .last(where: { !$0.isEmpty }), isWarningCallout(last) else { return nil }
+        let first = last.firstMatch(of: /\.\s+(?=[A-Z])/).map { String(last[..<$0.range.lowerBound]) + "." } ?? last
+        return previewLine(first, limit: 140)
+    }
+
+    /// A paragraph led by a bold label naming a warning or deployment ("**Before deploying:**",
+    /// "**Warning:**").
+    public static func isWarningCallout(_ paragraph: String) -> Bool {
+        guard let lead = paragraph.firstMatch(of: /^\*\*([^*]+):\*\*/) else { return false }
+        let label = String(lead.1)
+        return label.localizedCaseInsensitiveContains("warning") || label.localizedCaseInsensitiveContains("deploy")
+    }
+
+    /// A message as one line of at most `limit` characters: whitespace collapsed, Markdown's
+    /// list, heading and quote markers dropped, and list items joined with " · " (a list ran
+    /// into "deployed. - Both migrations applied" as a sentence with a stray dash). Bold and
+    /// code-span marks go too (round 17: "**Move:**" showed literally in Overview's Activity).
+    /// A longer one ends at a word with "…" (round 8: previews stopped mid-word with nothing
+    /// saying so).
+    public static func previewLine(_ text: String, limit: Int = 140) -> String {
+        let (line, cut, atWord) = joinedLine(text, limit: limit)
+        guard cut, limit > 1 else { return line }
+        var short = Substring(line)
+        if !atWord || short.count > limit - 1 {
+            short = short.prefix(limit - 1)
+            if let space = short.lastIndex(of: " "), short.distance(from: short.startIndex, to: space) > limit / 2 {
+                short = short[..<space]
+            }
+        }
+        while let last = short.last, last.isWhitespace || last.isPunctuation { short = short.dropLast() }
+        return "\(short)…"
+    }
+
+    /// A `previewLine`'s opening sentence when a list item follows it, for a row with one line
+    /// to give it: it ends on the verdict, not on the first word of the next item (round 28:
+    /// "No blocking findings in PR #412. · Move: the…"). A lead that isn't a sentence (a heading
+    /// such as "Summary") keeps the whole line.
+    public static func verdict(_ preview: String) -> String {
+        guard let item = preview.range(of: " · ") else { return preview }
+        let lead = preview[..<item.lowerBound]
+        guard let last = lead.last, ".!?".contains(last) else { return preview }
+        return String(lead)
+    }
+
+    /// A `previewLine` with each list item on a line of its own, for a preview given several
+    /// lines: a result reads as its verdict over its points rather than one run-on line (round
+    /// 29: "No blocking findings in PR #412. · Move: the old team's… · Access…").
+    public static func itemLines(_ preview: String) -> String {
+        preview.replacingOccurrences(of: " · ", with: "\n")
+    }
+
+    /// A `previewLine` split for a preview given several lines: its opening sentence, the
+    /// verdict, and the rest with each list item on a line of its own (`itemLines`), nil when
+    /// there's none. Prose after the verdict counts too (round 31: "Fixed. The test now runs …"
+    /// stayed one grey block where "No blocking findings. · Move: …" had its verdict apart).
+    /// A sentence ends at ".", "!" or "?" before a capital or digit, in the text before the first
+    /// list item; without one the lead before a list is the verdict, else the whole preview. An
+    /// opening of one or two words ("Fixed.", "All set.") only acknowledges, so the verdict runs
+    /// on through the next sentence, or the whole lead (round 32: a bright "Fixed." over the
+    /// grey sentence that said what was fixed).
+    public static func opening(_ preview: String) -> (verdict: String, rest: String?) {
+        let head = preview[..<(preview.range(of: " · ")?.lowerBound ?? preview.endIndex)]
+        let sentenceEnd = /[.!?] (?=[A-Z0-9])/
+        if var end = head.firstRange(of: sentenceEnd) {
+            if head[..<end.lowerBound].split(separator: " ").count <= 2 {
+                guard let next = head[end.upperBound...].firstRange(of: sentenceEnd) else {
+                    let rest = preview[head.endIndex...].dropFirst(" · ".count)
+                    return (String(head), rest.isEmpty ? nil : itemLines(String(rest)))
+                }
+                end = next
+            }
+            return (String(preview[...end.lowerBound]), itemLines(String(preview[end.upperBound...])))
+        }
+        let lead = verdict(preview)
+        guard lead != preview else { return (preview, nil) }
+        return (lead, itemLines(String(preview.dropFirst(lead.count + " · ".count))))
+    }
+
+    /// The message's lines run together as `previewLine` describes, up to `limit` characters;
+    /// `cut` when some of it didn't fit, `atWord` when that was at a word's end.
+    private static func joinedLine(_ text: String, limit: Int) -> (line: String, cut: Bool, atWord: Bool) {
+        var short = "", count = 0
+        for line in text.split(whereSeparator: \.isNewline) {
+            var body = line.drop { $0.isWhitespace }
+            var item = false
+            if let first = body.first, "-*+•".contains(first), body.dropFirst().first?.isWhitespace == true {
+                body = body.dropFirst(2); item = true
+            } else if case let digits = body.prefix(while: \.isNumber), !digits.isEmpty, digits.count <= 3,
+                      let mark = body.dropFirst(digits.count).first, mark == "." || mark == ")",
+                      body.dropFirst(digits.count + 1).first?.isWhitespace == true {
+                body = body.dropFirst(digits.count + 2); item = true
+            } else if body.first == "#" || body.first == ">",
+                      body.drop(while: { $0 == "#" || $0 == ">" }).first?.isWhitespace != false {
+                body = body.drop { $0 == "#" || $0 == ">" }
+            }
+            var space = !short.isEmpty
+            var separator = item && !short.isEmpty
+            for character in body.replacingOccurrences(of: "**", with: "").filter({ $0 != "`" }) {
+                if character.isWhitespace { space = !short.isEmpty; continue }
+                if separator || space {
+                    let gap = separator ? " · " : " "
+                    if count + gap.count + 1 > limit { return (short, true, true) }
+                    short += gap; count += gap.count; separator = false; space = false
+                }
+                if count + 1 > limit { return (short, true, false) }
+                short.append(character); count += 1
+            }
+        }
+        return (short, false, false)
     }
 
     /// Bytes up to and including the first newline: the line a mid-file read cannot parse.

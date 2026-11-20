@@ -4,9 +4,11 @@ import Foundation
 /// the foreground and stops when it comes back.
 ///
 /// Footprint while armed, per watched agent: one `herdr agent wait` blocked on herdr's socket
-/// (measured at no CPU and no wakeups, about 6 MB) and its `sh` loop. Once every 120 s one
-/// `herdr agent list` (about 20 ms of CPU) finds agents started meanwhile. Each alert is one
-/// `curl`. Disarmed, nothing runs. The watcher exits on its own after `ttl` or when herdr stops.
+/// (measured at no CPU and no wakeups, about 6 MB) and its `sh` loop. For each working omp pane,
+/// one transcript tail plus `perl`/JSON::PP every 15 s; a pending PTY call adds one pane read.
+/// Once every 120 s one `herdr agent list` (about 20 ms of CPU) finds agents started meanwhile.
+/// Each alert is one `curl`. Disarmed, nothing runs. The watcher exits on its own after `ttl` or
+/// when herdr stops. PTY detection needs `perl` with the core JSON::PP module.
 ///
 /// A post carries only opaque ids (host, session, pane, state, change number); the phone
 /// supplies names it already knows. Secrets travel on stdin and live in a 0600 file.
@@ -245,15 +247,166 @@ public enum PushWatch {
         EOF
         }
 
+        jsonpp=no
+        perl -MJSON::PP -e1 >/dev/null 2>&1 && jsonpp=yes || :
+
         # One blocked wait at a time per pane: until it works, then until it stops.
         follow() {
+            probe() {
+                [ "$jsonpp" = yes ] || return 0
+                agent_json=$1
+                perl - "$agent_json" <<'PERL'
+        use strict; use warnings; use JSON::PP; use Time::Local qw(timegm);
+        my $x = eval { decode_json($ARGV[0]) } or exit;
+        my @q = ($x);
+        my $path;
+        while (@q) {
+            my $v = shift @q;
+            next unless ref($v) eq 'HASH';
+            if (($v->{agent} // '') eq 'omp' && ref($v->{agent_session}) eq 'HASH'
+                && ($v->{agent_session}{kind} // '') eq 'path'
+                && defined($v->{agent_session}{value})) {
+                $path = $v->{agent_session}{value}; last;
+            }
+            push @q, values %$v;
+        }
+        exit unless defined($path) && -f $path;
+        my $size = -s $path;
+        open my $tail, '-|', 'tail', '-c', '262144', $path or exit;
+        local $/;
+        my $text = <$tail> // '';
+        close $tail;
+        my @lines = split /\n/, $text, -1;
+        shift @lines if $size > 262144; # first tail line may be partial
+        my (@records, $last);
+        for my $line (@lines) {
+            my $r = eval { decode_json($line) };
+            next unless ref($r) eq 'HASH';
+            push @records, $r;
+            $last = $r if ($r->{type} // '') eq 'message';
+        }
+        exit unless $last && ref($last->{message}) eq 'HASH';
+        my $m = $last->{message};
+        if (($m->{role} // '') eq 'assistant' && ref($m->{content}) eq 'ARRAY'
+            && @{$m->{content}}) {
+            my $c = $m->{content}[-1];
+            if (ref($c) eq 'HASH' && ($c->{type} // '') eq 'toolCall'
+                && ($c->{name} // '') eq 'bash' && ref($c->{arguments}) eq 'HASH'
+                && JSON::PP::is_bool($c->{arguments}{pty}) && $c->{arguments}{pty}) {
+                my $id = $c->{id} // '';
+                my $done = grep {
+                    ref($_->{message}) eq 'HASH'
+                    && ($_->{message}{role} // '') eq 'toolResult'
+                    && ($_->{message}{toolCallId} // '') eq $id
+                } @records;
+                # omp stamps the message in epoch ms and the record in ISO 8601 UTC.
+                my $at = defined($m->{timestamp}) ? int($m->{timestamp} / 1000) : undef;
+                if (!defined($at) && ($last->{timestamp} // '') =~ /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)/) {
+                    $at = timegm($6, $5, $4, $3, $2 - 1, $1);
+                }
+                unless ($done || !$id || !defined($at)) {
+                    print "pty $id $at\n";
+                    exit;
+                }
+            }
+        }
+        if (($m->{role} // '') eq 'toolResult' && !$m->{isError}
+            && ($m->{toolName} // '') eq 'write' && ref($m->{content}) eq 'ARRAY') {
+            my $text = join '', map { ref($_) eq 'HASH' ? ($_->{text} // '') : '' } @{$m->{content}};
+            if ($text =~ s/^\s+|\s+$//gr eq 'Plan ready for review.') {
+                my $id = $m->{toolCallId} // '';
+                for my $r (@records) {
+                    my $a = $r->{message};
+                    next unless ref($a) eq 'HASH' && ($a->{role} // '') eq 'assistant'
+                        && ref($a->{content}) eq 'ARRAY';
+                    for my $c (@{$a->{content}}) {
+                        if (ref($c) eq 'HASH' && ($c->{type} // '') eq 'toolCall'
+                            && ($c->{id} // '') eq $id && ($c->{name} // '') eq 'write'
+                            && ref($c->{arguments}) eq 'HASH'
+                            && ($c->{arguments}{path} // '') eq 'xd://propose'
+                            && length($c->{arguments}{content} // '')) {
+                            print "plan $id\n"; exit;
+                        }
+                    }
+                }
+            }
+        }
+        PERL
+            }
+
             while out=$("$herdr" --session "$session" agent wait "$1" --until working); do
-                activity "$1" working "$(field "$out" state_change_seq)"
-                out=$("$herdr" --session "$session" agent wait "$1") || break
+                seq=$(field "$out" state_change_seq)
+                activity "$1" working "$seq"
+                wait_out="$run/wait.$1"
+                if [ "$jsonpp" = yes ]; then
+                    # Wait in the background so the transcript can be probed meanwhile; the
+                    # wait cuts the current probe sleep short, so done alerts aren't delayed.
+                    # It marks itself done before looking for the sleep, and a sleep is
+                    # published before the mark is checked, so neither side misses the other.
+                    done_mark="$run/done.$1"
+                    rm -f "$done_mark"
+                    (
+                        "$herdr" --session "$session" agent wait "$1" >"$wait_out"
+                        rc=$?
+                        : > "$done_mark"
+                        sleeper=$(cat "$run/sleep.$1" 2>/dev/null || :)
+                        [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null
+                        exit $rc
+                    ) &
+                    wait_pid=$!
+                    while [ ! -e "$done_mark" ] && kill -0 "$wait_pid" 2>/dev/null; do
+                        sleep "${HW_PROBE:-15}" &
+                        sleep_pid=$!
+                        printf '%s\n' "$sleep_pid" > "$run/sleep.$1"
+                        [ -e "$done_mark" ] && kill "$sleep_pid" 2>/dev/null
+                        wait "$sleep_pid" || :
+                        rm -f "$run/sleep.$1"
+                        if [ -e "$done_mark" ] || ! kill -0 "$wait_pid" 2>/dev/null; then break; fi
+                        result=$(probe "$out" 2>/dev/null || :)
+                        IFS=' ' read -r kind tool_id timestamp <<EOF
+        $result
+        EOF
+                        if [ "$kind" = pty ] && [ -n "$tool_id" ] && [ -n "$timestamp" ] &&
+                           [ "$(($(date +%s) - $timestamp))" -ge 10 ]; then
+                            id=$(printf '%s' "$tool_id" | tr -cd 'A-Za-z0-9._-')
+                            marker="$run/pty.$id"
+                            if [ -n "$id" ] && [ ! -e "$marker" ]; then
+                                screen=$("$herdr" --session "$session" pane read "$1" --source visible --format text 2>/dev/null || :)
+                                if printf '%s\n' "$screen" | grep -F '⟨running⟩' >/dev/null &&
+                                   printf '%s\n' "$screen" | grep -F 'input forwarded to PTY' >/dev/null; then
+                                    # From the command on: the spinner before it turns between reads.
+                                    overlay=$(printf '%s\n' "$screen" | awk '/⟨running⟩/{take=1; i=index($0, "Console "); if (i) $0=substr($0, i)} take{print} /input forwarded to PTY/{exit}')
+                                    checksum=$(printf '%s\n' "$overlay" | cksum)
+                                    previous=$(cat "$run/pty.$id.check" 2>/dev/null || :)
+                                    printf '%s\n' "$checksum" > "$run/pty.$id.check"
+                                    if [ -n "$previous" ] && [ "$previous" = "$checksum" ]; then
+                                        : > "$marker"
+                                        activity "$1" blocked "$seq"
+                                        post "$1" blocked "$seq" "$out"
+                                    fi
+                                else
+                                    rm -f "$run/pty.$id.check"
+                                fi
+                            fi
+                        fi
+                    done
+                    wait "$wait_pid" || break
+                    rm -f "$done_mark"
+                    out=$(cat "$wait_out")
+                else
+                    out=$("$herdr" --session "$session" agent wait "$1") || break
+                fi
                 state=$(field "$out" agent_status)
                 [ "$state" = idle ] && state=done
-                activity "$1" "$state" "$(field "$out" state_change_seq)"
-                post "$1" "$state" "$(field "$out" state_change_seq)" "$out"
+                if [ "$state" = done ] && [ "$jsonpp" = yes ]; then
+                    plan=$(probe "$out" 2>/dev/null || :)
+                    if [ -z "$plan" ]; then sleep 2; plan=$(probe "$out" 2>/dev/null || :); fi
+                    case $plan in plan\ *) state=blocked ;; esac
+                fi
+                final_seq=$(field "$out" state_change_seq)
+                activity "$1" "$state" "$final_seq"
+                post "$1" "$state" "$final_seq" "$out"
+                rm -f "$wait_out"
             done
             rm -f "$run/$1"
         }

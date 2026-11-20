@@ -1,0 +1,35 @@
+
+ Use the ask tool exactly once. Ask one single-select question: id 'color', header 'Color', question 'Which color?',
+ options Red, Green, Blue, recommended index 1. Stop and wait for my answer.
+
+
+ You selected Red.
+
+
+ Use the ask tool exactly once. Ask one question: id 'fruit', header 'Fruit', question 'Which fruit?', options Apple,
+ Banana, Cherry, multi true. Stop and wait for my answer.
+
+
+ You selected Apple and Banana.
+
+
+ Use the ask tool exactly once. Ask 2 questions: id 'color', header 'Color', question 'Which color?', single-select
+ options Red, Green, Blue, recommended index 1; id 'toppings', header 'Toppings', question 'Which toppings?', options
+ Cheese, Olives, Basil, multi true. Stop and wait for my answer.
+
+
+  󱊷 Working…
+╭─ Ask ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  Color    Toppings    Submit                                                                                        │
+│ Review answers                                                                                                      │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 1. Color: Red                                                                                                       │
+│ 2. Toppings: Cheese, Olives                                                                                         │
+│                                                                                                                     │
+│  Submit                                                                                                             │
+│                                                                                                                     │
+│                                                                                                                     │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 󰌑 submit · ↑/↓ scroll · 󱊷 cancel · Alt+H hide                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+tmp

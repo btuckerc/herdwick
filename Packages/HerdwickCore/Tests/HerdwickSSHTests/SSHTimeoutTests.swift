@@ -45,3 +45,21 @@ import Testing
         #expect(ContinuousClock.now - started < .seconds(5))
     }
 }
+
+@Suite struct SSHRefusedTests {
+    /// A host with nothing on its SSH port (sshd off) is a fix only the user can make,
+    /// so it surfaces as its own error instead of a generic, retried connect failure.
+    @Test(.timeLimit(.minutes(1))) func closedPortIsConnectionRefused() async throws {
+        let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .bind(host: "127.0.0.1", port: 0).get()
+        let port = try #require(server.localAddress?.port)
+        try await server.close()
+
+        await #expect(throws: SSHError.connectionRefused) {
+            _ = try await SSHConnection.connect(
+                host: "127.0.0.1", port: port, username: "nobody", authentication: .none,
+                hostKeyValidator: { _ in true }, timeout: .seconds(5)
+            )
+        }
+    }
+}

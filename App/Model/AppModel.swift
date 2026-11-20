@@ -10,6 +10,8 @@ final class AppModel {
     private(set) var profiles: [HostProfile]
     private var primary: [HostProfile.ID: HostConnection] = [:]
     private var additional: [SessionAddress: HostConnection] = [:]
+    /// Sessions a notification action is using: reconciliation leaves their links running.
+    @ObservationIgnored private var actionHolds: [SessionAddress: Int] = [:]
     private var demoConnection: HostConnection?
     private var initialHostID: HostProfile.ID?
     private var scenes: [UUID: SceneState] = [:]
@@ -79,10 +81,60 @@ final class AppModel {
     func connection(for address: PaneAddress) -> HostConnection? {
         connection(for: SessionAddress(hostID: address.hostID, session: address.session))
     }
+
+    /// Notification actions can wake the app without a scene. Wakes the host's own links rather
+    /// than making one (session discovery owns them, and could stop a link made here mid-send),
+    /// waits briefly for a fresh snapshot with the pane, and holds the session's link until
+    /// `body` returns. Afterwards, in the background, the links go back to sleep.
+    private func withNotificationConnection(_ address: PaneAddress, _ body: (HostConnection?) async -> Void) async {
+        let key = SessionAddress(hostID: address.hostID, session: address.session)
+        guard demo == nil, profiles.contains(where: { $0.id == address.hostID && $0.isEnabled }) else {
+            await body(nil)
+            return
+        }
+        actionHolds[key, default: 0] += 1
+        defer { releaseNotificationHold(key) }
+        func ready() -> HostConnection? {
+            guard let link = connection(for: key) ?? additional[key], link.isLive,
+                  link.snapshot?.agents.contains(where: { $0.paneID == address.paneID }) == true else { return nil }
+            return link
+        }
+        if let link = ready() {
+            await body(link)
+            return
+        }
+        reconcile()
+        tailnet.recover()
+        var woken: Set<ObjectIdentifier> = []
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline, !Task.isCancelled {
+            // The primary link finds the session; a session it doesn't show gets its own link.
+            for link in [primary[address.hostID], additional[key]].compactMap({ $0 })
+            where !link.isLive && woken.insert(ObjectIdentifier(link)).inserted {
+                link.handle(.userRetry)
+            }
+            if let link = ready() {
+                await body(link)
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        await body(nil)
+    }
+
+    private func releaseNotificationHold(_ key: SessionAddress) {
+        actionHolds[key, default: 1] -= 1
+        if actionHolds[key] == 0 { actionHolds[key] = nil }
+        reconcile()
+        if let link = primary[key.hostID] { reconcileSessions(link) }
+        guard actionHolds.isEmpty, !isForeground, handoff == nil else { return }
+        for link in connections { link.handle(.backgrounded) }
+    }
     /// Set while the demo host is showing (onboarding's "Explore a Demo", or a marketing capture).
     private(set) var demo: DemoDirector?
     let settings = Settings()
     let tailnet = Tailnet()
+    let decisionLog = DecisionLog()
 
     private let pathMonitor = NWPathMonitor()
     private var pathSignature: String?
@@ -103,6 +155,11 @@ final class AppModel {
         profiles = ProfileStorage.load()
         attention = Attention(settings: settings, links: { [weak self] in self?.connections ?? [] },
                               profiles: { [weak self] in self?.profiles ?? [] },
+                              decisionLog: decisionLog,
+                              connectionForAction: { [weak self] address, body in
+                                  guard let self else { return await body(nil) }
+                                  await self.withNotificationConnection(address, body)
+                              },
                               pushOwns: { [weak self] in self?.push?.ownsAlerts(for: $0) ?? false },
                               onScreen: { [weak self] in self?.onScreen ?? [] },
                               open: { [weak self] address, draftID in
@@ -112,6 +169,7 @@ final class AppModel {
                                   self.resolveReply()
                               })
         settings.onNotifyNeedsYouChange = { [weak self] in self?.attention?.refresh() }
+        settings.onAnswerFromNotificationsChange = { [weak self] in self?.attention?.registerCategories() }
         push = Push(settings: settings)
         tailnet.carriesLiveLink = { [weak self] in self?.connections.contains(where: \.ridesTailnet) ?? false }
         if profiles.contains(where: { $0.isTailnet && $0.isEnabled }) || tailnet.isConfigured {
@@ -174,8 +232,12 @@ final class AppModel {
         guard demo == nil else { return }
         defer { attention?.refresh() }
         let selected = Set(scenes.values.compactMap(\.selectedHostID) + [initialHostID, watchedRun.address?.hostID].compactMap { $0 })
-        // A host that's off is linked only while it's selected, and that link never dials.
-        let desired = Set(profiles.filter { selected.contains($0.id) || settings.allHosts && $0.isEnabled }.map(\.id))
+        // A host that's off is linked only while it's selected, and that link never dials. An
+        // enabled host a notification action is answering stays linked until the action ends.
+        let held = Set(actionHolds.keys.map(\.hostID))
+        let desired = Set(profiles.filter {
+            selected.contains($0.id) || (settings.allHosts || held.contains($0.id)) && $0.isEnabled
+        }.map(\.id))
         for id in Array(primary.keys) where !desired.contains(id) {
             primary.removeValue(forKey: id)?.stop()
         }
@@ -209,7 +271,8 @@ final class AppModel {
         defer { attention?.refresh() }
         let names = Set(primaryLink.sessions.filter(\.running).map(\.name))
         let desired = names.subtracting(primaryLink.activeSession.map { [$0] } ?? [])
-        for key in Array(additional.keys) where key.hostID == primaryLink.profile.id && !desired.contains(key.session) {
+        for key in Array(additional.keys) where key.hostID == primaryLink.profile.id && !desired.contains(key.session)
+            && actionHolds[key] == nil {
             additional.removeValue(forKey: key)?.stop()
         }
         for name in desired.sorted() {
@@ -377,7 +440,7 @@ final class AppModel {
 
     private func changed(_ link: HostConnection) {
         attention?.changed(link)
-        if isForeground { watchedRun.changed(link, push: push) }
+        if isForeground { watchedRun.changed(link, previews: settings.inboxPreviews, push: push) }
         resolveReply()
     }
 

@@ -139,7 +139,7 @@ struct EndedAgentView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 Button("Resume in New Tab", systemImage: "play", action: resume)
-                    .buttonStyle(.glassProminent).disabled(!connection.isLive).padding()
+                    .primaryAction().disabled(!connection.isLive).padding()
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }

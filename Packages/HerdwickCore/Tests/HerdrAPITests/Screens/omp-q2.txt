@@ -1,0 +1,10 @@
+╭─ Ask ─╮
+│  size    drink    Submit │
+│ Which drink? │
+├─────┤
+│    Tea │
+│   Coffee │
+│    Other (type your own) │
+├─────┤
+│ Enter select · ↑/↓ move · Esc cancel │
+╰─────╯

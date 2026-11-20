@@ -17,7 +17,10 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     /// The conversation on screen, whose own alerts would be noise.
     private let onScreen: () -> Set<PaneAddress>
     private let open: (PaneAddress, String?) -> Void
-
+    private let decisionLog: DecisionLog
+    /// Wakes the session's link for a notification action and holds it until `body` returns.
+    private let connectionForAction: @MainActor (PaneAddress, (HostConnection?) async -> Void) async -> Void
+    private let inlineAnswers = InlineAnswers()
     private let center = UNUserNotificationCenter.current()
     /// Pane key → the `state_change_seq` last alerted, so a reconnect, a background refresh or
     /// a push the notification service already showed never repeats an alert. A pane seen for
@@ -25,6 +28,12 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     private var alerted: [String: Int] {
         get { AttentionSnapshot.shared?.dictionary(forKey: AttentionSnapshot.alertedKey) as? [String: Int] ?? [:] }
         set { AttentionSnapshot.shared?.set(newValue, forKey: AttentionSnapshot.alertedKey) }
+    }
+    /// Pane key → the wait (see `HostConnection.Wait`) last alerted. A wait leaves the
+    /// sequence where it was, so it is tracked by its own id, once per wait.
+    private var alertedWaits: [String: String] {
+        get { AttentionSnapshot.shared?.dictionary(forKey: "alertedWaits") as? [String: String] ?? [:] }
+        set { AttentionSnapshot.shared?.set(newValue, forKey: "alertedWaits") }
     }
     private var badge = -1
     private var published: AttentionSnapshot?
@@ -41,11 +50,14 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     }
 
     init(settings: Settings, links: @escaping () -> [HostConnection], profiles: @escaping () -> [HostProfile],
+         decisionLog: DecisionLog, connectionForAction: @escaping @MainActor (PaneAddress, (HostConnection?) async -> Void) async -> Void,
          pushOwns: @escaping (SessionAddress) -> Bool,
          onScreen: @escaping () -> Set<PaneAddress>, open: @escaping (PaneAddress, String?) -> Void) {
         self.settings = settings
         self.links = links
         self.profiles = profiles
+        self.decisionLog = decisionLog
+        self.connectionForAction = connectionForAction
         self.pushOwns = pushOwns
         self.onScreen = onScreen
         self.open = open
@@ -54,11 +66,35 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         published = AttentionSnapshot.load()
         super.init()
         center.delegate = self
-        let reply = UNTextInputNotificationAction(identifier: "reply-in-app", title: "Reply in App",
-                                                  options: [.foreground, .authenticationRequired],
-                                                  textInputButtonTitle: "Review in App", textInputPlaceholder: "Draft reply")
-        center.setNotificationCategories([UNNotificationCategory(identifier: "finished-reply", actions: [reply],
-                                                                 intentIdentifiers: [], options: [])])
+        registerCategories()
+    }
+
+    func registerCategories() {
+        let replyInApp = UNTextInputNotificationAction(identifier: "reply-in-app", title: "Reply in App",
+                                                       options: [.foreground, .authenticationRequired],
+                                                       textInputButtonTitle: "Review in App", textInputPlaceholder: "Draft reply")
+        var categories = [UNNotificationCategory(identifier: "finished-reply", actions: [replyInApp],
+                                                   intentIdentifiers: [], options: [])]
+        if settings.answerFromNotifications {
+            // "Approve Once": it only ever picks a plain one-time option (`oneTimeApproval`),
+            // so it says so, as the inbox and thread do beside a lasting grant (round 57: opus#2).
+            let approve = UNNotificationAction(identifier: "answer-approve", title: "Approve Once",
+                                               options: [.authenticationRequired])
+            let deny = UNNotificationAction(identifier: "answer-deny", title: "Deny",
+                                            options: [.destructive, .authenticationRequired])
+            let ask = UNTextInputNotificationAction(identifier: "answer-ask", title: "Reply",
+                                                    options: [.authenticationRequired],
+                                                    textInputButtonTitle: "Send", textInputPlaceholder: "Answer")
+            let finished = UNTextInputNotificationAction(identifier: "answer-finished", title: "Reply",
+                                                         options: [.authenticationRequired],
+                                                         textInputButtonTitle: "Send", textInputPlaceholder: "Message")
+            categories += [
+                UNNotificationCategory(identifier: "needs-you-approval", actions: [approve, deny], intentIdentifiers: [], options: []),
+                UNNotificationCategory(identifier: "needs-you-ask", actions: [ask], intentIdentifiers: [], options: []),
+                UNNotificationCategory(identifier: "finished-answer", actions: [finished], intentIdentifiers: [], options: [])
+            ]
+        }
+        center.setNotificationCategories(Set(categories))
     }
 
     /// Asks once; false when the user declined now or before.
@@ -86,17 +122,38 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         }
         var settled: [String] = []
         var alerted = alerted
-        defer { if alerted != self.alerted { self.alerted = alerted } }
+        var alertedWaits = alertedWaits
+        defer {
+            if alerted != self.alerted { self.alerted = alerted }
+            if alertedWaits != self.alertedWaits { self.alertedWaits = alertedWaits }
+        }
         for agent in snapshot.agents {
             let address = link.address(paneID: agent.paneID)
             let key = Self.key(address)
             let seq = agent.stateChangeSeq ?? 0
+            if let wait = link.wait(agent) {
+                if link.isUnread(agent) {
+                    // While the push watcher owns this host it stays pending, as other alerts do.
+                    if alertedWaits[key] != wait.id, !pushOwns(link.identity) {
+                        alertedWaits[key] = wait.id
+                        // The finish a Plan Review stopped at is this alert, not a second one.
+                        alerted[key] = max(alerted[key] ?? seq, seq)
+                        if !link.silentWaits.contains(wait.id) { post(agent, address: address, link: link) }
+                        else { offerAnswers(agent, wait: wait, address: address, link: link) }
+                    }
+                } else {
+                    settled.append(key)
+                }
+                continue
+            }
             guard let last = alerted[key] else {
                 alerted[key] = seq
                 continue
             }
             if link.isUnread(agent) {
                 guard seq > last, !pushOwns(link.identity) else { continue }
+                // An omp finish may be a Plan Review its conversation hasn't been checked for yet.
+                if agent.agent == "omp", agent.agentStatus != .blocked, !link.waitChecked(agent) { continue }
                 alerted[key] = seq
                 post(agent, address: address, link: link)
             } else {
@@ -119,22 +176,65 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         }
     }
 
-    private func post(_ agent: Agent, address: PaneAddress, link: HostConnection) {
+    /// Herdr's blocked transition alerts before the screen probe finds its prompt, so that alert
+    /// has no actions, and the wait it then finds stays silent. While that alert is still in
+    /// Notification Centre and the agent is at the same change, it is replaced quietly by one
+    /// that can answer the wait.
+    private func offerAnswers(_ agent: Agent, wait: HostConnection.Wait, address: PaneAddress, link: HostConnection) {
+        guard settings.answerFromNotifications, link.presentedStatus(agent) == .blocked else { return }
+        let id = Self.key(address)
+        let seq = agent.stateChangeSeq ?? 0
+        let waitID = wait.id
+        center.getDeliveredNotifications { notes in
+            let actionless = notes.contains { note in
+                note.request.identifier == id && note.request.trigger == nil
+                    && note.request.content.categoryIdentifier.isEmpty
+                    && note.request.content.userInfo["stateChangeSeq"] as? Int == seq
+            }
+            guard actionless else { return }
+            Task { @MainActor [weak self] in
+                guard let agent = link.snapshot?.agents.first(where: { $0.paneID == address.paneID }),
+                      agent.stateChangeSeq ?? 0 == seq, link.wait(agent)?.id == waitID else { return }
+                self?.post(agent, address: address, link: link, quiet: true)
+            }
+        }
+    }
+
+    private func post(_ agent: Agent, address: PaneAddress, link: HostConnection, quiet: Bool = false) {
         guard !Mutes.shared.isMuted(address, reference: agent.agentSession?.value) else { return }
-        let blocked = agent.agentStatus == .blocked
+        let blocked = link.presentedStatus(agent) == .blocked
         guard blocked ? settings.notifyNeedsYou : settings.notifyFinished else { return }
         let content = UNMutableNotificationContent()
         content.title = agent.conversationTitle
         content.subtitle = [link.profile.name, agent.workingDirectory.map { ($0 as NSString).lastPathComponent }]
             .compactMap { $0 }.joined(separator: " · ")
-        content.body = blocked ? "Needs you" : "Finished"
-        content.sound = blocked ? .default : nil
+        let wait = link.wait(agent)
+        content.body = blocked ? wait?.summary ?? "Needs you" : "Done"
+        content.sound = blocked && !quiet ? .default : nil
         content.threadIdentifier = "\(address.hostID.uuidString)/\(address.session)"
-        content.userInfo = ["host": address.hostID.uuidString, "session": address.session, "pane": address.paneID]
+        content.userInfo = [
+            "host": address.hostID.uuidString, "session": address.session, "pane": address.paneID,
+            "stateChangeSeq": agent.stateChangeSeq ?? 0, "agentName": agent.name
+        ]
+        if let ref = agent.agentSession {
+            content.userInfo["reference"] = ref.value
+            content.userInfo["referenceSource"] = ref.source
+            content.userInfo["referenceAgent"] = ref.agent
+            content.userInfo["referenceKind"] = ref.kind
+            if let id = DraftStore.id(host: link.identity, agent: agent) { content.userInfo["draftID"] = id }
+        }
+        if blocked, settings.answerFromNotifications, let wait {
+            content.userInfo["waitID"] = wait.id
+            let thread = Thread(address: address, connection: link, agent: agent, workspace: nil, tab: nil)
+            if let prompt = wait.prompt, prompt.style == .choice, PromptOptionKind.oneTimeApproval(in: prompt.options) != nil {
+                content.categoryIdentifier = "needs-you-approval"
+            } else if let inline = inlineAnswers.choices(for: thread), case .ask = inline.choices {
+                content.categoryIdentifier = "needs-you-ask"
+            }
+        }
         if !blocked, let id = DraftStore.id(host: link.identity, agent: agent), agent.agentSession != nil {
-            content.categoryIdentifier = "finished-reply"
+            content.categoryIdentifier = settings.answerFromNotifications ? "finished-answer" : "finished-reply"
             content.userInfo["draftID"] = id
-            content.userInfo["reference"] = agent.agentSession?.value
         }
         center.add(UNNotificationRequest(identifier: Self.key(address), content: content, trigger: nil))
     }
@@ -142,7 +242,7 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     /// The badge counts agents waiting on you, read or not; finished work is not a debt.
     private func refreshBadge() {
         let count = settings.notifyNeedsYou ? links().reduce(0) { total, link in
-            total + (link.snapshot?.agents.count { $0.agentStatus == .blocked } ?? 0)
+            total + (link.snapshot?.agents.count { link.presentedStatus($0) == .blocked } ?? 0)
         } : 0
         guard count != badge else { return }
         badge = count
@@ -233,16 +333,155 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
-        if let reply = response as? UNTextInputNotificationResponse, response.actionIdentifier == "reply-in-app",
-           let id = info["draftID"] as? String, response.notification.request.trigger == nil {
-            // Only app-issued local alerts carry a trusted draft identity. Never send here.
-            let old = DraftStore.load(id) ?? ""
-            DraftStore.save(old.isEmpty ? reply.userText : old + "\n" + reply.userText, for: id)
+        let identifier = response.actionIdentifier
+        if identifier == "reply-in-app" {
+            if let reply = response as? UNTextInputNotificationResponse,
+               let id = info["draftID"] as? String, response.notification.request.trigger == nil {
+                let old = DraftStore.load(id) ?? ""
+                DraftStore.save(old.isEmpty ? reply.userText : old + "\n" + reply.userText, for: id)
+            }
+            if let address = Self.address(info) {
+                open(address, response.notification.request.trigger == nil ? info["draftID"] as? String : nil)
+            }
+            completionHandler()
+            return
         }
-        if let address = Self.address(info) {
-            open(address, response.notification.request.trigger == nil ? info["draftID"] as? String : nil)
+        // Only the app's own alerts (no trigger) carry an identity the app issued; a push, even
+        // one naming an actionable category, only ever opens.
+        let actionIDs: Set<String> = ["answer-approve", "answer-deny", "answer-ask", "answer-finished"]
+        guard actionIDs.contains(identifier), settings.answerFromNotifications,
+              response.notification.request.trigger == nil,
+              let address = Self.address(info) else {
+            if let address = Self.address(info) { open(address, nil) }
+            completionHandler()
+            return
         }
-        completionHandler()
+        let title = response.notification.request.content.title
+        let reply = (response as? UNTextInputNotificationResponse)?.userText
+        // iOS allows an action about 30 s; at 20 s it stops, writes nothing more and says so.
+        let deadline = ContinuousClock.now + .seconds(20)
+        let once = Once()
+        let work = Task { @MainActor in
+            var failure: ActionFailure?
+            await connectionForAction(address) { link in
+                failure = await self.performNotificationAction(identifier, link: link, address: address, info: info,
+                                                               reply: reply, deadline: deadline)
+            }
+            guard once.claim() else { return }
+            if let failure { failAction(failure.message, reply: failure.keepsReply ? reply : nil, address: address, info: info, title: title) }
+            completionHandler()
+        }
+        Task { @MainActor in
+            try? await Task.sleep(until: deadline, clock: .continuous)
+            guard once.claim() else { return }
+            work.cancel()
+            failAction("No answer from the host in time. Open to review.", reply: reply, address: address, info: info, title: title)
+            completionHandler()
+        }
+    }
+
+    /// Completes a notification action exactly once, whichever of the work and its deadline ends first.
+    private final class Once {
+        private var done = false
+        func claim() -> Bool {
+            defer { done = true }
+            return !done
+        }
+    }
+
+    private struct ActionFailure {
+        let message: String
+        /// A typed reply is kept as a draft; Approve and Deny have none.
+        let keepsReply: Bool
+    }
+
+    /// Sends only while the agent is still waiting on the request the alert was issued for;
+    /// otherwise returns what to tell the user.
+    private func performNotificationAction(_ identifier: String, link: HostConnection?, address: PaneAddress,
+                                           info: [AnyHashable: Any], reply: String?,
+                                           deadline: ContinuousClock.Instant) async -> ActionFailure? {
+        let changed = ActionFailure(message: "Couldn't send: the prompt changed. Open to review.", keepsReply: true)
+        guard ContinuousClock.now < deadline, let link,
+              let agent = link.snapshot?.agents.first(where: { $0.paneID == address.paneID }) else {
+            return ActionFailure(message: "Couldn't send: not connected. Saved as a draft.", keepsReply: true)
+        }
+        let thread = Thread(address: address, connection: link, agent: agent, workspace: nil, tab: nil)
+        switch identifier {
+        case "answer-approve", "answer-deny":
+            let approving = identifier == "answer-approve"
+            guard link.presentedStatus(agent) == .blocked, let wait = link.wait(agent), waitMatches(wait, info: info),
+                  let prompt = wait.prompt, prompt.style == .choice,
+                  let option = approving ? PromptOptionKind.oneTimeApproval(in: prompt.options)
+                    : prompt.options.first(where: { PromptOptionKind(label: $0.label) == .deny }) else {
+                return ActionFailure(message: "Couldn't \(approving ? "approve" : "deny"): the prompt changed. Open to review.",
+                                     keepsReply: false)
+            }
+            do {
+                try await inlineAnswers.answerFromNotification(option.label, prompt: prompt, ask: nil, in: thread,
+                                                               decisionLog: decisionLog, deadline: deadline)
+            } catch {
+                return ActionFailure(message: "Couldn't \(approving ? "approve" : "deny"): the prompt changed. Open to review.",
+                                     keepsReply: false)
+            }
+        case "answer-ask":
+            guard let reply, !reply.isEmpty, link.presentedStatus(agent) == .blocked,
+                  let wait = link.wait(agent), waitMatches(wait, info: info),
+                  let choices = inlineAnswers.choices(for: thread),
+                  case .ask(let question) = choices.choices,
+                  let ask = choices.ask, !question.options.isEmpty else { return changed }
+            do {
+                try await inlineAnswers.answerFromNotification(reply, prompt: nil, ask: ask, in: thread,
+                                                               decisionLog: decisionLog, deadline: deadline)
+            } catch {
+                return changed
+            }
+        case "answer-finished":
+            guard let reply, !reply.isEmpty,
+                  let expected = info["stateChangeSeq"] as? Int,
+                  agent.agentSession?.value == (info["reference"] as? String),
+                  [.idle, .done].contains(link.presentedStatus(agent)),
+                  (agent.stateChangeSeq ?? -1) >= expected else {
+                return ActionFailure(message: "Couldn't send: the agent changed. Saved as a draft.", keepsReply: true)
+            }
+            guard ContinuousClock.now < deadline, !Task.isCancelled else { return changed }
+            do {
+                try await link.sendText(reply, pane: address.paneID, submit: true)
+            } catch {
+                return ActionFailure(message: "Couldn't send: not connected. Saved as a draft.", keepsReply: true)
+            }
+        default:
+            return nil
+        }
+        center.removeDeliveredNotifications(withIdentifiers: [Self.key(address)])
+        return nil
+    }
+
+    /// The exact wait the alert was issued for; an alert without one never answers.
+    private func waitMatches(_ wait: HostConnection.Wait, info: [AnyHashable: Any]) -> Bool {
+        guard let waitID = info["waitID"] as? String, !waitID.isEmpty else { return false }
+        return wait.id == waitID
+    }
+
+    private func failAction(_ message: String, reply: String?, address: PaneAddress,
+                            info: [AnyHashable: Any], title: String) {
+        if let reply {
+            let reference: AgentSessionRef? = if let value = info["reference"] as? String {
+                AgentSessionRef(source: info["referenceSource"] as? String ?? "herdr",
+                                agent: info["referenceAgent"] as? String ?? "unknown",
+                                kind: info["referenceKind"] as? String ?? "id", value: value)
+            } else { nil }
+            let draftID = (info["draftID"] as? String)
+                ?? DraftStore.id(host: SessionAddress(hostID: address.hostID, session: address.session),
+                                 ref: reference, pane: address.paneID, name: info["agentName"] as? String)
+            let old = DraftStore.load(draftID) ?? ""
+            DraftStore.save(old.isEmpty ? reply : old + "\n" + reply, for: draftID)
+        }
+        let content = UNMutableNotificationContent()
+        content.title = title.isEmpty ? "Herdwick" : title
+        content.body = message
+        let request = UNNotificationRequest(identifier: "action-failure-\(Self.key(address))-\(UUID().uuidString)",
+                                            content: content, trigger: nil)
+        center.add(request)
     }
 
     nonisolated private static func address(_ info: [AnyHashable: Any]) -> PaneAddress? {

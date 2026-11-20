@@ -3,7 +3,10 @@
   "transcripts": {
     "p1": "../studio/transcripts/p1.jsonl",
     "p2": "../studio/transcripts/p2.jsonl",
-    "p5": "transcripts/p5-loop.jsonl"
+    "p3": "../studio/transcripts/p3.jsonl",
+    "p4": "../studio/transcripts/p4.jsonl",
+    "p5": "transcripts/p5-loop.jsonl",
+    "p7": "../studio/transcripts/p7.jsonl"
   },
   "childTranscripts": {}
 }

@@ -1,0 +1,7 @@
+
+ Use bash exactly once to run printf herdwick-approval-test. Do nothing else.
+
+
+╭── 󰪣 Haiku 4.5   tmp ──────────────────────────────────────────────────────────────────────|─────────── 22.9 tok/s ──╮
+╰─                                                                                                                   ─╯
+tmp

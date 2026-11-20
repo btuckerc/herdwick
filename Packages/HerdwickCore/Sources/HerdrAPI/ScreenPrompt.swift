@@ -46,7 +46,7 @@ public struct ScreenPrompt: Sendable, Equatable {
     public var contextMayBeTruncated: Bool
     public var options: [Option]
     public var cursor: Int?
-    /// Question tabs (omp ids, Claude headers) when the prompt pages through several.
+    /// Question tabs (omp ids or headers; Claude headers) when the prompt pages through several.
     public var tabs: [String]
 
     public init(style: Style, phase: Phase = .question, title: String, context: [String] = [],
@@ -59,6 +59,26 @@ public struct ScreenPrompt: Sendable, Equatable {
     public static func parse(_ visibleText: String) -> ScreenPrompt? {
         let lines = visibleText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         return ompChoice(lines) ?? omp(lines) ?? claudeAsk(lines) ?? choice(lines)
+    }
+}
+
+extension ScreenPrompt {
+    /// Attention identity, not key-driving authority. Cursor and checkbox changes are
+    /// still the same wait; choice context and every option's detail remain significant.
+    public func representsSameWait(as other: ScreenPrompt) -> Bool {
+        guard style == other.style else { return false }
+        if style != .choice, !tabs.isEmpty, tabs == other.tabs { return true }
+        return phase == other.phase && title == other.title && context == other.context
+            && options.count == other.options.count
+            && zip(options, other.options).allSatisfy {
+                $0.label == $1.label && $0.detail == $1.detail && $0.number == $1.number
+            }
+    }
+
+    /// What the prompt is about, in one line: its first context line without the harness's
+    /// "Command: " label, which only repeats that a command is what's asked about.
+    public var subject: String? {
+        context.first.map { $0.hasPrefix("Command: ") ? String($0.dropFirst("Command: ".count)) : $0 }
     }
 }
 
@@ -81,7 +101,8 @@ extension ScreenPrompt {
         var actions = !plan
         for line in body {
             let content = boxed(line)
-            if line.hasPrefix("├") { continue }
+            // Everything below the action divider is help, not another selectable row.
+            if line.hasPrefix("├") { if !plan { break }; continue }
             if plan && content == "Plan mode - next step" { actions = true; continue }
             if content.isEmpty { continue }
             if !actions { context.append(content); continue }
@@ -89,7 +110,8 @@ extension ScreenPrompt {
             if content.contains("esc cancel") { break }
             let selected = content.first == ompCursor
             let label = (selected ? String(content.dropFirst()) : content).trimmingCharacters(in: .whitespaces)
-            if plan || label == "Approve" || label == "Deny" {
+            if plan || label == "Approve" || label == "Deny" || label.hasPrefix("Approve ")
+                || label.hasPrefix("Always Approve ") {
                 if selected { cursor = options.count }
                 options.append(Option(label: label))
             } else { context.append(content) }
@@ -102,7 +124,7 @@ extension ScreenPrompt {
             title = "Allow \(tool)?"
         }
         return ScreenPrompt(style: .choice, title: title, context: context, options: options,
-                            cursor: cursor, contextMayBeTruncated: plan)
+                            cursor: cursor, contextMayBeTruncated: true)
     }
 
     static func omp(_ lines: [String]) -> ScreenPrompt? {
@@ -209,7 +231,7 @@ extension ScreenPrompt {
 
         if first == "Review your answers" {
             let title = heading.last ?? first
-            let context = Array(heading.dropFirst().dropLast())
+            let context = heading
             let (options, cursor) = numberedOptions(rest[firstRow...], checkboxes: false)
             return ScreenPrompt(style: .claudeAsk, phase: .review, title: title, context: context,
                                 options: options, cursor: cursor, tabs: tabs)

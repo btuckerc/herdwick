@@ -28,7 +28,14 @@ Decisions as of 2026-09-24. The evidence behind them is in
   reviewed or staged. An import finishes before a send starts, and a send deletes only the
   package it delivered.
 - Multiple windows: each window has its own `SceneState` (host, navigation path, sheets,
-  import); `SceneCommands` adds ⌘N (New Agent), ⌘F (search), ⌘[ (back) and ⌘R (refresh).
+  import); `SceneCommands` adds ⌘N (New Agent), ⌘F (search; Find in Conversation while one is on
+  screen, through `SceneState.findRequest`, with ⇧⌘F for search), ⌘[ (back), ⌘R (refresh) and ⌘J
+  (Next Needs You: the dock's first blocked thread other than the open one). The views add their
+  own where their buttons are: Select ⌘E, Select All ⌘A, Mark Read ⇧⌘U, Hide ⌃⌘A, and ⌘1…⌘9 on
+  the choices of the prompt card on screen (`numberedShortcut`).
+  One attention order everywhere (`App/Model/Inbox.swift`): `attentionPrecedes` (the inbox's
+  rank, then `latestTurnPrecedes`, the newest turn first) for Needs You and Done in the inbox,
+  the dock, Next and ⌘J; `latestTurnPrecedes` alone for Working and Read (read results) and the Overview.
   A regular-width window uses a split view with the inbox as sidebar.
 
 ## Modules
@@ -136,7 +143,8 @@ Decisions as of 2026-09-24. The evidence behind them is in
 - Scrollback: `observe` has no scroll, and `pane.scroll` would move the host's
   own view, so earlier output comes from `pane.read --source recent --format ansi`
   (500 lines) minus the visible screen's line count, parsed by `ANSILines` (SGR
-  only) and drawn as text above the live terminal. Reloaded on open and whenever
+  only; dim draws at 0.5 opacity, matching SwiftTerm's live half-way blend to the background so
+  a line reads the same either side of the seam) and drawn as text above the live terminal. Reloaded on open and whenever
   the user scrolls up from the bottom (one refresh at a time; the pane size is
   read alongside it); full-screen apps have none.
 - Typing mode: `terminal session control <pane> --takeover --cols C --rows R`,
@@ -206,7 +214,7 @@ One SSH connection per host multiplexes every channel. States: `idle`,
   old node closes, 5 s at most, then a fresh one starts on the same state, no sign-in).
   At most every 2 minutes, never while a live link rides the node, and a node that won't
   close is kept rather than run beside a second one on the same state. Cancelled dials,
-  sign-out and an offline peer don't count.
+  sign-out, an offline peer and a refused dial (the node works) don't count.
 - Timeouts abandon, never await: `withTimeout` returns at its limit and only cancels the
   work. The task-group version waited for its child, so a blocking call that ignored
   cancellation held the caller past the limit.
@@ -217,7 +225,7 @@ One SSH connection per host multiplexes every channel. States: `idle`,
 - Connect trace: each attempt logs its stages to the unified log (subsystem
   `dev.btuckerc.herdwick`, category `connect`): start, tailnet socket, ssh, herdr,
   sessions, preview, live (ms since start), failures and drops with a public kind
-  (`deadline`, `timeout`, `tailnet dial`, `ssh`, `dropped: …`) and the message private,
+  (`deadline`, `timeout`, `tailnet dial`, `tailnet refused`, `refused`, `ssh`, `dropped: …`) and the message private,
   and on the same timeline background, foreground, rebind, ping, failed checks, dial
   failures in a row and node restarts. To read it: connect the phone to a Mac and run
   `log collect --device --last 1h`, then filter that subsystem and category.
@@ -239,7 +247,7 @@ One SSH connection per host multiplexes every channel. States: `idle`,
   every agent are found with one host command; integration and clock checks wait
   2 s after the first live snapshot. `LatencyBenchTests` (opt-in, `HERDWICK_BENCH=1`)
   measures each stage over a local sshd with an injected 100 ms round trip.
-- Configuration errors (auth, host key mismatch, herdr missing) stop retrying
+- Configuration errors (auth, host key mismatch, herdr missing, a refused SSH port) stop retrying
   and show the fix where the user is looking. When herdr is installed but no
   session (or not the configured one) is running, the card offers Start herdr:
   over its own SSH channel, `/bin/sh` runs `nohup "$SHELL" -lc '<herdr>
@@ -296,12 +304,88 @@ and dark slots; fonts are system monospace faces (SF Mono, Menlo, Courier).
 The composer defaults to no autocorrect or autocapitalisation, since shells
 need literal text; a setting enables it for prose prompts.
 
+Shared spacing, radii, the 44 pt minimum tap and surface tints are `Tokens`
+(`DesignTokens.swift`): radii `plate` 12 (code, tool output, previews), `choice` 14 (option
+buttons), `card` 20 (ask/approval/failure cards, user bubbles); surfaces `base`, `raised`
+(cards), `inset` (plates on a card). New views use them rather than literals.
+Buttons pick a role from `ButtonRoles.swift`: `floatingControl` (glass, over content),
+`primaryAction` (prominent glass capsule, label in the background colour so it reads on the
+light dark-mode accent), `choiceButton` (bordered rounded rect for options on a card, tinted
+only for the agent's own recommendation) and `inlineAction` (borderless text inside content).
+Toolbars, menus, list rows and NavigationLinks keep system styles. Destructive single-choice
+confirms are `.alert`s; `confirmationDialog` only offers several non-destructive paths.
+
+Prompt waits are reconciled by `HostConnection` after activity reads. Transcript-derived
+Plan Review/PTY waits retain their existing settling rules. Screens are read for a
+`ScreenPrompt` wherever one can be: agents herdr calls blocked, stopped agents with a tool
+call still open (an approval holds it) or with no transcript reference (omp without herdr's
+integration shows an approval as idle), and PTY candidates. A working agent's screen is never
+read as a prompt, and a screen wait lapses once the agent works again. Wait identity ignores
+cursor/check changes, not approval context or option details. A link-up baseline suppresses
+repeated alerts. `presentedStatus` feeds inbox, dock, local alerts, badge and widgets through
+the same Needs You path; the inbox row's third line is the wait's summary (the prompt and its
+first context line without the harness's "Command: " label, e.g. "Allow bash? bun test"), so a halted agent says why.
+`PromptDriver` still verifies each logical cursor step and requires a transcript result for
+asks; approvals require an unchanged choice screen and its departure after Enter. Current
+omp approval variants must retain every action row to avoid moving onto the wrong action.
+Ask/permission content uses capped scrolling, Markdown for structured prose and literal
+terminal context, with Answer in Terminal available independently of driver support.
+A screen probe re-reads the newest snapshot before each pane read and before parsing: the
+agents it chose were read before its awaits, and one that has started working (without a
+terminal tool waiting) or been replaced in its pane is skipped.
+
+Inbox selection is a `Set<PaneAddress>` (host, session, pane) the rows toggle while Select is
+on (each row a button then); not `List(selection:)` edit mode. The inbox list binds no selection
+at all: its rows are buttons that set `scene.selectedRoute`, and the open row draws its own inset
+highlight (`List(selection:)`'s full-bleed slab turned the row's words white). Every close names an agent as the user picked it, not a pane: an `AgentStamp`
+(session, pane, epoch). `HostConnection` gives a pane's agent a new epoch whenever a snapshot
+shows it gone or a different kind or conversation in it, since herdr reuses a pane (and, with
+no integration, reports no conversation) when an agent exits and another starts there.
+`HostConnection.close(_:)` sends nothing unless the stamp still matches, in the session it was
+taken in. Selection stamps each address as it's selected (a replaced agent leaves the
+selection); the bulk Close alert freezes its targets as it opens, a swipe Close as it's
+swiped. Bulk actions (`BulkTriage`) sort the targets and run one agent at a time, checking each
+stamp just before its action: a close awaits herdr, and meanwhile the host may switch sessions,
+where the same pane ID is a different agent. A target no longer there counts as done; an
+offline host or a refusal is a failure and stays selected. Panes' Close Tab/Workspace carries
+the session it was asked in and checks the tab or workspace is still there. Not caught: an
+agent with no conversation reference that exits and restarts as the same kind entirely between
+two snapshots. While selecting, the inbox holds its ranks (`InboxRank`), so rows don't move
+under the thumb.
+
+## Conversation rendering
+- `ConversationFeed` follows a transcript with `tail -F`. The backlog is decoded and staged
+  off the main actor (`FollowTranscriptWorker`, an actor owning the `TranscriptReader`) and
+  painted once; appends after the paint apply on main. `restore` (the offline copy) decodes in
+  a detached task and publishes only if its ticket, path and host still match. Post-decode
+  guards compare the follow's `generation` (not `Task.isCancelled`), so the cached raw bytes
+  never run ahead of `resumeOffset`. `contentRevision` bumps with every change to the
+  conversation.
+- `ConversationProjection` (one per visible conversation) rebuilds the row list only when the
+  feed's `contentRevision`, the detail level, the catch-up mark or the pinned Now line change;
+  typing a draft or scrolling reuses it.
+- `MarkdownRenderCache` (main actor) keeps parsed Markdown segments keyed by the exact source
+  text, LRU within an estimated 8 MiB; a streaming row discards its previous text, and a
+  memory warning purges it.
+- `RenderTrace` (`-HerdwickTrace YES`) records stage timings and cache hits to
+  `Documents/render-trace.json` for comparing builds in the simulator; off otherwise.
+
 ## Terminal renderer
-SwiftTerm 1.20 (SwiftPM), chosen over libghostty-spm for maintenance and a
+SwiftTerm 1.20 (SwiftPM, pinned to `minorVersion: 1.20.0` in `project.yml`: 1.99 dropped
+`TerminalView.getTerminal()`), chosen over libghostty-spm for maintenance and a
 plain UIKit view. herdr sends full frames, so scrollback is off and each
 `full:true` frame starts with a clear-screen. Its build plugin needs Xcode's
 Metal Toolchain and `-skipPackagePluginValidation`. In typing mode SwiftTerm's
 keyboard accessory (sticky ctrl) replaces the key bar.
+
+Re-evaluated 2026-10-30 after Termius iOS 8.0.3 shipped a libghostty renderer; staying on
+SwiftTerm. libghostty-spm 2.2.2026103001 is a 73 MiB download (ios-arm64 `libghostty.a`
+18.5 MiB) and its public readback is viewport text only, with no cell attributes or cursor,
+so `TerminalController.usedRows` (which clips by background, inverse video and cursor) would
+lose its input. Hosting it in UIKit also means redoing touch-to-cell mapping, keyboard and
+sticky modifiers, and the IOSurface layer lifecycle (Heeler needed workarounds for each), and
+it bundles no Nerd Font. Nothing was benchmarked, so no speed gain was assumed. SwiftTerm
+already has an opt-in Metal renderer (`setUseMetal(_:)`), left off.
 
 ## Build
 - `scripts/mini/sync-and-build.sh` rsyncs to the Mini, runs XcodeGen
@@ -347,7 +431,12 @@ keyboard accessory (sticky ctrl) replaces the key bar.
 - Onboarding offers "Explore a demo host" (the `studio` scenario), so App
   Review and new users can try the app without a machine.
 - `-HerdwickDemo`, `-HerdwickScene` and related launch arguments (see
-  `App/Demo/DemoDirector.swift`) open a scenario straight to a screen.
+  `App/Demo/DemoDirector.swift`) open a scenario straight to a screen (`panes` opens the
+  Panes sheet over the inbox).
   `marketing/capture.sh` uses them to capture every listing scene
   and the App Preview from the simulator, and `marketing/render.sh` composes
   the listing assets. See `marketing/README.md`.
+- The demo host stamps every transcript message at launch with a fixed age per pane, so the
+  inbox shows real-looking recency ("3m", "44m") in captures: in `studio` the deploy prompt is
+  4 min old, the rate limiter 25 s, the review 45 min, the retry fix 90 min and the API
+  reference 3 h. Backfill has no transcript (it opens its terminal), so it shows no age.

@@ -6,7 +6,7 @@
     "iphone": {"simulator": "iPhone 18 Pro Max", "size": [1320, 2868]},
     "ipad": {"simulator": "iPad Pro 13-inch (M5)", "size": [2064, 2752], "args": ["-fontSize", "18"]}
   },
-  "defaults": ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-appearance", "dark", "-theme.dark", "herdwick-night", "-fontSize", "14", "-inboxView", "agents"],
+  "defaults": ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-appearance", "dark", "-theme.dark", "herdwick-night", "-fontSize", "14"],
   "scenes": [
     {"id": "agents-light", "devices": ["iphone"], "args": ["-HerdwickScene", "agents", "-appearance", "light"]},
     {"id": "conversation-ask-light", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p1", "-appearance", "light"]},
@@ -14,7 +14,7 @@
     {"id": "loop-light", "scenario": "loop", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p5", "-detailLevel", "folded", "-appearance", "light"]},
     {"id": "loop-diff", "scenario": "loop", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p5", "-detailLevel", "folded"], "taps": {"iphone": [[170, 533]], "ipad": [[412, 1008]]}},
     {"id": "loop-catchup", "scenario": "loop", "devices": ["iphone", "ipad"], "args": ["-HerdwickScene", "pane:p5", "-detailLevel", "folded", "-HerdwickSeen", "c17"]},
-    {"id": "machines", "devices": ["iphone"], "args": ["-HerdwickScene", "agents", "-inboxView", "machines"]},
+    {"id": "panes", "devices": ["iphone"], "args": ["-HerdwickScene", "panes"]},
     {"id": "tailscale", "devices": ["iphone"], "args": ["-HerdwickScene", "tailscale"]},
     {"id": "theme-day", "devices": ["iphone"], "args": ["-HerdwickScene", "terminal:p2", "-appearance", "light", "-theme.light", "herdwick-day"]},
     {"id": "theme-mocha", "devices": ["iphone"], "args": ["-HerdwickScene", "terminal:p2", "-theme.dark", "catppuccin-mocha"]},

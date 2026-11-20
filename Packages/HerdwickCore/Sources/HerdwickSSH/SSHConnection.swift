@@ -69,11 +69,29 @@ public final class SSHConnection: CommandRunner, @unchecked Sendable {
         timeout: TimeAmount = .seconds(15)
     ) async throws -> SSHConnection {
         let setup = Setup(username: username, authentication: authentication, validator: hostKeyValidator)
-        let channel = try await setup.bootstrap { loop, initialize in
-            ClientBootstrap(group: loop).connectTimeout(timeout)
-                .channelInitializer(initialize).connect(host: host, port: port)
+        let channel: Channel
+        do {
+            channel = try await setup.bootstrap { loop, initialize in
+                ClientBootstrap(group: loop).connectTimeout(timeout)
+                    .channelInitializer(initialize).connect(host: host, port: port)
+            }
+        } catch where isConnectionRefused(error) {
+            throw SSHError.connectionRefused
         }
         return try await setup.finish(channel: channel, timeout: timeout, keepaliveInterval: keepaliveInterval)
+    }
+
+    /// Every address the host resolved to refused the TCP connection.
+    static func isConnectionRefused(_ error: any Error) -> Bool {
+        switch error {
+        case let error as IOError:
+            error.errnoCode == ECONNREFUSED
+        case let error as NIOConnectionError:
+            !error.connectionErrors.isEmpty
+                && error.connectionErrors.allSatisfy { isConnectionRefused($0.error) }
+        default:
+            false
+        }
     }
 
     /// Adopts an already-connected stream socket, e.g. one returned by `tailscale_dial`.

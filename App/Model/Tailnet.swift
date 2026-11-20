@@ -309,9 +309,14 @@ final class Tailnet {
     /// A node back from suspension can stay broken in ways one rebind doesn't fix (a dead DERP
     /// or control connection), so every dial runs out its budget until the app is relaunched.
     /// Dials failing in a row while the peer is online escalate: the second rebinds again, the
-    /// third replaces the node. Cancelled dials, sign-out and an offline peer don't count.
+    /// third replaces the node. Cancelled dials, sign-out and an offline peer don't count, and a
+    /// refused dial proves the node works.
     private func noteDialFailure(_ error: any Error, nodeID: String) {
         if error is CancellationError { return }
+        if let error = error as? TailnetError, case .refused = error {
+            dialFailures = 0
+            return
+        }
         if let error = error as? TailnetError, case .signedOut = error { return }
         if peer(id: nodeID)?.online == false { return }
         dialFailures += 1
@@ -378,7 +383,10 @@ final class Tailnet {
                         guard tailscale_dial_timeout(handle, "tcp", target, max(1, millis), &conn) == 0 else {
                             var buffer = [CChar](repeating: 0, count: 512)
                             tailscale_errmsg(handle, &buffer, buffer.count)
-                            throw TailnetError.dialFailed(String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+                            let message = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                            // The peer answered with a reset: nothing listens on that port.
+                            if message.localizedCaseInsensitiveContains("refused") { throw TailnetError.refused }
+                            throw TailnetError.dialFailed(message)
                         }
                         return conn
                     })
@@ -427,12 +435,15 @@ final class Tailnet {
 
 enum TailnetError: LocalizedError {
     case notRunning, signedOut
+    /// The peer is reachable but nothing accepts connections on the port.
+    case refused
     case dialFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .notRunning: "Tailscale is still starting."
         case .signedOut: "Sign in to Tailscale again."
+        case .refused: "The host refused the connection."
         case .dialFailed(let message): message.isEmpty ? "Tailscale could not reach the host." : message
         }
     }

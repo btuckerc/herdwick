@@ -21,6 +21,7 @@ struct PaneView: View {
     @State private var sentCount = 0
     @State private var startFlow = AgentStartFlow()
     @FocusState private var composerFocused: Bool
+    @State private var fontPinchBase: Double?
     @State private var restingSize: CGSize = .zero
     /// The visible height now, which the keyboard shrinks while `restingSize` stays.
     @State private var viewHeight: CGFloat = 0
@@ -64,6 +65,7 @@ struct PaneView: View {
     var body: some View {
         VStack(spacing: 0) {
             if agent == nil, pane != nil { startBar }
+            outputNotice
             ZStack {
                 theme.backgroundColor.ignoresSafeArea(edges: .horizontal)
                 // Vertical outside horizontal: each drag moves one way, like a document.
@@ -81,6 +83,16 @@ struct PaneView: View {
                                     .frame(width: liveSize.width, height: liveSize.height)
                                     .frame(height: shownHeight, alignment: .top)
                                     .clipped()
+                                    // Pinch sizes the text in place, in whole points as
+                                    // Settings steps, within its range (round 15: only Settings changed it).
+                                    .simultaneousGesture(MagnifyGesture()
+                                        .onChanged { value in
+                                            let base = fontPinchBase ?? settings.fontSize
+                                            fontPinchBase = base
+                                            let size = min(Settings.fontSizes.upperBound, max(Settings.fontSizes.lowerBound, (base * value.magnification).rounded()))
+                                            if size != settings.fontSize { settings.fontSize = size }
+                                        }
+                                        .onEnded { _ in fontPinchBase = nil })
                             }
                         }
                         .padding(.horizontal, 6)
@@ -108,7 +120,7 @@ struct PaneView: View {
                     Text(reason)
                         .font(.footnote)
                         .padding(12)
-                        .background(.regularMaterial, in: .rect(cornerRadius: 16))
+                        .background(Tokens.Surface.raised, in: .rect(cornerRadius: Tokens.Radius.card))
                         .padding()
                         .frame(maxHeight: .infinity, alignment: .top)
                 }
@@ -122,22 +134,78 @@ struct PaneView: View {
         // An agent's terminal opened as the thread itself (it has no transcript) keeps the
         // dock, at the end of the keys' row; one pushed from its conversation goes back there.
         .agentDock(current: connection.address(paneID: paneID), busy: sending)
-        .navigationTitle(agent?.conversationTitle ?? pane?.label ?? workspaceLabel ?? pane?.terminalTitle ?? paneID)
-        .navigationSubtitle(subtitle)
+        .focusedSceneValue(\.herdwickSending, sending)
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(removing: .title)
         .toolbarBackground(theme.backgroundColor, for: .navigationBar)
         .toolbar {
-            if let harness = agent?.agent, !connection.missingIntegrations.filter({ $0.target == harness }).isEmpty {
+            let offersIntegration = agent?.agent.map { harness in
+                connection.missingIntegrations.contains { $0.target == harness }
+            } ?? false
+            // Back and its margin end at 72 pt; Type and Read as Text, their margins and the gap
+            // take about 120, the offer about 120 more.
+            BarTitle(title: title, subtitle: subtitle, room: restingSize.width - 192 - (offersIntegration ? 120 : 0),
+                     still: connection.statusText == nil ? agent.flatMap { connection.presentedStatus($0) == .working ? connection.stillSince($0) : nil } : nil,
+                     stillReplacesPlace: true,
+                     tint: connection.statusText == nil ? agent.map { connection.presentedStatus($0).tint } : nil)
+            if offersIntegration, let harness = agent?.agent {
                 ToolbarItem(placement: .topBarTrailing) {
                     IntegrationOffer(connection: connection, harness: harness, compact: true)
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Read as Text", systemImage: "text.alignleft") { showsText = true }
+            // Type sits in the bar, always in the same place, not at the end of the key rail
+            // (round 17: with ⌃C ahead of it, it fell off the rail's edge).
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button(typing ? "Stop Typing" : "Type", systemImage: typing ? "keyboard.fill" : "keyboard", action: toggleTyping)
+                    .keyboardShortcut("t", modifiers: .command)
+                    .accessibilityAddTraits(typing ? .isSelected : [])
+                    .accessibilityHint("Resizes the pane to this screen")
                     .disabled(!connection.isLive || pane == nil)
+                    // Named enlarged on a long press at accessibility sizes (round 85: sb#8).
+                    .accessibilityShowsLargeContentViewer()
+                Button("Read as Text", systemImage: "doc.plaintext") { showsText = true }
+                    .accessibilityShowsLargeContentViewer()
+                    // Beside Type's ⌘T (round 40: sb#14, the readable view had no key).
+                    .keyboardShortcut("t", modifiers: [.command, .shift])
+                    .disabled(pane == nil)
             }
         }
-        .sheet(isPresented: $showsText) { TerminalText(connection: connection, paneID: paneID, cwd: pane?.workingDirectory) }
+        .sheet(isPresented: $showsText) {
+            TerminalText(connection: connection, paneID: paneID, cwd: pane?.workingDirectory, snapshot: terminal.plainText,
+                         title: title, receivedAt: connection.lostAt ?? terminal.lastOutputAt)
+        }
+        .background {
+            Group {
+                Button("Increase Terminal Text") { adjustFontSize(1) }
+                    .keyboardShortcut("+", modifiers: .command)
+                Button("Decrease Terminal Text") { adjustFontSize(-1) }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("Reset Terminal Text Size") { settings.resetFontSize() }
+                    .keyboardShortcut("0", modifiers: .command)
+            }
+            // ⇧⌘U and ⌃⌘A on the agent in this terminal, as its conversation takes them (round
+            // 65: sb#7); back to the inbox, where a Hide offers Undo.
+            .onChange(of: scene.markUnreadRequest) {
+                guard onScreen, let agent, connection.presentedStatus(agent) == .idle, !connection.isUnread(agent) else { return }
+                connection.markUnread(agent)
+                scene.back()
+            }
+            .onChange(of: scene.hideRequest) {
+                guard onScreen, let agent else { return }
+                connection.hide(agent)
+                scene.hiddenFromThread = connection.address(paneID: paneID)
+                scene.back()
+            }
+            // ⌘L to the line composer, as in a conversation (round 67: sb#3); out of typing first.
+            .onChange(of: scene.messageRequest) {
+                guard onScreen else { return }
+                typing = false
+                composerFocused = true
+            }
+            .hidden()
+        }
+
         .onAppear { terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
         .onChange(of: theme) { _, theme in terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
         .onChange(of: settings.font) { terminal.apply(theme: theme, font: settings.font, size: settings.fontSize) }
@@ -174,50 +242,93 @@ struct PaneView: View {
         }
     }
 
-    /// Status in words where a badge would be: the link first, then the agent.
+    private var title: String {
+        agent?.conversationTitle ?? pane?.label ?? workspaceLabel ?? pane?.terminalTitle ?? paneID
+    }
+
+    /// Status in words where a badge would be: the link first, then the agent, and "no update
+    /// 6m" in grey once it has gone still, in place of the directory (`BarTitle.still`; round 31:
+    /// an agent the inbox showed silent read "Working" here in blue; round 32: with the directory
+    /// too, the subtitle pushed Type and Read as Text into an overflow menu).
     private var subtitle: String {
         if let link = connection.statusText { return link }
-        let status = agent.map(\.agentStatus.label) ?? (pane == nil ? nil : "Shell")
-        return [status, pane?.workingDirectory.map(homeRelative)].compactMap { $0 }.joined(separator: " · ")
+        let status = agent.map { connection.presentedStatus($0).label } ?? (pane == nil ? nil : "Shell")
+        let place = pane?.workingDirectory.map(homeRelative)
+        return [status, place].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// Offline, a compact line above the buffer, never over the output: the screen below is as
+    /// it was when the link dropped (round 36: a stale terminal's "Working" prompt read as live).
+    /// Live, the pane streams, so its screen is current whatever the transcript says.
+    @ViewBuilder private var outputNotice: some View {
+        if !connection.isLive {
+            TimelineView(.everyMinute) { context in
+                let age = connection.lostAt.map { AgentRow.age(of: $0, at: context.date) }
+                let words = age.map { $0 == "now" ? "Output as of just now" : "Output as of \($0) ago" } ?? "Output as last received"
+                Label("\(words) · Not connected", systemImage: "wifi.slash")
+                    .font(.footnote)
+                    .foregroundStyle(Tokens.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Tokens.Space.l)
+                    .padding(.vertical, Tokens.Space.xs)
+                    .accessibilityLabel("\(words). Not connected.")
+            }
+        }
     }
 
     // MARK: Controls
 
     private var controls: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                KeyBar(typing: $typing) { keys in
-                    Task { await send(keys: keys) }
-                } onTypeToggle: {
-                    typing.toggle()
-                    if typing {
-                        composerFocused = false
-                        Task {
-                            try? await Task.sleep(for: .milliseconds(150))
-                            terminal.focusKeyboard()
-                        }
-                    }
+            if typing {
+                HStack(spacing: 8) {
+                    keyBar
+                    if hasDock { AgentDock.slot }
                 }
-                .disabled(!connection.isLive || pane == nil)
-                // The composer keeps the dock on its send button; with the composer away it stands here.
-                if hasDock, typing { AgentDock.slot }
+            } else {
+                composer
             }
-            if !typing { composer }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 8)
+        // On the terminal's own canvas, as its bar is (round 95: sb#14, under a light theme's
+        // cream the keys and composer sat on a white slab, two surfaces meeting).
+        .background(theme.backgroundColor.ignoresSafeArea(edges: .bottom))
     }
 
+    private var keyBar: some View {
+        KeyBar(typing: $typing, onKeys: { keys in
+            Task { await send(keys: keys) }
+        }, onTypeToggle: toggleTyping)
+        .disabled(!connection.isLive || pane == nil)
+    }
+
+    private func toggleTyping() {
+        typing.toggle()
+        if typing {
+            composerFocused = false
+            Task {
+                try? await Task.sleep(for: .milliseconds(150))
+                terminal.focusKeyboard()
+            }
+        }
+    }
+
+    /// This terminal is the scene's top route, so the menu's keys are for it.
+    private var onScreen: Bool { scene.navigationPath.last == .terminal(connection.address(paneID: paneID)) }
+
     private var hasDock: Bool {
-        guard settings.showsDock, agent != nil, scene.navigationPath.count == 1 else { return false }
+        guard settings.showsDock, !scene.sidebarBeside, agent != nil, scene.navigationPath.count == 1 else { return false }
         let current = connection.address(paneID: paneID)
         return model.dockThreads(in: scene).contains { $0.address != current }
     }
 
     /// Start an agent in this shell; sits under the header so the keyboard area stays for typing.
+    /// At its words' width, leading, not the screen's: the shell is the page (round 95: sa#8, a
+    /// full-width green bar outweighed the prompt it sat over).
     private var startBar: some View {
-        HStack {
+        HStack(spacing: 8) {
             Button {
                 start(connection.lastAgentKind)
             } label: {
@@ -225,16 +336,21 @@ struct PaneView: View {
                     if startFlow.running { ProgressView() }
                     Text("Start \(agentKindLabel(connection.lastAgentKind))").lineLimit(1)
                 }
-                .frame(maxWidth: .infinity)
+                .padding(.horizontal, Tokens.Space.s)
+                .frame(minHeight: 30)
             }
-            .buttonStyle(.glassProminent)
+            .primaryAction()
             Menu {
                 ForEach(["omp", "claude", "codex"], id: \.self) { kind in
                     Button("Start \(agentKindLabel(kind))") { start(kind) }
                 }
-            } label: { Image(systemName: "chevron.down") }
-            .buttonStyle(.glass)
+            } label: {
+                Image(systemName: "chevron.down")
+                    .frame(width: 30, height: 30)
+            }
+            .floatingControl(.circle)
             .accessibilityLabel("Choose agent to start")
+            Spacer(minLength: 0)
         }
         .tint(.accentColor)
         .disabled(startFlow.running || !connection.isLive)
@@ -246,6 +362,8 @@ struct PaneView: View {
     private var composer: some View {
         MessageComposer(draft: $draft, attachments: $attachments, sending: sending, focus: $composerFocused,
                         placeholder: agent == nil ? "Run a command" : "Message", docksAgents: hasDock,
+                        // The keys take the mic row's middle, so the screen keeps the conversation's two rows.
+                        pinned: AnyView(keyBar),
                         // `locked`, not `.disabled`: that would also disable a running dictation's Stop and Cancel.
                         locked: !connection.isLive || pane == nil || startFlow.running,
                         vocabulary: { DictationController.vocabulary(from: [pane?.workingDirectory, agent?.agent].compactMap { $0 }) }) {
@@ -330,6 +448,10 @@ struct PaneView: View {
             sendError = "The key wasn't delivered."
         }
     }
+    
+    private func adjustFontSize(_ delta: Double) {
+        settings.fontSize = min(Settings.fontSizes.upperBound, max(Settings.fontSizes.lowerBound, settings.fontSize + delta))
+    }
 }
 
 private struct HistoryKey: Hashable {
@@ -343,61 +465,131 @@ private struct StreamKey: Hashable {
     let grid: TerminalController.Grid?
 }
 
-/// Keys agents ask for: approve/deny prompts, menus, interrupt. While typing, SwiftTerm's
-/// keyboard accessory (with a sticky ctrl) takes over, so only the exit toggle stays.
+/// Keys agents ask for: approve/deny prompts, menus, interrupt, always in reach, the ones an
+/// approval needs first and interrupt with them (round 15: they hid behind a Keys toggle, so
+/// answering a prompt took an extra tap and graders read the terminal as keyless), then the
+/// rest, the row scrolling sideways, its trailing edge fading while more keys lie past it
+/// (round 15: "esc" was cut in half at the rail's end; round 16: then "ctrl-c" was, the key
+/// that stops a run, so it's "⌃C" now). Type is in the bar (the composer already sends a line;
+/// Type is for raw keys). While typing, SwiftTerm's keyboard accessory (with a sticky ctrl)
+/// takes over, so the rail is only the way out of it.
 struct KeyBar: View {
     @Binding var typing: Bool
     let onKeys: ([String]) -> Void
     let onTypeToggle: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var offset: CGFloat = 0
+    @State private var visibleWidth: CGFloat = 0
+    @State private var keysWidth: CGFloat = 0
+    @State private var position = ScrollPosition(edge: .leading)
+    /// Keys past the trailing edge. From the measured widths, not only scroll changes: those
+    /// don't report the first layout, so the fade never showed until the rail was scrolled
+    /// (round 88: opus#5, sa#9, the phone's rail read as five keys with nothing past ⌃C).
+    private var morePastEdge: Bool { offset + visibleWidth < keysWidth - 1 }
 
-    private let keys: [(label: String, symbol: String?, keys: [String])] = [
-        ("esc", nil, ["esc"]),
-        ("tab", "arrow.right.to.line", ["tab"]),
-        ("shift-tab", "arrow.left.to.line", ["shift+tab"]),
-        ("up", "chevron.up", ["up"]),
-        ("down", "chevron.down", ["down"]),
-        ("left", "chevron.left", ["left"]),
-        ("right", "chevron.right", ["right"]),
-        ("enter", "return", ["enter"]),
-        ("ctrl-c", nil, ["ctrl+c"]),
+    private typealias Key = (label: String, spoken: String, symbol: String?, keys: [String])
+    private let keys: [Key] = [
+        ("up", "Up Arrow", "chevron.up", ["up"]),
+        ("down", "Down Arrow", "chevron.down", ["down"]),
+        ("enter", "Return", "return", ["enter"]),
+        ("esc", "Escape", nil, ["esc"]),
+        ("⌃C", "Interrupt, Control-C", nil, ["ctrl+c"]),
+        ("tab", "Tab", "arrow.right.to.line", ["tab"]),
+        ("shift-tab", "Shift-Tab", "arrow.left.to.line", ["shift+tab"]),
+        ("left", "Left Arrow", "chevron.left", ["left"]),
+        ("right", "Right Arrow", "chevron.right", ["right"]),
     ]
 
     var body: some View {
-        ScrollView(.horizontal) {
-            GlassEffectContainer(spacing: 6) {
-                HStack(spacing: 6) {
-                    Button {
-                        onTypeToggle()
-                    } label: {
-                        Image(systemName: typing ? "keyboard.chevron.compact.down" : "keyboard")
-                            .frame(minWidth: 28, minHeight: 22)
-                    }
-                    .buttonStyle(.glass)
-                    .tint(typing ? .accentColor : nil)
-                    .accessibilityLabel(typing ? "Stop typing in the terminal" : "Type in the terminal (resizes the pane to this screen)")
+        rail
+            .overlay(alignment: .trailing) {
+                if morePastEdge { moreKeys.transition(.opacity) }
+            }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: morePastEdge)
+    }
 
-                    if !typing {
-                        ForEach(keys, id: \.label) { key in
-                            Button {
-                                onKeys(key.keys)
-                            } label: {
-                                Group {
-                                    if let symbol = key.symbol {
-                                        Image(systemName: symbol)
-                                    } else {
-                                        Text(key.label).font(.callout.monospaced().weight(.medium))
-                                    }
-                                }
-                                .frame(minWidth: 28, minHeight: 22)
-                            }
-                            .buttonStyle(.glass)
-                            .accessibilityLabel(key.label)
-                        }
-                    }
+    private var rail: some View {
+        ScrollView(.horizontal) {
+            GlassEffectContainer(spacing: 4) {
+                // 4 pt apart, so on a phone the key past the edge shows its rim in the fade
+                // rather than the rail ending flush on ⌃C (round 88: opus#5).
+                HStack(spacing: 4) {
+                    if typing { typingToggle } else { keyButtons }
                 }
                 .padding(.vertical, 2)
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { keysWidth = $0 }
         }
         .scrollIndicators(.hidden)
+        .scrollPosition($position)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { visibleWidth = $0 }
+        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.x } action: { _, x in offset = x }
+        // A fade a short way in, so the key past the edge reads as more to scroll to, not as one
+        // cut off under the dock (round 18: half a key showed beside the sheep), and ⌃C, the
+        // last key in reach, keeps its label clear of it (round 88).
+        .mask {
+            HStack(spacing: 0) {
+                Rectangle()
+                LinearGradient(colors: [.black, .black.opacity(morePastEdge ? 0 : 1)], startPoint: .leading, endPoint: .trailing)
+                    .frame(width: 24)
+            }
+        }
+    }
+
+    /// "…" over the fade while keys lie past the edge, scrolling to them: the fade alone, then
+    /// the next key's rim, read as a shadow (round 89: opus#4, sa#7, sb#4), and round 89's
+    /// chevron as a disclosure arrow, which answered taps across 24 pt and always animated
+    /// (round 90: opus#4, sa#4, sb#2, sb#5). It stays in the fade's 24 pt, so ⌃C, the last key
+    /// in reach on a phone, keeps all of its own; its taps reach past it, outward only.
+    private var moreKeys: some View {
+        Button {
+            if reduceMotion { position.scrollTo(edge: .trailing) } else { withAnimation(.snappy) { position.scrollTo(edge: .trailing) } }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.body.weight(.bold))
+                .foregroundStyle(Color.primary)
+                .frame(width: 24, height: 34)
+                .padding(.trailing, Tokens.Space.m)
+                .padding(.vertical, 5)
+                .contentShape(.rect)
+                .padding(.trailing, -Tokens.Space.m)
+                .padding(.vertical, -5)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("More Keys")
+        .accessibilityShowsLargeContentViewer()
+    }
+
+    private var typingToggle: some View {
+        Button(action: onTypeToggle) {
+            Label("Typing", systemImage: "keyboard.fill").frame(minHeight: 30)
+        }
+        .floatingControl(.capsule)
+        .tint(.accentColor)
+        .accessibilityValue("Selected")
+        .accessibilityAddTraits(.isSelected)
+        .accessibilityHint("Resizes the pane to this screen")
+    }
+
+    private var keyButtons: some View {
+        ForEach(keys, id: \.label) { key in
+            Button {
+                onKeys(key.keys)
+            } label: {
+                Group {
+                    if let symbol = key.symbol {
+                        Image(systemName: symbol).frame(width: 30, height: 30)
+                    } else {
+                        Text(key.label).font(.callout.monospaced().weight(.medium))
+                            .frame(minWidth: 30, minHeight: 30)
+                    }
+                }
+            }
+            .floatingControl(key.symbol == nil ? .capsule : .circle)
+            .accessibilityLabel(key.spoken)
+            // Capped at their size, so a long press shows the key large, as the system's bars do
+            // (round 84: opus#8).
+            .accessibilityShowsLargeContentViewer()
+        }
     }
 }

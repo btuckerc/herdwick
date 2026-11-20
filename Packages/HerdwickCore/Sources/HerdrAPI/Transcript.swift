@@ -494,6 +494,19 @@ public enum ConversationItem: Identifiable, Sendable, Equatable {
     }
 }
 
+/// A turn that ended on a reply: when it ended and when the user's message that started it was
+/// written, either missing when the transcript doesn't stamp it.
+public struct FinishedTurn: Sendable, Equatable {
+    public let at: Date?
+    public let started: Date?
+    public init(at: Date?, started: Date?) { self.at = at; self.started = started }
+    /// How long the agent took, when both ends are known and it took at least a second.
+    public var duration: TimeInterval? {
+        guard let at, let started, at.timeIntervalSince(started) >= 1 else { return nil }
+        return at.timeIntervalSince(started)
+    }
+}
+
 /// The transcript folded into what a chat view shows: tool calls merged with their
 /// results, asks with their answers.
 public struct Conversation: Sendable {
@@ -532,6 +545,11 @@ public struct Conversation: Sendable {
     public private(set) var thinkingLevel: String?
     public private(set) var usage: TranscriptUsage?
     public private(set) var pendingPlanReview: String?
+    /// Turns the transcript says ended on a reply, keyed by that reply's item id.
+    public private(set) var finishedTurns: [String: FinishedTurn] = [:]
+    /// When the user's latest message was written: the current turn's start.
+    public private(set) var turnStarted: Date?
+    private var pendingTerminalInputValue: TerminalInputWait?
     private var recordIndex: [String: Int] = [:]
     private var activeRecords: [Int] = []
     private var usageByID: [String: TranscriptUsage] = [:]
@@ -609,7 +627,8 @@ public struct Conversation: Sendable {
         backgroundJobs.removeAll(keepingCapacity: true)
         imageCount = 0; editCount = 0
         serial = 0; modelID = nil; thinkingLevel = nil; usage = nil
-        proposal = nil; pendingPlanReview = nil
+        proposal = nil; pendingPlanReview = nil; pendingTerminalInputValue = nil
+        finishedTurns.removeAll(keepingCapacity: true); turnStarted = nil
         for index in activeRecords { applyRecord(records[index]) }
         title = savedTitle ?? title
     }
@@ -629,9 +648,22 @@ public struct Conversation: Sendable {
         if record.format == .omp {
             for entry in record.entries {
                 guard case .message(let message) = entry else { continue }
-                if message.role == .user { proposal = nil; pendingPlanReview = nil }
+                if message.role == .user { proposal = nil; pendingPlanReview = nil; pendingTerminalInputValue = nil }
+                if message.role == .toolResult, message.toolCallId == pendingTerminalInputValue?.toolCallId {
+                    pendingTerminalInputValue = nil
+                }
+                if !message.toolCalls.isEmpty { pendingTerminalInputValue = nil }
                 for call in message.toolCalls {
                     proposal = nil; pendingPlanReview = nil
+                    if call.name == "bash" {
+                        let args = Self.object(call.arguments)
+                        if args["pty"] as? Bool == true,
+                           let command = args["command"] as? String {
+                            pendingTerminalInputValue = TerminalInputWait(
+                                toolCallId: call.id, command: command, startedAt: message.timestamp
+                            )
+                        }
+                    }
                     guard call.name == "write" else { continue }
                     let args = Self.object(call.arguments)
                     if args["path"] as? String == "xd://propose",
@@ -657,6 +689,8 @@ public struct Conversation: Sendable {
         return nil
     }
 
+    /// omp `bash` with `pty: true` still running on the active branch.
+    public var pendingTerminalInput: TerminalInputWait? { pendingTerminalInputValue }
     public func subagents(spawnedBy callId: String) -> [SubagentActivity] { subagentActivities.filter { $0.spawnCallId == callId } }
 
     public mutating func reconcile(childStates: [String: ChildTranscriptState]) {
@@ -681,7 +715,13 @@ public struct Conversation: Sendable {
         switch entry {
         case .title(let text):
             if !text.isEmpty { title = text }
-        case .metadata, .turnEnded: break
+        case .metadata: break
+        case .turnEnded(let at):
+            // Only a turn that closed on words has a result; one that ended on a tool call or an
+            // error notice didn't conclude anything to show.
+            if case .assistant(let id, _)? = items.last(where: { if case .thinking = $0 { false } else { true } }) {
+                finishedTurns[id] = FinishedTurn(at: at, started: turnStarted)
+            }
         case .message(let message):
             apply(message)
         case .toolStarted(let id, let name):
@@ -774,6 +814,7 @@ public struct Conversation: Sendable {
         let id = message.id.isEmpty ? nextID("message") : message.id
         switch message.role {
         case .user:
+            turnStarted = message.timestamp
             append(.user(id: id, text: message.text, images: message.images))
         case .assistant:
             if !message.thinking.isEmpty { append(.thinking(id: id + "-thinking", text: message.thinking)) }
@@ -985,7 +1026,11 @@ public struct Conversation: Sendable {
     }
 
     private static func questions(_ arguments: [String: Any]) -> [AskQuestion]? {
-        guard let list = arguments["questions"] as? [[String: Any]] else { return nil }
+        // A model sometimes sends the list JSON-encoded as a string; omp decodes it and asks anyway.
+        let value = arguments["questions"]
+        guard let list = value as? [[String: Any]]
+                ?? (value as? String).flatMap({ try? JSONSerialization.jsonObject(with: Data($0.utf8)) }) as? [[String: Any]]
+        else { return nil }
         let questions = list.enumerated().compactMap { index, question -> AskQuestion? in
             guard let text = question["question"] as? String else { return nil }
             let options = (question["options"] as? [[String: Any]] ?? []).compactMap { option in

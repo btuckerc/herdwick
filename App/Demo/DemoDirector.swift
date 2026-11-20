@@ -7,25 +7,26 @@ import SwiftUI
 /// `UserDefaults`, so `-appearance dark` and `-theme.dark tokyo-night` also work as-is):
 ///
 ///     -HerdwickDemo <scenario>                  studio | preview | any bundled HerdrDemo scenario
-///     -HerdwickScene <scene>                    agents | workspaces | pane:<id> | terminal:<id> | onboarding | tailscale | settings
+///     -HerdwickScene <scene>                    agents | workspaces | pane:<id> | terminal:<id> | panes | onboarding | tailscale | settings
 ///     -HerdwickDraft <text>                     composer text on the opened pane
-///     -HerdwickDrop YES                         drop the link after the first snapshot (reconnect UI)
+///     -HerdwickDrop YES                         drop the link shortly after a transcript opens (fallback if none opens)
 ///     -HerdwickHold YES                         start the timeline only once Documents/demo-go exists
 ///     -HerdwickSeen <item id>                   the opened pane was last read at that item (catch-up line)
 ///
 /// Once the scene has rendered, the app writes `Documents/demo-ready` for the capture script.
 /// `pane:` uses the agent's conversation when available; `terminal:` always shows the
 /// terminal. `pane:p1` shows the studio question, `pane:p2` its completed review,
-/// `pane:p5` delegated work; `agents -inboxView machines`
-/// shows Machines. Draft/send cues also drive the conversation composer.
+/// `pane:p5` delegated work; `panes` opens the Panes sheet over the inbox.
+/// Draft/send cues also drive the conversation composer.
 struct DemoLaunch: Equatable {
     enum Scene: Equatable {
-        case agents, workspaces, pane(String), terminal(String), onboarding, tailscale, settings
+        case agents, workspaces, pane(String), terminal(String), panes, onboarding, tailscale, settings
 
         init?(_ raw: String) {
             switch raw {
             case "agents": self = .agents
             case "workspaces": self = .workspaces
+            case "panes": self = .panes
             case "onboarding": self = .onboarding
             case "tailscale": self = .tailscale
             case "settings": self = .settings
@@ -77,6 +78,7 @@ final class DemoDirector {
     private(set) var mode: SessionView.Mode = .agents
     private(set) var paneID: String?
     private(set) var showsSettings = false
+    private(set) var showsPanes = false
     private(set) var draft: String?
     private(set) var sendCount = 0
     /// Set by the open pane once its terminal has painted a frame.
@@ -97,6 +99,7 @@ final class DemoDirector {
         case .pane(let id): paneID = id
         case .terminal(let id): paneID = id; forceTerminal = true
         case .settings: showsSettings = true
+        case .panes: showsPanes = true
         default: break
         }
         draft = launch?.draft
@@ -163,6 +166,7 @@ final class DemoDirector {
             mode = raw == "workspaces" ? .workspaces : .agents
         case .sheet(let name):
             showsSettings = name == "settings"
+            showsPanes = name == "panes"
         case .draft(let text):
             // Typed at a human pace so the composer grows the way it would under a thumb.
             for end in text.indices.dropFirst() + [text.endIndex] {

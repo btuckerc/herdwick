@@ -12,9 +12,8 @@ struct AttentionSnapshot: Codable, Equatable {
             var label: String {
                 switch self {
                 case .blocked: "Needs you"
-                case .done: "Done"
+                case .done, .idle: "Done"
                 case .working: "Working"
-                case .idle: "Idle"
                 }
             }
 
@@ -22,8 +21,8 @@ struct AttentionSnapshot: Codable, Equatable {
                 switch self {
                 case .blocked: "exclamationmark.bubble.fill"
                 case .done: "checkmark.circle.fill"
-                case .working: "circle.dotted.circle.fill"
-                case .idle: "moon.zzz.fill"
+                case .working: "circle.dotted.circle"
+                case .idle: "checkmark.circle"
                 }
             }
         }

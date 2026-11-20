@@ -19,6 +19,7 @@ final class TerminalController: ObservableObject {
     /// SwiftTerm's cell size for the current font (its `computeFontDimensions`).
     private(set) var cellHeight: CGFloat = 0
     private(set) var cellWidth: CGFloat = 0
+    private(set) var lastOutputAt: Date?
 
     struct Grid: Hashable {
         var cols: Int
@@ -87,6 +88,7 @@ final class TerminalController: ObservableObject {
                     hasFrame = true
                     let used = Self.usedRows(view.getTerminal())
                     if used != usedRows { usedRows = used }
+                    lastOutputAt = .now
                 case .closed(let reason):
                     closedReason = reason ?? "The pane closed."
                     return
@@ -129,6 +131,16 @@ final class TerminalController: ObservableObject {
 
     func focusKeyboard() {
         _ = view.becomeFirstResponder()
+    }
+
+    /// Plain text currently painted in SwiftTerm's terminal, for the offline reader.
+    var plainText: String {
+        let terminal = view.getTerminal()
+        return (0..<min(usedRows, terminal.rows)).compactMap { row in
+            guard let line = terminal.getLine(row: row) else { return nil }
+            let text = String((0..<min(line.count, terminal.cols)).map { line[$0].getCharacter() })
+            return String(text.reversed().drop(while: \.isWhitespace).reversed())
+        }.joined(separator: "\n")
     }
 }
 
@@ -200,7 +212,9 @@ struct TerminalHistory: View {
                 var foreground = color(style.foreground) ?? theme.foregroundColor
                 var background = color(style.background)
                 if style.inverse { (foreground, background) = (background ?? theme.backgroundColor, foreground) }
-                piece.foregroundColor = style.dim ? foreground.opacity(0.6) : foreground
+                // Lighter on a light theme: 60 % washed its colours out below readable contrast
+                // (round 36).
+                piece.foregroundColor = style.dim ? foreground.opacity(theme.isDark ? 0.6 : 0.75) : foreground
                 if let background { piece.backgroundColor = background }
                 if style.bold { piece.font = Font(bold) }
                 if style.italic { piece.font = Font(font).italic() }

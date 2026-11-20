@@ -1,0 +1,26 @@
+
+ Use write exactly once to create /tmp/herdwick-test-approval-note.txt containing only approval-test. Do nothing else.
+
+
+  󱊷 Working…
+
+╭─ Allow tool: write ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Reason: target not yet approved                                                                                     │
+│ Path: /tmp/herdwick-test-approval-note.txt · Content: approval-test                                                 │
+│ Folder: /tmp — 200+ entries                                                                                         │
+│   - .cloudflare/                                                                                                    │
+│   - .tmp8198qW/                                                                                                     │
+│   - .tmpKEvhNZ/                                                                                                     │
+│   - .tmpaWTYmm/                                                                                                     │
+│   … 196 more                                                                                                        │
+│    Remember across sessions                                                                                        │
+│   Approve Directory: /tmp                                                                                           │
+│   Approve File                                                                                                      │
+│  Approve Once                                                                                                      │
+│   Deny                                                                                                              │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ↑/↓ choose · 󰌑 select · Ctrl+󰌑/Ctrl+Q approve · 󱊷 deny · Ctrl+O details · type to deny and steer                    │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭── 󰪣 Haiku 4.5   tmp ─────────────────────────────────────────────────────────────────────|─────────── 101.1 tok/s ──╮
+╰─                                                                                                                   ─╯
+tmp

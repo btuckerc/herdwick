@@ -1,0 +1,28 @@
+
+ Use ask exactly once with exactly these questions, preserving all text. Question 1: id target, header Deploy,
+ question "## Deployment 🐑\n\nWhere should the api service run with --safe enabled? Choose a target after reviewing
+ the migration.", options [{label:"Staging cluster in us-east-1 behind the existing load balancer with mirrored
+ traffic for an hour",description:"No production writes.",preview:"deploy --safe\ncheck status"},{label:"Production
+ canary 🚀"},{label:"Local only"}], recommended 0. Question 2: id fruit, header Fruit, question "Which toppings 🍐?",
+ multi true, options Apple and Pear. Wait for my answer.
+
+
+  󱊷 Working…
+
+╭─ Ask ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  Deploy    Fruit    Submit                                                                                          │
+│ Deployment 🐑                                                                                                       │
+│                                                                                                                     │
+│ Where should the api service run with --safe enabled? Choose a target after reviewing the migration.                │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│   Staging cluster in us-east-1 behind the existing load balancer with mirrored traffic for an hour (Recommended)  │
+│       No production writes.                                                                                         │
+│       │ deploy --safe                                                                                               │
+│       │ check status                                                                                                │
+│    Production canary 🚀                                                                                            │
+│    Local only                                                                                                      │
+│    Other (type your own)                                                                                           │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 󰌑 select · n note · ↑/↓ move · 󰌒/←/→ question · 󱊷 cancel · Alt+H hide                                               │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+tmp

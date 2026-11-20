@@ -43,6 +43,23 @@ private func screen(_ name: String) throws -> String {
         #expect(prompt.options.map(\.label) == ["Small", "Medium", "Large", "Other (type your own)"])
         #expect(prompt.cursor == 1)
     }
+    @Test func ompTabsUseHeadersWhenPresent() throws {
+        let prompt = try #require(ScreenPrompt.parse(try screen("omp-live-mixed")))
+        let ask = AskActivity(toolCallId: "live", questions: [
+            .init(id: "color", header: "Color", question: "Which color?",
+                  options: [.init(label: "Red"), .init(label: "Green"), .init(label: "Blue")]),
+            .init(id: "toppings", header: "Toppings", question: "Which toppings?",
+                  options: [.init(label: "Cheese"), .init(label: "Olives"), .init(label: "Basil")], multi: true),
+        ])
+        #expect(prompt.tabs == ["Color", "Toppings"])
+        #expect(PromptDriver.belongs(prompt, to: ask))
+        #expect(PromptDriver.matches(prompt, ask.questions[0]))
+        let other = AskActivity(toolCallId: "other", questions: [
+            .init(id: "shade", header: "Shade", question: "Which color?", options: ask.questions[0].options),
+            ask.questions[1],
+        ])
+        #expect(!PromptDriver.belongs(prompt, to: other))
+    }
 
     @Test func ompCustomAnswerBoxAndReview() throws {
         let custom = try #require(ScreenPrompt.parse(try screen("omp-custom")))
@@ -136,6 +153,8 @@ private func screen(_ name: String) throws -> String {
         let review = try #require(ScreenPrompt.parse(try screen("claude-ask-review")))
         #expect(review.phase == .review)
         #expect(review.options.map(\.label) == ["Submit answers", "Cancel"])
+        #expect(review.context.contains("● Which color?"))
+        #expect(review.context.contains("→ Blue"))
         let single = try #require(ScreenPrompt.parse(try screen("claude-ask-single")))
         #expect(single.tabs == ["Pet"])
         #expect(single.title == "Pick a pet")
@@ -206,15 +225,20 @@ private func askBox(cursor: Int, question: String, top: Int = 0, window: Int? = 
 }
 
 /// Behaves like omp's single-question ask: arrows move, Enter on an option closes the box,
-/// Enter on "Other" opens the custom-answer box, whose Enter closes it.
+/// Enter on "Other" opens the custom-answer box, whose Enter closes it. With `lag`, each key
+/// shows up only after that many more reads, as the real screen trails the keys.
 private final class FakeOmp: PromptIO, @unchecked Sendable {
     var cursor = 1; var question: String; var keys: [String] = []; var typed: [String] = []
     var confirmed = true; var stuck = false; var closed = false; var customBox = false
-    var window: Int?; var top = 0
+    var window: Int?; var top = 0; var lag = 0
+    private var stale: [String] = []
     init(question: String = "Which colour should the sheep be?", window: Int? = nil) {
         self.question = question; self.window = window
     }
     func readVisible() async throws -> String {
+        stale.isEmpty ? render() : stale.removeFirst()
+    }
+    private func render() -> String {
         if closed { return "❯ \n" }
         if customBox { return "╭─ Custom answer: \(question) ─╮\n│ > │\n╰──╯" }
         return askBox(cursor: cursor, question: question, top: top, window: window)
@@ -223,6 +247,7 @@ private final class FakeOmp: PromptIO, @unchecked Sendable {
         self.keys += keys
         guard !stuck else { return }
         for key in keys {
+            stale += Array(repeating: render(), count: lag)
             switch key {
             case "down": cursor = min(cursor + 1, labels.count - 1)
             case "up": cursor = max(cursor - 1, 0)
@@ -235,7 +260,10 @@ private final class FakeOmp: PromptIO, @unchecked Sendable {
         }
     }
     func type(_ text: String) async throws { typed.append(text) }
-    func waitForResult(toolCallId: String, timeout: Duration) async throws -> Bool { confirmed }
+    func waitForResult(toolCallId: String, timeout: Duration) async throws -> Bool {
+        if !confirmed { try await Task.sleep(for: timeout) }
+        return confirmed
+    }
 }
 
 private let sheep = AskActivity(toolCallId: "x", questions: [
@@ -307,8 +335,10 @@ private let retry = AskQuestion(id: "retry_policy", question: "Reconnects to one
         #expect(!io.keys.contains("enter"))
     }
 
-    @Test func otherOpensTheBoxTypesAndSubmits() async throws {
-        let io = FakeOmp()
+    /// The screen trails the keys, so reads right after Enter can still show the text box.
+    @Test(arguments: [0, 2])
+    func otherOpensTheBoxTypesAndSubmits(lag: Int) async throws {
+        let io = FakeOmp(); io.lag = lag
         try await PromptDriver.answer(sheep, replies: [QuestionReply(custom: "Purple")], io: io, settle: fast)
         #expect(io.typed == ["Purple"])
         #expect(io.keys == ["down", "down", "enter", "enter"])
@@ -325,8 +355,10 @@ private let retry = AskQuestion(id: "retry_policy", question: "Reconnects to one
     @Test func notConfirmed() async {
         let io = FakeOmp(); io.confirmed = false
         await #expect(throws: PromptDriverError.notConfirmed) {
-            try await PromptDriver.answer(sheep, replies: [QuestionReply(selected: ["Green"])], io: io, settle: fast)
+            try await PromptDriver.answer(sheep, replies: [QuestionReply(selected: ["Green"])], io: io, settle: fast,
+                                          confirmTimeout: .milliseconds(600))
         }
+        #expect(io.keys == ["enter"])
     }
 
     /// Only two rows fit: moving scrolls the list, so rows are followed by label, not position.
@@ -341,16 +373,24 @@ private let retry = AskQuestion(id: "retry_policy", question: "Reconnects to one
     }
 }
 
-/// Replays real screens, advancing only when the expected input is sent.
+/// Replays real screens, advancing only when the expected input is sent. `blanks[input]` reads
+/// after that input show no prompt, as a frame caught mid-redraw does. With `resultWhenDone`,
+/// the agent logs its result only once every step has been sent.
 private final class PromptReplay: PromptIO, @unchecked Sendable {
     var visible: String
     var steps: [(String, String)]
     var confirmed: Bool
     var confirmations = 0
+    var blanks: [String: Int] = [:]
+    var resultWhenDone = false
+    private var pendingBlanks = 0
     init(_ visible: String, steps: [(String, String)], confirmed: Bool = true) {
         self.visible = visible; self.steps = steps; self.confirmed = confirmed
     }
-    func readVisible() async throws -> String { visible }
+    func readVisible() async throws -> String {
+        guard pendingBlanks == 0 else { pendingBlanks -= 1; return "Working…" }
+        return visible
+    }
     func send(keys: [String]) async throws {
         for key in keys { try advance(key) }
     }
@@ -359,10 +399,13 @@ private final class PromptReplay: PromptIO, @unchecked Sendable {
         guard let step = steps.first, step.0 == input else { throw PromptDriverError.unexpectedScreen }
         steps.removeFirst()
         visible = step.1
+        pendingBlanks = blanks[input] ?? 0
     }
     func waitForResult(toolCallId: String, timeout: Duration) async throws -> Bool {
         confirmations += 1
-        return confirmed
+        let logged = confirmed && (!resultWhenDone || steps.isEmpty)
+        if !logged { try await Task.sleep(for: timeout) }
+        return logged
     }
 }
 
@@ -394,12 +437,36 @@ private final class PromptReplay: PromptIO, @unchecked Sendable {
             } else {
                 await #expect(throws: PromptDriverError.notConfirmed) {
                     try await PromptDriver.answer(ask, replies: [.init(selected: ["Apple"], custom: "Banana", note: "Keep the peel")],
-                                                  io: io, settle: .zero)
+                                                  io: io, settle: .zero, confirmTimeout: .milliseconds(300))
                 }
             }
             #expect(io.steps.isEmpty)
             #expect(io.confirmations == 1)
         }
+        // A review page recording anything else is never submitted: another note, a note the
+        // replies don't carry, more or less of a note than they do (shown whole), or Other
+        // text they didn't send.
+        for reply in [QuestionReply(selected: ["Apple"], custom: "Banana", note: "Eat the peel"),
+                      QuestionReply(selected: ["Apple"], custom: "Banana", note: nil),
+                      QuestionReply(selected: ["Apple"], custom: "Banana", note: "Keep"),
+                      QuestionReply(selected: ["Apple"], custom: "Banana", note: "Keep the peel; do not deploy"),
+                      QuestionReply(selected: ["Apple"], custom: nil, note: "Keep the peel")] {
+            let io = PromptReplay(try screen("omp-rich-review"), steps: [])
+            await #expect(throws: PromptDriverError.unexpectedScreen) {
+                try await PromptDriver.answer(ask, replies: [reply], io: io, settle: .zero)
+            }
+            #expect(io.confirmations == 0)
+        }
+        // Another ask whose id ends the same (`pings` in `toppings`) doesn't own this review.
+        let suffix = AskActivity(toolCallId: "suffix", questions: [
+            AskQuestion(id: "pings", question: "Choose toppings", options: ask.questions[0].options, multi: true)
+        ])
+        let io = PromptReplay(try screen("omp-rich-review"), steps: [])
+        await #expect(throws: PromptDriverError.questionMismatch) {
+            try await PromptDriver.answer(suffix, replies: [.init(selected: ["Apple"], custom: "Banana", note: "Keep the peel")],
+                                          io: io, settle: .zero)
+        }
+        #expect(io.confirmations == 0)
     }
 
     @Test func choicesRevalidateEveryMove() async throws {
@@ -423,5 +490,160 @@ private final class PromptReplay: PromptIO, @unchecked Sendable {
         await #expect(throws: PromptDriverError.questionMismatch) {
             try await PromptDriver.choose("Approve", on: expected, io: io, settle: .zero)
         }
+    }
+}
+@Suite struct AskResumeTests {
+    @Test(arguments: ["omp-review", "claude-ask-review"])
+    func resumesFromReviewAndChecksRecordedAnswers(name: String) async throws {
+        let ask: AskActivity
+        let replies: [QuestionReply]
+        if name == "omp-review" {
+            ask = AskActivity(toolCallId: "review", questions: [
+                .init(id: "size", question: "Which size?", options: [.init(label: "Small"), .init(label: "Medium"), .init(label: "Large")]),
+                .init(id: "drink", question: "Which drink?", options: [.init(label: "Tea"), .init(label: "Coffee")]),
+            ])
+            replies = [.init(selected: ["Large"]), .init(custom: "Sparkling water")]
+        } else {
+            ask = AskActivity(toolCallId: "review", questions: [
+                .init(id: "color", header: "Color", question: "Which color?", options: [.init(label: "Red"), .init(label: "Green"), .init(label: "Blue")]),
+                .init(id: "toppings", header: "Toppings", question: "Which toppings?", options: [.init(label: "Cheese"), .init(label: "Olives"), .init(label: "Basil")], multi: true),
+            ])
+            replies = [.init(selected: ["Blue"]), .init(selected: ["Cheese", "Basil"])]
+        }
+        let io = PromptReplay(try screen(name), steps: [("enter", "Working…")])
+        try await PromptDriver.answer(ask, replies: replies, io: io, settle: .zero)
+        #expect(io.steps.isEmpty)
+        #expect(io.confirmations == 1)
+
+        let wrong = PromptReplay(try screen(name), steps: [])
+        var wrongReplies = replies
+        wrongReplies[wrongReplies.count - 1] = .init(selected: name == "omp-review" ? ["Tea"] : ["Olives"])
+        await #expect(throws: PromptDriverError.unexpectedScreen) {
+            try await PromptDriver.answer(ask, replies: wrongReplies, io: wrong, settle: .zero)
+        }
+        #expect(wrong.steps.isEmpty)
+        let mismatched = name == "omp-review"
+            ? try screen(name).replacingOccurrences(of: "size    drink", with: "wrong    drink")
+            : try screen(name).replacingOccurrences(of: "☒ Color", with: "☒ Wrong")
+        let wrongAsk = PromptReplay(mismatched, steps: [])
+        await #expect(throws: PromptDriverError.questionMismatch) {
+            try await PromptDriver.answer(ask, replies: replies, io: wrongAsk, settle: .zero)
+        }
+        #expect(wrongAsk.steps.isEmpty)
+    }
+
+    @Test func resumesFromOmpReviewWithHeaderLabels() async throws {
+        let ask = AskActivity(toolCallId: "headers", questions: [
+            .init(id: "color", header: "Color", question: "Which color?",
+                  options: [.init(label: "Red"), .init(label: "Green"), .init(label: "Blue")]),
+            .init(id: "toppings", header: "Toppings", question: "Which toppings?",
+                  options: [.init(label: "Cheese"), .init(label: "Olives"), .init(label: "Basil")], multi: true),
+        ])
+        let io = PromptReplay(try screen("omp-live-mixed-review"), steps: [("enter", "Working…")])
+        try await PromptDriver.answer(ask, replies: [.init(selected: ["Red"]), .init(selected: ["Cheese", "Olives"])],
+                                      io: io, settle: .zero)
+        #expect(io.steps.isEmpty)
+        #expect(io.confirmations == 1)
+        // An earlier single-question ask doesn't own another ask's review, though its one
+        // answer agrees: Submit would send the other question's answer too.
+        let single = AskActivity(toolCallId: "single", questions: [ask.questions[0]])
+        let other = PromptReplay(try screen("omp-live-mixed-review"), steps: [])
+        await #expect(throws: PromptDriverError.questionMismatch) {
+            try await PromptDriver.answer(single, replies: [.init(selected: ["Red"])], io: other, settle: .zero)
+        }
+        #expect(other.confirmations == 0)
+    }
+
+    @Test func resumesFromSecondQuestion() async throws {
+        let ask = AskActivity(toolCallId: "later", questions: [
+            .init(id: "size", question: "Which size?", options: [.init(label: "Small"), .init(label: "Medium"), .init(label: "Large")]),
+            .init(id: "drink", question: "Which drink?", options: [.init(label: "Tea"), .init(label: "Coffee")]),
+        ])
+        let io = PromptReplay(try screen("omp-q2"), steps: [("enter", "Working…")])
+        try await PromptDriver.answer(ask, replies: [.init(selected: ["Large"]), .init(selected: ["Coffee"])],
+                                      io: io, settle: .zero)
+        #expect(io.steps.isEmpty)
+        #expect(io.confirmations == 1)
+    }
+
+    /// Enter on the last question, then frames with no prompt while omp draws the review page:
+    /// the blank frames are not the end, and the review is still submitted.
+    @Test func blankFramesBeforeTheReviewStillSubmit() async throws {
+        let ask = AskActivity(toolCallId: "blank", questions: [
+            .init(id: "size", question: "Which size?", options: [.init(label: "Small"), .init(label: "Medium"), .init(label: "Large")]),
+            .init(id: "drink", question: "Which drink?", options: [.init(label: "Tea"), .init(label: "Coffee")]),
+        ])
+        let review = try screen("omp-review").replacingOccurrences(of: "“Sparkling water”", with: "Coffee")
+        let io = PromptReplay(try screen("omp-q2"), steps: [("enter", review), ("enter", "Working…")])
+        io.blanks = ["enter": 3]; io.resultWhenDone = true
+        try await PromptDriver.answer(ask, replies: [.init(selected: ["Large"]), .init(selected: ["Coffee"])],
+                                      io: io, settle: .zero)
+        #expect(io.steps.isEmpty)
+    }
+}
+
+extension ScreenPromptTests {
+    @Test func currentOmpApprovalActionsAreAllSelectableRows() async throws {
+        for (name, labels, initial) in [
+            ("omp-approval-session", ["Approve", "Approve bash for this session", "Deny"], 0),
+            ("omp-approval-cached-write", ["Approve Directory: /tmp", "Approve File", "Approve Once", "Deny"], 2),
+        ] {
+            let visible = try screen(name)
+            let prompt = try #require(ScreenPrompt.parse(visible))
+            #expect(prompt.options.map(\.label) == labels)
+            #expect(prompt.cursor == initial)
+            #expect(prompt.contextMayBeTruncated)
+            #expect(!prompt.context.contains { $0.contains("Ctrl+") })
+            // Replay every real action, including Deny after the newly added approval rows.
+            for target in labels.indices {
+                var cursor = initial
+                var steps: [(String, String)] = []
+                while cursor != target {
+                    let next = cursor + (target > cursor ? 1 : -1)
+                    let moved = visible.replacingOccurrences(of: " " + labels[initial], with: "  " + labels[initial])
+                        .replacingOccurrences(of: "  " + labels[next], with: " " + labels[next])
+                    steps.append((target > cursor ? "down" : "up", moved))
+                    cursor = next
+                }
+                steps.append(("enter", "Working…"))
+                let io = PromptReplay(visible, steps: steps)
+                try await PromptDriver.choose(labels[target], on: prompt, io: io, settle: .zero)
+                #expect(io.steps.isEmpty)
+            }
+        }
+    }
+
+    @Test func liveMarkdownHeadingPreviewAndEmojiMatchTranscript() throws {
+        let url = try #require(Bundle.module.url(forResource: "omp-matrix-transcript", withExtension: "jsonl", subdirectory: "Screens"))
+        var reader = TranscriptReader(format: .omp)
+        var conversation = Conversation()
+        conversation.apply(reader.append(Array(try Data(contentsOf: url))))
+        let ask = try #require(conversation.pendingAsk)
+        let prompt = try #require(ScreenPrompt.parse(screen("omp-matrix-wide")))
+        #expect(PromptDriver.belongs(prompt, to: ask))
+        #expect(PromptDriver.matches(prompt, ask.questions[0]))
+        #expect(PromptDriver.rows(prompt, ask.questions[0]) == [0, 1, 2, 3])
+        #expect(ask.questions[0].options[0].preview == "deploy --safe\ncheck status")
+        #expect(prompt.options[0].detail?.contains("check status") == true)
+        var changed = prompt
+        changed.title += " Run immediately."
+        #expect(!PromptDriver.matches(changed, ask.questions[0]))
+    }
+
+    @Test func approvalDetailChangesAreNotTheSameWait() throws {
+        let visible = try screen("claude-perm-bash")
+        let prompt = try #require(ScreenPrompt.parse(visible))
+        var changed = prompt
+        changed.options[0].detail = "An additional dangerous action"
+        #expect(!prompt.representsSameWait(as: changed))
+        changed = prompt
+        changed.cursor = 1
+        #expect(prompt.representsSameWait(as: changed))
+    }
+}
+
+extension ScreenPromptTests {
+    @Test func completedApprovalScreenIsNotStillAPrompt() throws {
+        #expect(ScreenPrompt.parse(try screen("omp-approval-after")) == nil)
     }
 }

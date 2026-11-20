@@ -16,7 +16,7 @@ struct ToolStepView: View {
         // Parsed once per update: it decodes the call's JSON and, for edits, builds the diff.
         let detail = tool.detail
         VStack(alignment: .leading, spacing: 6) {
-            QuietHeader(isExpanded: expanded, action: opens(detail) ? { expanded.toggle() } : nil) { title(detail) }
+            QuietHeader(isExpanded: expanded, symbol: symbol(detail), action: opens(detail) ? { expanded.toggle() } : nil) { title(detail) }
                 .accessibilityHint(tool.images.isEmpty || inlineImages || expanded ? "" : "Shows the images")
             // The row is the images' disclosure, so no separate "Image" label; Full shows them as is.
             if !tool.images.isEmpty, inlineImages || expanded {
@@ -33,11 +33,13 @@ struct ToolStepView: View {
         return true
     }
 
-    /// What the call did, in words; commands read as themselves. A failure says so in red.
+    /// What the call did, in words; commands read as themselves, a test run's totals first.
+    /// A failure says so in red.
     private func title(_ detail: ToolDetail) -> Text {
         if tool.state == .running { return Text("\(tool.runningTitle)…") }
         let text: Text = switch detail {
-        case .shell(let command, _, _): Text(command)
+        case .shell(let command, let output, _):
+            TestTally(command: command, output: output).map { Text("\($0.token) · \(command)") } ?? Text(command)
         case .read(let path, let range): Text(["Read \(lastComponent(path))", range].compactMap { $0 }.joined(separator: " · "))
         case .edit(let files): Text(Self.edited(files))
         case .write(let path, let content):
@@ -64,8 +66,7 @@ struct ToolStepView: View {
         case .read(let path, _):
             if tool.images.isEmpty, isImagePath(path), let previewImage {
                 Button(path) { previewImage(.file(path)) }
-                    .font(.subheadline)
-                    .buttonStyle(.borderless)
+                    .inlineAction()
             } else if isTextPath(path), let url = fileLink(path) {
                 Link(path, destination: url).font(.subheadline)
             } else {
@@ -82,6 +83,18 @@ struct ToolStepView: View {
             MarkdownText(text: text)
         }
     }
+    /// The call's kind, as its run's line shows it (round 14: one wrench for every tool).
+    private func symbol(_ detail: ToolDetail) -> String {
+        switch detail {
+        case .shell: "apple.terminal"
+        case .read: "doc.text"
+        case .search: "magnifyingglass"
+        case .edit, .write: "pencil"
+        case .task: "person.2"
+        case .generic: tool.name == "wait" ? "hourglass" : "wrench.and.screwdriver"
+        case .web, .todo, .plan: "wrench.and.screwdriver"
+        }
+    }
 
     private static func lines(_ text: String) -> String {
         let count = text.split(separator: "\n", omittingEmptySubsequences: false).count
@@ -91,6 +104,16 @@ struct ToolStepView: View {
     private static func edited(_ files: [FileDiff]) -> String {
         let name = files.count == 1 ? lastComponent(files[0].path) : "\(files.count) files"
         return "Edited \(name) · +\(files.reduce(0) { $0 + $1.added }) −\(files.reduce(0) { $0 + $1.removed })"
+    }
+}
+
+extension TestTally {
+    /// The totals as a token before a run's words: failures in red, else a green check. It
+    /// never wraps inside itself (round 9: "✓" ended one line and "8 passed" began the next).
+    var token: Text {
+        let words = summary.replacingOccurrences(of: " ", with: "\u{00A0}")
+        if anyFailed { return Text(words).foregroundStyle(Tokens.Tint.danger) }
+        return Text("\(Text(Image(systemName: "checkmark")).foregroundStyle(Tokens.Tint.settled))\u{00A0}\(words)")
     }
 }
 
@@ -172,7 +195,7 @@ private struct OutputBlock: View {
                     .textSelection(.enabled)
             }
             if lines.count > Self.rendered && !showingAll {
-                Button("Show all \(lines.count) lines") { showingAll = true }.font(.subheadline).buttonStyle(.borderless)
+                Button("Show all \(lines.count) lines") { showingAll = true }.inlineAction()
             }
         }
     }
@@ -255,7 +278,7 @@ struct TodoCard: View {
     let tool: ToolActivity
     @ViewBuilder var body: some View {
         if case .todo(let items) = tool.detail {
-            VStack(alignment: .leading, spacing: 9) { Text("Plan · \(items.filter { $0.state == .done }.count) of \(items.count) done").font(.caption.weight(.semibold)).foregroundStyle(.secondary); TodoList(items: items) }.padding(14).background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 18))
+            VStack(alignment: .leading, spacing: 9) { Text("Plan · \(items.filter { $0.state == .done }.count) of \(items.count) done").font(.caption.weight(.semibold)).foregroundStyle(.secondary); TodoList(items: items) }.padding(14).background(Tokens.Surface.inset, in: .rect(cornerRadius: Tokens.Radius.plate))
         } else { EmptyView() }
     }
 }

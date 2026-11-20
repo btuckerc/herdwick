@@ -7,34 +7,58 @@ struct OnboardingView: View {
     @Environment(AppModel.self) private var model
     @Environment(DemoDirector.self) private var demo: DemoDirector?
     @State private var path: [HostChoices.Choice] = []
+    @State private var setupURL: URL?
 
     var body: some View {
         NavigationStack(path: $path) {
-            ScrollView {
-                VStack(spacing: 28) {
-                    VStack(spacing: 10) {
-                        Image(systemName: "terminal.fill")
-                            .font(.system(size: 54, weight: .semibold))
-                            .foregroundStyle(.tint)
-                            .padding(22)
-                            .glassEffect(.regular, in: .rect(cornerRadius: 28))
-                        Text("Herdwick")
-                            .font(.largeTitle.bold())
-                        Text("Your herdr agents, from anywhere.")
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
+            // The actions sit at the screen's foot, in thumb reach (round 41: opus#3, both actions
+            // in the top 60 % over an empty black 40 %), the hero and sample centred in the room
+            // above them (round 42: sa#8, opus#3, top-aligned they left the empty band between).
+            // Taller than the screen, at accessibility sizes, it scrolls as one column.
+            GeometryReader { proxy in
+                ScrollView {
+                    VStack(spacing: 22) {
+                        Spacer(minLength: 0)
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: Tokens.Space.m) {
+                                HerdMark(size: 60, mood: .working)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Herdwick")
+                                        .font(.largeTitle.bold())
+                                    Text("Your coding agents, in your pocket.")
+                                        .font(.subheadline)
+                                        .foregroundStyle(Tokens.secondaryText)
+                                }
+                            }
+                            SampleAsk()
+                                .padding(.top, 8)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, Tokens.Space.s)
+                        Spacer(minLength: 0)
+                        VStack(spacing: Tokens.Space.m) {
+                            NavigationLink {
+                                connectionSetup
+                            } label: {
+                                Text("Connect a Computer")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .primaryAction()
+                            .controlSize(.large)
+                            Button { model.startDemo() } label: {
+                                Text("Explore a Demo Host").frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
+                            Text("Herdwick connects to herdr over SSH and installs nothing.")
+                                .font(.footnote)
+                                .foregroundStyle(Tokens.secondaryText)
+                                .multilineTextAlignment(.center)
+                        }
                     }
-                    .padding(.top, 40)
-                    HostChoices()
-                    Button("No machine handy? Explore a demo host") { model.startDemo() }
-                        .font(.subheadline.weight(.medium))
-                    Text("Herdwick runs herdr's own commands over SSH. Nothing is installed on your computer.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
+                    .padding()
+                    .frame(minHeight: proxy.size.height)
                 }
-                .padding()
             }
             .navigationDestination(for: HostChoices.Choice.self) { choice in
                 switch choice {
@@ -43,7 +67,163 @@ struct OnboardingView: View {
                 }
             }
         }
+        .sheet(item: $setupURL) { url in SafariView(url: url).ignoresSafeArea() }
         .onChange(of: demo?.launch?.scene, initial: true) { _, scene in if scene == .tailscale { path = [.tailscale] } }
+    }
+
+    private var connectionSetup: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Connect the computer that runs herdr")
+                    .font(.headline)
+                step(1, "Install herdr on your Mac or Linux machine.", detail: "It keeps your Claude Code, Codex and omp agents in terminal tabs.")
+                Button("How to Set Up herdr") { setupURL = URL(string: "https://herdr.dev") }
+                    .inlineAction()
+                    .padding(.leading, 34)
+                step(2, "Connect to it here.", detail: "Over SSH, running only herdr's own commands. Herdwick installs nothing.")
+                HostChoices()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+        }
+        .navigationTitle("Connect")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// A numbered step: its number in a tinted circle, what to do, then why in secondary text.
+    private func step(_ number: Int, _ title: String, detail: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text("\(number)")
+                .font(.footnote.weight(.bold).monospacedDigit())
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 24, height: 24)
+                .background(Color.accentColor.opacity(0.18), in: .circle)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.subheadline.weight(.semibold))
+                Text(detail).font(.subheadline).foregroundStyle(Tokens.secondaryText)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Step \(number): \(title) \(detail)")
+        }
+    }
+}
+
+/// What Herdwick is for, shown rather than listed (round 7: three generic symbol-and-text
+/// bullets): an agent asking to run a command, as an inbox row says it, with the thread's
+/// Approve and Deny. They work on the sample: the receipt replaces them and the agent goes back
+/// to work, then after a beat it asks again. Under it the rest of a small herd, one at work and
+/// one done, as the inbox lists them (round 50: sa#14, opus#12: one card under an empty band
+/// didn't say the app watches many agents).
+private struct SampleAsk: View {
+    @Environment(Settings.self) private var settings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var answer: String?
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        let status: AgentStatus = answer == nil ? .blocked : .working
+        VStack(alignment: .leading, spacing: Tokens.Space.m) {
+            // Labelled, so the sample doesn't read as a real agent asking (round 8).
+            Label("Try it · a sample inbox", systemImage: "hand.tap")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Tokens.secondaryText)
+                .accessibilityHidden(true)
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: status.symbol)
+                    .foregroundStyle(status.tint)
+                    .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.rotate, options: .repeat(.continuous).speed(0.25), isActive: answer != nil && !reduceMotion)
+                    .frame(minWidth: 22)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Fix flaky retry test").font(.body.weight(.semibold))
+                        Spacer(minLength: 4)
+                        Text("now").font(.footnote).foregroundStyle(Tokens.secondaryText)
+                    }
+                    Text("\(status.label) · studio").font(.subheadline).foregroundStyle(Tokens.secondaryText)
+                        .contentTransition(.interpolate)
+                    Text("Allow bash?").font(.subheadline)
+                    PendingCommand(command: "bun test src/retry.test.ts", mayBeCut: false)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            if let answer {
+                Label(answer == "Approved" ? "Approved · it's running the tests" : "Denied · it'll find another way",
+                      systemImage: answer == "Approved" ? "checkmark.shield" : "xmark.shield")
+                    .font(.footnote)
+                    .foregroundStyle(Tokens.secondaryText)
+                    .frame(minHeight: Tokens.minTap)
+                    .transition(.opacity)
+            } else {
+                HStack(spacing: Tokens.Space.s) {
+                    Button { choose("Approved") } label: {
+                        Text("Approve").frame(maxWidth: .infinity, minHeight: Tokens.minTap)
+                    }
+                    .primaryAction(.roundedRectangle(radius: Tokens.Radius.choice))
+                    Button { choose("Denied") } label: {
+                        Text("Deny").frame(maxWidth: .infinity, minHeight: Tokens.minTap)
+                    }
+                    .choiceButton()
+                    // Its own width beside Approve, as the inbox and thread size it (round 60: opus#6).
+                    .frame(minWidth: 96)
+                    .fixedSize(horizontal: !typeSize.isAccessibilitySize, vertical: false)
+                }
+                .font(.body.weight(.medium))
+                .transition(.opacity)
+            }
+            // The rest of the herd; at accessibility sizes the ask alone, kept above the fold.
+            if !typeSize.isAccessibilitySize {
+                Divider()
+                herdRow(.working, title: "Token-bucket rate limiter", detail: "Working · api", age: "for 2m",
+                        spoken: "Token-bucket rate limiter, api, Working, working since 2 minutes ago")
+                Divider()
+                herdRow(.done, title: "Review PR #412", detail: "No blocking findings in PR #412.", age: "45m ago",
+                        spoken: "Review PR #412, Done, last turn 45 minutes ago, No blocking findings in PR #412.")
+            }
+        }
+        .padding(Tokens.Space.l)
+        .background(Tokens.Surface.raised, in: .rect(cornerRadius: Tokens.Radius.card))
+        .sensoryFeedback(.success, trigger: answer) { _, new in new != nil && settings.haptics }
+        .task(id: answer) {
+            guard answer != nil else { return }
+            // As long as the inbox's Undo with VoiceOver or at accessibility sizes (round 42:
+            // sb#15, 3 s for everyone, so the receipt went before it was read).
+            let long = UIAccessibility.isVoiceOverRunning || typeSize.isAccessibilitySize
+            try? await Task.sleep(for: .seconds(long ? 12 : 3))
+            withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .smooth) { answer = nil }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Sample inbox, try it")
+    }
+
+    private func choose(_ verdict: String) {
+        withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .snappy) { answer = verdict }
+        AccessibilityNotification.Announcement(verdict).post()
+    }
+
+    /// One of the sample's other agents, as an inbox row: glyph, title and age, then a grey line;
+    /// heard as the inbox's rows are, status and age in words (round 51: sb#8, "45m" and no Done).
+    private func herdRow(_ status: AgentStatus, title: String, detail: String, age: String, spoken: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: status.symbol)
+                .foregroundStyle(status.tint)
+                .symbolEffect(.rotate, options: .repeat(.continuous).speed(0.25), isActive: status == .working && !reduceMotion)
+                .frame(minWidth: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(title).font(.body)
+                    Spacer(minLength: 4)
+                    Text(age).font(.footnote).foregroundStyle(Tokens.secondaryText)
+                }
+                Text(detail).font(.subheadline).foregroundStyle(Tokens.secondaryText).lineLimit(1)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken)
     }
 }
 
@@ -73,24 +253,22 @@ struct HostChoices: View {
     enum Choice: Hashable { case tailscale, direct }
 
     var body: some View {
-        GlassEffectContainer(spacing: 14) {
-            VStack(spacing: 14) {
-                NavigationLink(value: Choice.tailscale) {
-                    ChoiceCard(
-                        symbol: "point.3.filled.connected.trianglepath.dotted",
-                        title: "Tailscale",
-                        detail: "Sign in once and pick a machine. Works anywhere, with no VPN to switch on.",
-                        badge: "Recommended"
-                    )
-                }
-                NavigationLink(value: Choice.direct) {
-                    ChoiceCard(
-                        symbol: "network",
-                        title: "Address",
-                        detail: "An IP, hostname or URL this iPhone can already reach.",
-                        badge: nil
-                    )
-                }
+        VStack(spacing: 14) {
+            NavigationLink(value: Choice.tailscale) {
+                ChoiceCard(
+                    symbol: "point.3.filled.connected.trianglepath.dotted",
+                    title: "Tailscale",
+                    detail: "Sign in once and pick a machine. Works anywhere, with no VPN to switch on.",
+                    badge: "Recommended"
+                )
+            }
+            NavigationLink(value: Choice.direct) {
+                ChoiceCard(
+                    symbol: "network",
+                    title: "Address",
+                    detail: "An IP, hostname or URL this iPhone can already reach.",
+                    badge: nil
+                )
             }
         }
         .buttonStyle(.plain)
@@ -107,14 +285,14 @@ private struct ChoiceCard: View {
         HStack(spacing: 16) {
             Image(systemName: symbol)
                 .font(.title2)
-                .foregroundStyle(.tint)
+                .foregroundStyle(.secondary)
                 .frame(width: 36)
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(title).font(.headline)
                     if let badge {
                         Text(badge)
-                            .font(.caption2.weight(.semibold))
+                            .font(.caption.weight(.semibold))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
                             .background(.tint.opacity(0.15), in: .capsule)
@@ -129,8 +307,9 @@ private struct ChoiceCard: View {
             Image(systemName: "chevron.right").foregroundStyle(.tertiary)
         }
         .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.Surface.raised, in: .rect(cornerRadius: Tokens.Radius.card))
         .contentShape(.rect)
-        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 24))
     }
 }
 
@@ -293,7 +472,7 @@ struct TailscaleSetupView: View {
                     Text("Sign in to your tailnet in the browser. Herdwick joins it as its own device.")
                 } actions: {
                     if let url {
-                        Button("Continue in Browser") { loginURL = url }.buttonStyle(.glassProminent)
+                        Button("Continue in Browser") { loginURL = url }.primaryAction()
                     } else {
                         ProgressView()
                     }
@@ -307,7 +486,7 @@ struct TailscaleSetupView: View {
                 } description: {
                     Text(message)
                 } actions: {
-                    Button("Try Again") { tailnet.start() }.buttonStyle(.glassProminent)
+                    Button("Try Again") { tailnet.start() }.primaryAction()
                 }
             }
         }
@@ -323,7 +502,7 @@ struct TailscaleSetupView: View {
         } description: {
             Text("Herdwick has Tailscale built in. It reaches your machines directly, even when the Tailscale app is off or not installed.")
         } actions: {
-            Button("Sign In with Tailscale") { tailnet.start() }.buttonStyle(.glassProminent)
+            Button("Sign In with Tailscale") { tailnet.start() }.primaryAction()
         }
     }
 
@@ -468,7 +647,7 @@ private struct KeySetupSheet: View {
                     } description: {
                         Text(message)
                     } actions: {
-                        Button("Try Again") { setup.retry() }.buttonStyle(.glassProminent)
+                        Button("Try Again") { setup.retry() }.primaryAction()
                     }
                 case .finished:
                     // Nothing left to decide: add the host and let the inbox take over.
@@ -502,11 +681,11 @@ private struct KeySetupSheet: View {
                 Button { setup.install() } label: {
                     Text("Install This iPhone's Key").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.glassProminent)
+                .primaryAction()
                 Button { setup.keepPassword() } label: {
                     Text("Keep Using Password").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.glass)
+                .floatingControl()
             }
             .controlSize(.large)
         }

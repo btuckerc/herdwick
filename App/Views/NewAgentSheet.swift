@@ -18,6 +18,7 @@ struct NewAgentTarget: Hashable {
 /// folder on the host is a few taps away without typing.
 struct NewAgentSheet: View {
     @Environment(AppModel.self) private var model
+    @Environment(SceneState.self) private var scene
     @Environment(Settings.self) private var settings
     @Environment(\.dismiss) private var dismiss
     let links: [HostConnection]
@@ -28,7 +29,17 @@ struct NewAgentSheet: View {
     @State private var kind: String
     @State private var presetID: LaunchPreset.ID?
     @State private var pages: [Page] = []
+    @State private var firstMessage = ""
+    /// Up on open, as Mail's compose is: what to work on is what the sheet is for (round 21:
+    /// the field waited for a tap under a form with a dead gap above Start).
+    @FocusState private var messageFocused: Bool
+    /// Start & Send, or Start Without Sending, whichever started the agent.
+    @State private var sendsFirstMessage = true
+    @State private var showsOptions = false
     @State private var opening: Opening?
+    /// The agent or terminal opened and the sheet is leaving: it stays busy through its exit
+    /// (round 60: "Start & Send" came back enabled as the sheet slid away).
+    @State private var opened = false
     @State private var error: String?
     /// The pane made by a Start whose agent then failed; the next Start reuses it.
     @State private var created: (target: NewAgentTarget, pane: String)?
@@ -76,103 +87,165 @@ struct NewAgentSheet: View {
     }
 
     private var link: HostConnection? { target.flatMap { target in links.first { $0.identity == target.host } } }
-    private var busy: Bool { opening != nil || startFlow.running }
+    private var busy: Bool { opening != nil || startFlow.running || opened }
     private var unavailable: Bool {
-        busy || link?.isLive != true || model.demo != nil ||
+        busy || link?.isLive != true ||
         (newWorktree && branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
     var body: some View {
         NavigationStack(path: $pages) {
-            Form {
+            form
+        }
+        .presentationDetents([.large])
+        .modifier(AgentStartFeedback(flow: startFlow, onStarted: finish))
+    }
+
+    @ViewBuilder private var form: some View {
+        Form {
+            if resume == nil {
+                // The message leads, ahead of where and which agent (round 40: sa#10, the place
+                // rows and a floating Start left the editor one line above the keyboard).
                 Section {
+                    // The secondary grey, not the system's placeholder grey (round 19: in the
+                    // dark it blended into its field).
+                    TextField("First message", text: $firstMessage,
+                              prompt: Text("What should it work on?").foregroundStyle(Tokens.secondaryText), axis: .vertical)
+                        .lineLimit(4...6)
+                        .focused($messageFocused)
+                        .onAppear { messageFocused = true }
+                    // Under the message it keeps (round 65: sa#10, a detached row two sections
+                    // down, apart from the words it qualifies).
+                    if hasMessage { startWithoutSending }
+                } header: {
+                    Text("First Message")
+                } footer: {
+                    // What happens to it, not which button does what (round 23: the footer
+                    // repeated both buttons' labels).
+                    Text(hasMessage ? "Sent when the agent is ready; Start Without Sending keeps it as a draft." : "Optional. Sent when the agent is ready.")
+                }
+            }
+            Section {
+                if model.demo != nil {
+                    demoHostRow
+                    placeRow
+                } else {
                     NavigationLink(value: Page.places) { placeRow }
-                    if let resume {
-                        LabeledContent("Resume", value: resume.title)
-                    } else {
+                }
+                if let resume {
+                    LabeledContent("Resume", value: resume.title)
+                } else {
                     Picker(selection: $kind) {
                         ForEach(["omp", "claude", "codex"], id: \.self) { Text(agentKindLabel($0)).tag($0) }
                     } label: {
                         Label("Agent", systemImage: "sparkles")
                     }
                     .onChange(of: kind) { if preset?.kind != kind { presetID = nil } }
-                    if !settings.launchPresets.isEmpty {
-                        Picker(selection: $presetID) {
-                            Text("None").tag(LaunchPreset.ID?.none)
-                            ForEach(settings.launchPresets) { Text($0.name).tag(Optional($0.id)) }
-                        } label: {
-                            Label("Preset", systemImage: "slider.horizontal.3")
+                }
+            } footer: {
+                Text(footer)
+            }
+            if resume == nil, model.demo == nil {
+                Section { openTerminal }
+            }
+            if resume == nil {
+                Section {
+                    DisclosureGroup("Options", isExpanded: $showsOptions) {
+                        if !settings.launchPresets.isEmpty {
+                            Picker(selection: $presetID) {
+                                Text("None").tag(LaunchPreset.ID?.none)
+                                ForEach(settings.launchPresets) { Text($0.name).tag(Optional($0.id)) }
+                            } label: {
+                                Label("Preset", systemImage: "slider.horizontal.3")
+                            }
+                            .onChange(of: presetID) { if let preset { kind = preset.kind } }
                         }
-                        .onChange(of: presetID) { if let preset { kind = preset.kind } }
-                    }
-                    }
-                    if resume == nil, case .workspace = target?.place {
-                        Toggle("New Worktree", isOn: $newWorktree)
-                            .onChange(of: newWorktree) { created = nil }
-                        if newWorktree {
-                            TextField("New branch (base: HEAD)", text: $branch)
-                                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                                .onChange(of: branch) { created = nil }
+                        if model.demo == nil, case .workspace = target?.place {
+                            Toggle("New Worktree", isOn: $newWorktree)
+                                .onChange(of: newWorktree) { created = nil }
+                            if newWorktree {
+                                TextField("New branch (base: HEAD)", text: $branch)
+                                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                    .onChange(of: branch) { created = nil }
+                            }
                         }
                     }
+                }
+            }
+            if model.demo == nil, let link { Section { IntegrationOffer(connection: link, harness: kind) } }
+            if let link, !link.isLive {
+                Section {
+                    Button("Reconnect", systemImage: "arrow.clockwise") { Task { await link.refreshSessions(explicit: true) } }
                 } footer: {
-                    Text(footer)
-                }
-                if let link { Section { IntegrationOffer(connection: link, harness: kind) } }
-                if let link, !link.isLive, model.demo == nil {
-                    Section {
-                        Button("Reconnect", systemImage: "arrow.clockwise") { Task { await link.refreshSessions(explicit: true) } }
-                    } footer: {
-                        Text(link.statusText ?? "Not connected")
-                    }
-                }
-                if let error {
-                    Section { Text(error).foregroundStyle(.red) }
+                    Text(link.statusText ?? "Not connected")
                 }
             }
-            .safeAreaInset(edge: .bottom) { actions }
-            .navigationTitle(resume == nil ? "New Agent" : "Resume Agent")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(busy) }
+            if let error {
+                Section { Text(error).foregroundStyle(.red) }
             }
-            .navigationDestination(for: Page.self) { page in
-                switch page {
-                case .places:
-                    NewAgentPlaces(links: resume.map { item in links.filter { $0.profile.id == item.hostID && $0.activeSession == item.session } } ?? links, selection: target) { choose($0) }
-                case .folders(let host, let path):
-                    if let link = links.first(where: { $0.identity == host }) {
-                        FolderBrowser(connection: link, start: path) { choose(NewAgentTarget(host: host, place: link.place(forFolder: $0))) }
-                    }
+        }
+        .navigationTitle(resume == nil ? "New Agent" : "Resume Agent")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { toolbar }
+        .navigationDestination(for: Page.self) { page in
+            switch page {
+            case .places:
+                NewAgentPlaces(links: resume.map { item in links.filter { $0.profile.id == item.hostID && $0.activeSession == item.session } } ?? links, selection: target) { choose($0) }
+            case .folders(let host, let path):
+                if let link = links.first(where: { $0.identity == host }) {
+                    FolderBrowser(connection: link, start: path) { choose(NewAgentTarget(host: host, place: link.place(forFolder: $0))) }
                 }
             }
         }
-        .presentationDetents([.medium, .large])
-        .modifier(AgentStartFeedback(flow: startFlow, onStarted: finish))
     }
 
-    /// Start is the one big button; a plain shell in the same place is the small one beside it.
-    private var actions: some View {
-        HStack {
-            Button { Task { await open(.agent) } } label: {
-                HStack {
-                    if opening == .agent || startFlow.running { ProgressView() }
-                    Text(busy && opening != .terminal ? "Starting \(startTitle)…" : "Start \(startTitle)")
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity)
+    /// Start in the sheet's confirmation slot, as Mail's Send is (round 40: sa#10, a floating
+    /// full-width band over the keyboard cut the message editor to one line). "Start & Send"
+    /// once there's a message, since it also sends it (round 41: sa#6, sb#5, opus#7, a bare
+    /// Start hid that); the agent is in its spoken label.
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(busy) }
+        ToolbarItem(placement: .confirmationAction) {
+            Button { start(sending: true) } label: {
+                if busy && opening != .terminal && sendsFirstMessage { ProgressView() } else { Text(hasMessage ? "Start & Send" : "Start") }
             }
             .buttonStyle(.glassProminent)
-            Button { Task { await open(.terminal) } } label: {
-                if opening == .terminal { ProgressView() } else { Image(systemName: "apple.terminal") }
-            }
-            .buttonStyle(.glass)
-            .accessibilityLabel("Open Terminal")
-            .disabled(resume != nil)
+            // ⌘Return starts from the keyboard, as ⌘N opened the sheet (round 30: the
+            // keyboard loop ended at the sheet).
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(unavailable)
+            .accessibilityLabel(hasMessage ? "Start \(startTitle) and Send" : "Start \(startTitle)")
         }
-        .controlSize(.large)
+    }
+
+    /// A plain shell in the same place.
+    private var openTerminal: some View {
+        Button { Task { await open(.terminal) } } label: {
+            HStack {
+                if opening == .terminal { ProgressView() } else { Image(systemName: "apple.terminal") }
+                Text("Open Terminal")
+            }
+        }
+        .disabled(unavailable || resume != nil)
+    }
+
+    private var startWithoutSending: some View {
+        Button { start(sending: false) } label: {
+            HStack {
+                if (opening == .agent || startFlow.running) && !sendsFirstMessage { ProgressView() }
+                Text("Start Without Sending")
+            }
+        }
         .disabled(unavailable)
-        .padding()
+    }
+
+    private var hasMessage: Bool {
+        resume == nil && !firstMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func start(sending: Bool) {
+        sendsFirstMessage = sending
+        Task { await open(.agent) }
     }
 
     private var placeRow: some View {
@@ -192,16 +265,43 @@ struct NewAgentSheet: View {
         }
     }
 
+    /// The demo's host, named, with connecting a real one under it (round 24: Connect a Host
+    /// stood mid-form as a step of starting the agent, and nothing said which host it ran on).
+    private var demoHostRow: some View {
+        LabeledContent {
+            Menu {
+                Button("Connect a Host…", systemImage: "plus") {
+                    dismiss()
+                    model.endDemo()
+                }
+            } label: {
+                HStack(spacing: Tokens.Space.xs) {
+                    Text(link?.profile.name ?? "Demo")
+                    Image(systemName: "chevron.up.chevron.down").imageScale(.small)
+                }
+                .foregroundStyle(.secondary)
+            }
+            // The Agent picker's grey, not the tint's: in green, dimmed, a valid host read as
+            // disabled (round 65: sa#9).
+            .tint(.primary)
+        } label: {
+            Label("Host", systemImage: "desktopcomputer")
+        }
+    }
+
     private var preset: LaunchPreset? { settings.launchPresets.first { $0.id == presetID } }
     private var startTitle: String { preset?.name ?? agentKindLabel(kind) }
 
     private var footer: String {
-        if model.demo != nil { return "Not available in the demo." }
         guard let target, let link else { return resume == nil ? "Choose where it works." : "The original workspace is unavailable or changed. Choose a destination on the original host and session." }
+        // Said beside the workspace it would run in (round 23: a footnote under Connect a Host,
+        // far from the place and the Start button).
+        if model.demo != nil { return "Demo host: agents here are scripted samples." }
         if newWorktree { return "Creates a new branch from the repository's default base in a new worktree, without moving desktop focus." }
+        let shell = " Open Terminal starts a plain shell there instead."
         switch target.place {
-        case .workspace: return "Opens in a new tab of \(link.title(for: target.place)). The terminal button opens a plain shell there instead."
-        case .folder: return "Creates a workspace for this folder. The terminal button opens a plain shell there instead."
+        case .workspace: return "Opens in a new tab of \(link.title(for: target.place)).\(shell)"
+        case .folder: return "Creates a workspace for this folder.\(shell)"
         }
     }
 
@@ -257,6 +357,7 @@ struct NewAgentSheet: View {
             let address = PaneAddress(hostID: target.host.hostID, session: session, paneID: pane)
             if what == .terminal {
                 onOpen(.terminal(address))
+                opened = true
                 dismiss()
                 return
             }
@@ -267,11 +368,17 @@ struct NewAgentSheet: View {
             self.error = error.localizedDescription
         }
     }
-
     /// Integrations that report a transcript open as a conversation; the rest, or a host
-    /// without herdr's integration for the agent, open in the terminal.
+    /// without herdr's integration for the agent, open in the terminal, the message unsent.
     private func finish(_ agent: Agent, _ address: PaneAddress) {
+        if hasMessage {
+            if let draftID = DraftStore.id(host: SessionAddress(hostID: address.hostID, session: address.session), agent: agent) {
+                DraftStore.save(firstMessage, for: draftID)
+            }
+            scene.firstMessage = .init(address: address, text: firstMessage, send: sendsFirstMessage && agent.hasTranscript)
+        }
         onOpen(agent.hasTranscript ? .conversation(address) : .terminal(address))
+        opened = true
         dismiss()
     }
 
@@ -475,7 +582,7 @@ private struct FolderBrowser: View {
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.glassProminent)
+            .primaryAction()
             .controlSize(.large)
             .disabled(listing == nil || loading)
             .padding()

@@ -43,7 +43,7 @@
         ]},
       {"id": "machines", "ground": "slate", "headline": "Connect all\nyour machines", "subline": "Over SSH, or sign in with Tailscale.",
         "layers": [
-          {"device": "machines", "x": 40, "y": 790, "w": 820, "rotate": -2},
+          {"device": "panes", "x": 40, "y": 790, "w": 820, "rotate": -2},
           {"device": "tailscale", "x": 270, "y": 1150, "w": 990, "rotate": 2}
         ]},
       {"id": "terminal", "ground": "night", "headline": "Use the live\nterminal", "subline": "Keys for Esc, Tab, arrows and Ctrl-C.", "cta": "Try the demo host. No account needed.",

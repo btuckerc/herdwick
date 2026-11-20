@@ -1,0 +1,5 @@
+{"type":"title","title":"Review PR #412"}
+{"type":"message","id":"review-user","timestamp":"2026-09-29T20:00:00.000Z","message":{"role":"user","content":"Review PR #412. Focus on cache invalidation when a chart moves between teams. Don't change files."}}
+{"type":"message","id":"review-diff","timestamp":"2026-09-29T20:00:05.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"diff","name":"bash","arguments":{"command":"git diff main...HEAD -- src/charts db/migrations"}}]}}
+{"type":"message","id":"review-diff-result","timestamp":"2026-09-29T20:00:23.000Z","message":{"role":"toolResult","toolCallId":"diff","content":"src/charts/cache.ts: cache keys now include team_id\nsrc/charts/move.ts: deletes the old team's cache before updating ownership\ndb/migrations/0042_backfill_team_ids.sql: fills existing cache rows"}}
+{"type":"message","id":"review-thought","timestamp":"2026-09-29T20:00:38.000Z","message":{"role":"assistant","content":"The move path invalidates the old key inside the same transaction as the ownership update. I'll check the rollback case and access from the previous team."}}

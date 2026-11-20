@@ -10,6 +10,7 @@ import HerdrAPI
         let studio = try DemoScenario.bundled("studio")
         let preview = try DemoScenario.bundled("preview")
         _ = try DemoScenario.bundled("replied")
+        _ = try DemoScenario.bundled("approval-last")
         #expect(preview.host == studio.host)
         #expect(preview.duration >= 15 && preview.duration <= 28, "App Store previews run 15–30 s")
 
@@ -35,6 +36,30 @@ import HerdrAPI
         #expect(next.snapshot.agents.map(\.agentStatus) == [.blocked])
         let refreshed = try #require(try await snapshots.next())
         #expect(refreshed.snapshot.workspaces.first?.agentStatus == .blocked, "the snapshot re-derives the roll-up")
+    }
+
+    @Test(.timeLimit(.minutes(1))) func newAgentStartsAndRunsScriptedConversation() async throws {
+        let client = HerdrClient(runner: DemoHost(scenario: try DemoScenario.bundled("studio"), scriptedReplyDelay: .milliseconds(40)))
+        let tab = try await client.createTab(workspaceID: "w1", label: nil, cwd: "/workspace", session: "main")
+        let started = try await client.startAgent(name: "codex-demo", kind: "codex", paneID: tab.rootPane.id, session: "main")
+        let initial = try await client.snapshot(session: "main")
+        #expect(initial.panes.contains { $0.id == tab.rootPane.id })
+        #expect(initial.agents.first { $0.paneID == tab.rootPane.id }?.agent == "codex")
+        #expect(started.agent.agentSession?.kind == "path")
+        #expect(started.agent.agentStatus == .idle)
+
+        try await client.sendText("Please review the login flow", pane: tab.rootPane.id, submit: true, session: "main")
+        #expect(try await client.snapshot(session: "main").agents.first { $0.paneID == tab.rootPane.id }?.agentStatus == .working)
+        try await Task.sleep(for: .milliseconds(100))
+        let finished = try await client.snapshot(session: "main")
+        #expect(finished.agents.first { $0.paneID == tab.rootPane.id }?.agentStatus == .done)
+        #expect(finished.agents.first { $0.paneID == tab.rootPane.id }?.terminalTitle == "Please review the login flow",
+                "the first message names the agent, as its harness would")
+        let ref = try #require(finished.agents.first { $0.paneID == tab.rootPane.id }?.agentSession)
+        let location = try #require(try await client.locateTranscript(ref, pane: tab.rootPane.id, session: "main"))
+        let transcript = try await client.readFileTail(path: location.path, from: 0, limit: 10_000)
+        #expect(String(decoding: transcript.bytes, as: UTF8.self).contains("Please review the login flow"))
+        #expect(String(decoding: transcript.bytes, as: UTF8.self).contains(#""role":"assistant""#))
     }
 
     @Test func sendingToAPaneRunsItsTriggerAndRepaintsTheTerminal() async throws {
@@ -73,14 +98,20 @@ import HerdrAPI
         #expect(try await client.snapshot(session: "main").agents.count == 1)
     }
 
-    @Test func dropAfterReadyHoldsTheLinkDownOnceLive() async throws {
-        let host = DemoHost(scenario: try Fixture.scenario(timeline: "[]"), dropAfterReady: true)
+    @Test func dropAfterReadyServesOpenedTranscriptBeforeHoldingTheLinkDown() async throws {
+        let host = DemoHost(scenario: try Fixture.scenario(timeline: "[]", transcript: true), dropAfterReady: true)
         let client = HerdrClient(runner: host)
         var snapshots = client.mirror(session: "main").makeAsyncIterator()
         _ = try await snapshots.next()
         _ = try await snapshots.next()
+
+        let initial = try await client.readFileTail(path: DemoScenario.transcriptPath("p1"), from: 0, limit: 10_000)
+        var transcript = client.followFile(path: DemoScenario.transcriptPath("p1"), lastBytes: initial.fileSize, headLimit: 0).makeAsyncIterator()
+        #expect(try await transcript.next() == .opened(fileSize: initial.fileSize, start: 0, head: []))
+        guard case .bytes(let served)? = try await transcript.next() else { Issue.record("transcript backlog was not served"); return }
+        #expect(String(decoding: served, as: UTF8.self).contains("Before"))
+        try await Task.sleep(for: .milliseconds(400))
         await #expect(throws: (any Error).self) { _ = try await snapshots.next() }
-        try await Task.sleep(for: .milliseconds(200))
         await #expect(throws: CommandError.channelClosed) { _ = try await client.sessions() }
     }
 
@@ -132,6 +163,20 @@ import HerdrAPI
         #expect(finishedReader.append(finished.bytes).contains { if case .message(let message) = $0 { message.id == "deploy-final" } else { false } })
         try await Task.sleep(for: .milliseconds(150))
         #expect(try await client.snapshot(session: "main").agents.first { $0.paneID == "p1" }?.agentStatus == .done)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func approvalScenarioShowsAToolApprovalTheAppCanDrive() async throws {
+        let host = DemoHost(scenario: try DemoScenario.bundled("approval"))
+        let client = HerdrClient(runner: host)
+        #expect(try await client.snapshot(session: "main").agents.first { $0.paneID == "p2" }?.agentStatus == .blocked)
+        let prompt = try #require(ScreenPrompt.parse(try await client.readPane("p2", session: "main").text))
+        #expect(prompt.options.map(\.label) == ["Approve", "Approve bash for this session", "Deny"])
+        #expect(prompt.cursor == 0)
+
+        try await client.sendKeys(["enter"], pane: "p2", session: "main")
+        try await Task.sleep(for: .seconds(4.6))
+        #expect(try await client.snapshot(session: "main").agents.first { $0.paneID == "p2" }?.agentStatus == .done)
+        #expect(ScreenPrompt.parse(try await client.readPane("p2", session: "main").text) == nil)
     }
 
     @Test(.timeLimit(.minutes(1))) func timelineAppendAndChildTranscripts() async throws {

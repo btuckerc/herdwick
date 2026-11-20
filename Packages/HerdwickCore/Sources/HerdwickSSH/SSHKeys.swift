@@ -11,6 +11,8 @@ public enum SSHError: Error, Equatable, Sendable {
     case timedOut
     case keepaliveTimeout
     case connectionClosed
+    /// Nothing accepts connections on the host's SSH port (sshd off, wrong port).
+    case connectionRefused
 }
 
 /// OpenSSH-compatible Ed25519 key helpers.

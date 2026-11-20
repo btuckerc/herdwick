@@ -178,6 +178,15 @@ struct AgentTranscriptTests {
         #expect(done.answer == AskAnswer(text: "User selected: Blue", selected: ["Blue"], perQuestion: ["Which colour?": ["Blue"]]))
     }
 
+    /// Captured from omp 18.12.6 with Haiku: the list arrives JSON-encoded, and omp still asks.
+    @Test func askWithQuestionsSentAsAStringIsStillAnAsk() throws {
+        let encoded = #"{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"toolCall","id":"toolu_ask","name":"ask","arguments":{"questions":"[\n  {\n    \"id\": \"size\",\n    \"question\": \"Which size?\",\n    \"options\": [{\"label\": \"Small\"}, {\"label\": \"Large\"}],\n    \"recommended\": 1\n  }\n]"}}]}}"#
+        let ask = try #require(conversation([Line.user, encoded]).pendingAsk)
+        #expect(ask.questions.map(\.question) == ["Which size?"])
+        #expect(ask.questions.first?.options.map(\.label) == ["Small", "Large"])
+        #expect(ask.questions.first?.recommended == 1)
+    }
+
     @Test func toolStartAndCallMergeIntoOneRowWithItsResult() {
         let started = conversation([Line.bashStart])
         #expect(started.items == [.tool(ToolActivity(id: "toolu_bash", name: "bash", summary: "bash"))])
@@ -210,6 +219,32 @@ struct AgentTranscriptTests {
         #expect(digest.contains { if case .tool(let tool) = $0 { tool.id == "running" } else { false } })
         #expect(!digest.contains { if case .assistant(let id, _) = $0 { id == "a1" } else { false } })
         #expect(!digest.contains { if case .thinking = $0 { true } else { false } })
+    }
+
+    /// A turn that closes on words marks that reply as its result; one that closes on a tool
+    /// call or an error doesn't, and neither does narration before the closing reply.
+    @Test func finishedTurnMarksOnlyItsClosingReply() {
+        let start = Date(timeIntervalSince1970: 1_000), end = start.addingTimeInterval(125)
+        var conversation = Conversation()
+        conversation.apply([
+            .message(.init(id: "u1", role: .user, text: "review it", timestamp: start)),
+            .message(.init(id: "n1", role: .assistant, text: "Reading the diff.")),
+            .toolStarted(id: "t1", name: "bash"),
+            .message(.init(id: "a1", role: .assistant, text: "No blocking findings.", thinking: "done")),
+            .turnEnded(at: end)
+        ])
+        #expect(conversation.finishedTurns == ["a1": FinishedTurn(at: end, started: start)])
+        #expect(conversation.finishedTurns["a1"]?.duration == 125)
+        conversation.apply([
+            .message(.init(id: "u2", role: .user, text: "deploy")),
+            .message(.init(id: "a2", role: .assistant, text: "Deploying.")),
+            .toolStarted(id: "t2", name: "bash"),
+            .turnEnded(at: end),
+            .message(.init(id: "u3", role: .user, text: "again")),
+            .message(.init(id: "a3", role: .assistant, text: "Trying.", errorMessage: "overloaded")),
+            .turnEnded(at: end)
+        ])
+        #expect(conversation.finishedTurns.keys.sorted() == ["a1"])
     }
 
     @Test func ircIncomingPreservesDetailsAndFallback() {
@@ -295,22 +330,64 @@ struct AgentTranscriptTests {
                              tool("bash", "swift test", .failed), tool("bash", "swift build"),
                              .peerMessage(id: "p", peer: "Helper", text: "Go", outbound: true)])
         #expect(mixed.failure == "1 error")
-        #expect(mixed.label == "2 edits · 1 read · 1 command · 1 search · 1 message")
-        // Every line is counted (the failed call as the error), so no separate step count.
+        // One of a kind is named (edits of one file are one); the run still accounts for every line.
+        #expect(mixed.label == "Edited a.swift · Read a.swift · Ran swift build · Searched TODO · 1 message")
         #expect(!mixed.showsSteps)
-        // One call or a few read the same way as many: counts, never a file or command name.
         let lone = StepRun([tool("edit", "src/a.swift")])
-        #expect(lone.label == "1 edit")
+        #expect(lone.label == "Edited a.swift")
         #expect(!lone.showsSteps)
-        #expect(StepRun([tool("bash", "swift build"), .thinking(id: "t", text: "hm")]).label == "1 command")
-        #expect(StepRun([tool("read", "a.swift"), tool("read", "b.swift"), tool("grep", "x")]).label == "2 reads · 1 search")
+        // A command by its name, without flags or redirections.
+        #expect(StepRun([tool("bash", "swift build -c release > /tmp/b.log"), .thinking(id: "t", text: "hm")]).label == "Ran swift build")
+        // A path names its file; a URL stays whole.
+        #expect(StepRun([tool("bash", "bun test src/charts/move.test.ts")]).label == "Ran bun test move.test.ts")
+        #expect(StepRun([tool("bash", "curl https://example.com/health")]).label == "Ran curl https://example.com/health")
+        // A launcher that only runs another program leaves room for what that program does.
+        #expect(StepRun([tool("bash", "uv run pipeline backfill --month 2026-03")]).label == "Ran uv run pipeline backfill")
+        // Sent to the background and not back yet: started, not run.
+        #expect(StepRun([tool("bash", "npm run bench > /tmp/b.log")], waitingOn: ["npm run bench > /tmp/b.log"]).label
+                == "Started npm run bench · Background")
+        #expect(StepRun([tool("eval", "Compare runs")]).label == "Compare runs")
+        // More than one of a kind is counted.
+        #expect(StepRun([tool("read", "a.swift"), tool("read", "b.swift"), tool("grep", "x")]).label == "2 reads · Searched x")
+        #expect(StepRun([tool("edit", "a.swift"), tool("edit", "b.swift")]).label == "2 edits")
         // A wait a message interrupted, a process stopped and waits alone aren't failures, edits or news.
         let control = StepRun([tool("wait", "wait", .failed), tool("write", "proc://tail/kill"), tool("wait", "wait")])
         #expect(control.failure == nil)
         #expect(control.label == "Stopped tail")
-        // A running command reads by its name, not its flags and redirections.
         #expect(StepRun([tool("read", "a.swift"), tool("eval", "Plot p99", .running),
                          tool("bash", "npm run bench -- --rps 2000 > /tmp/soak.log", .running)]).running == "Running npm run bench +1")
+        #expect(StepRun([tool("bash", "npm run bench -- --rps 2000 > /tmp/soak.log", .running)],
+                        awaitingApproval: true).running == "Waiting for approval · npm run bench")
+        #expect(StepRun([tool("eval", "Plot p99", .running)], awaitingApproval: true).running
+                == "Waiting for approval · Plot p99")
+    }
+
+    @Test func testRunTotalsComeFromTheirOwnOutput() {
+        func run(_ command: String, _ output: String, _ state: ToolActivity.State = .succeeded) -> ConversationItem {
+            .tool(ToolActivity(id: UUID().uuidString, name: "bash", summary: command, state: state, output: output))
+        }
+        #expect(StepRun([run("bun test src/retry.test.ts", "(pass) retries\n\n 12 pass\n 0 fail\n 30 expect() calls")]).tests?.summary == "12 tests passed")
+        #expect(StepRun([run("npx jest", "Tests:       2 failed, 10 passed, 12 total", .failed)]).tests?.summary == "2 tests failed")
+        #expect(StepRun([run("pytest -q", "....\n4 passed in 0.12s")]).tests?.summary == "4 tests passed")
+        #expect(StepRun([run("xcodebuild test", "Executed 9 tests, with 0 failures (0 unexpected)")]).tests?.summary == "No failures")
+        // The newest test run speaks for the run.
+        #expect(StepRun([run("bun test", "1 pass\n2 fail", .failed), run("bun test", "3 pass\n0 fail")]).tests?.summary == "3 tests passed")
+        let outcome = StepRun([
+            run("swift test", "142 tests passed"),
+            .tool(ToolActivity(id: UUID().uuidString, name: "edit", summary: "a.swift", state: .succeeded)),
+            .tool(ToolActivity(id: UUID().uuidString, name: "edit", summary: "b.swift", state: .succeeded)),
+            .tool(ToolActivity(id: UUID().uuidString, name: "bash", summary: "swift build", state: .succeeded)),
+            .tool(ToolActivity(id: UUID().uuidString, name: "read", summary: "0042_backfill_team_ids.swift", state: .succeeded)),
+            .tool(ToolActivity(id: UUID().uuidString, name: "grep", summary: "TODO", state: .succeeded))
+        ])
+        #expect(outcome.label == "2 edits · 1 command · 1 read · 1 search")
+        #expect(!outcome.label.contains("0042_backfill"))
+        // A newer test run without totals doesn't borrow an older run's.
+        #expect(StepRun([run("bun test", "3 pass\n0 fail"), run("bun test a.test.ts", "Building…")]).tests == nil)
+        // Not a test command, no totals printed, or cut before its end: nothing claimed.
+        #expect(StepRun([run("grep -c passed log.txt", "12 passed")]).tests == nil)
+        #expect(StepRun([run("swift test", "Building…")]).tests == nil)
+        #expect(StepRun([run("bun test", String(repeating: "(pass) x\n", count: 199) + "1 pass")]).tests == nil)
     }
 
     @Test func onlyALoneBriefPairsWithTheNextWordFromThatAgent() {

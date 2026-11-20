@@ -3,25 +3,29 @@ import SwiftUI
 
 /// Assistant Markdown as native blocks: headings, lists and task lists, quotes, code and
 /// tables. Inline emphasis, code spans and links come from `AttributedString`. The prose between
-/// code blocks, tables and rules is one `Text`, so a selection can run across paragraphs and items.
+/// code blocks, lists, tables and rules is one `Text`, so a selection can run across paragraphs.
 struct MarkdownText: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(Self.segments(MarkdownBlocks.parse(text)).enumerated()), id: \.offset) { _, segment in
+        let segments = MarkdownRenderCache.shared.segments(for: text)
+        // Prose and lists sit a paragraph's gap apart; code, tables, images and rules get more.
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                 switch segment {
                 case .prose(let string): Text(string)
-                case .code(let language, let text): CodeBlock(language: language, text: text)
-                case .table(let table): TableBlock(table: table)
+                case .list(let items): ListBlock(items: items)
+                case .code(let language, let text): CodeBlock(language: language, text: text).padding(.vertical, 3)
+                case .table(let table): TableBlock(table: table).padding(.vertical, 3)
                 // Shown as the reply shows them, not folded like tool images.
-                case .images(let paths): TranscriptImages(paths: paths).environment(\.inlineImages, true)
-                case .rule: Divider().padding(.vertical, 4)
+                case .images(let paths): TranscriptImages(paths: paths).environment(\.inlineImages, true).padding(.vertical, 3)
+                case .rule: Divider().padding(.vertical, 10)
                 }
             }
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onChange(of: text) { previous, _ in MarkdownRenderCache.shared.discard(previous) }
     }
 
     /// Code spans naming an image or text file (`shot.png`, `Views/a.swift:42`) link to its
@@ -91,15 +95,29 @@ struct MarkdownText: View {
         return paths.contains(nil) ? nil : paths.compactMap(\.self)
     }
 
-    private enum Segment {
+    enum Segment {
         case prose(AttributedString)
+        case list([ListItem])
         case code(language: String?, text: String)
-        case table(MarkdownTable)
+        case table(RenderedTable)
         case images([String])
         case rule
     }
 
-    private static func segments(_ blocks: [MarkdownBlock]) -> [Segment] {
+    struct RenderedTable {
+        let header: [AttributedString]
+        let rows: [[AttributedString]]
+        let alignments: [MarkdownTable.Alignment]
+    }
+
+    struct ListItem {
+        let marker: String
+        let depth: Int
+        let body: AttributedString
+    }
+
+    static func segments(_ text: String) -> [Segment] {
+        let blocks = MarkdownBlocks.parse(text)
         var segments: [Segment] = []
         var prose = AttributedString()
         func flush() {
@@ -114,8 +132,15 @@ struct MarkdownText: View {
             }
             switch block {
             case .code(let language, let text): flush(); segments.append(.code(language: language, text: text))
-            case .table(let table): flush(); segments.append(.table(table))
+            case .table(let table):
+                flush()
+                segments.append(.table(RenderedTable(header: table.header.map(inline),
+                                                     rows: table.rows.map { $0.map(inline) },
+                                                     alignments: table.alignments)))
             case .rule: flush(); segments.append(.rule)
+            case .list(let ordered, let start, let items):
+                flush()
+                segments.append(.list(listItems(ordered: ordered, start: start, items: items)))
             default:
                 if !prose.characters.isEmpty { prose += blockGap }
                 prose += Self.prose(block)
@@ -143,26 +168,54 @@ struct MarkdownText: View {
             var quote = AttributedString("▎ ") + inline(text)
             quote.foregroundColor = .secondary
             return quote
-        case .list(let ordered, let start, let items):
-            var list = AttributedString()
-            var number = start
-            for (index, item) in items.enumerated() {
-                if index > 0 { list += AttributedString("\n") }
-                var marker = item.depth == 0 ? "•" : "◦"
-                if ordered, item.depth == 0 { marker = "\(number)."; number += 1 }
-                if let checked = item.checked { marker = checked ? "☑" : "☐" }
-                var prefix = AttributedString(String(repeating: "    ", count: item.depth) + marker + " ")
-                prefix.foregroundColor = .secondary
-                var body = inline(item.text)
-                if item.checked == true {
-                    body.strikethroughStyle = .single
-                    body.foregroundColor = .secondary
-                }
-                list += prefix + body
-            }
-            return list
+        case .list: return AttributedString()
         case .paragraph(let text): return inline(text)
         case .code, .table, .rule: return AttributedString()
+        }
+    }
+
+    private static func listItems(ordered: Bool, start: Int, items: [MarkdownListItem]) -> [ListItem] {
+        var number = start
+        return items.map { item in
+            var marker = item.depth == 0 ? "•" : "◦"
+            if ordered, item.depth == 0 { marker = "\(number)."; number += 1 }
+            if let checked = item.checked { marker = checked ? "☑" : "☐" }
+            var body = inline(item.text)
+            if item.checked == true {
+                body.strikethroughStyle = .single
+                body.foregroundColor = .secondary
+            }
+            return ListItem(marker: marker, depth: item.depth, body: body)
+        }
+    }
+}
+
+/// A list with a hanging indent: wrapped lines return to the text's column, not under the
+/// marker (round 22: "• Move: …" wrapped back to the bullet's edge and read as prose with a
+/// bullet in front). Items sit a half-line apart, as the blocks of one reply do.
+private struct ListBlock: View {
+    let items: [MarkdownText.ListItem]
+    @ScaledMetric(relativeTo: .body) private var markerWidth: CGFloat = 12
+    @ScaledMetric(relativeTo: .body) private var nesting: CGFloat = 18
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        // At accessibility sizes the gutter stops growing with the text: scaled, the bullet's
+        // column took a fifth of a result card's width (round 87: opus#8, sa#7). Numbers and
+        // checkboxes keep their own width; the indent still hangs.
+        let large = typeSize.isAccessibilitySize
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .firstTextBaseline, spacing: large ? 4 : 6) {
+                    Text(item.marker)
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: large ? nil : markerWidth, alignment: .leading)
+                        .accessibilityHidden(item.marker == "•" || item.marker == "◦")
+                    Text(item.body)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.leading, CGFloat(item.depth) * (large ? min(nesting, 24) : nesting))
+            }
         }
     }
 }
@@ -182,12 +235,12 @@ private struct CodeBlock: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.fill.tertiary, in: .rect(cornerRadius: 10))
+        .background(.fill.tertiary, in: .rect(cornerRadius: Tokens.Radius.plate))
     }
 }
 
 private struct TableBlock: View {
-    let table: MarkdownTable
+    let table: MarkdownText.RenderedTable
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -209,11 +262,11 @@ private struct TableBlock: View {
             .font(.subheadline)
             .padding(12)
         }
-        .background(.fill.quaternary, in: .rect(cornerRadius: 12))
+        .background(.fill.quaternary, in: .rect(cornerRadius: Tokens.Radius.plate))
     }
 
-    private func cell(_ text: String, _ column: Int) -> some View {
-        Text(MarkdownText.inline(text))
+    private func cell(_ text: AttributedString, _ column: Int) -> some View {
+        Text(text)
             .gridColumnAlignment(alignment(table.alignments[column]))
     }
 

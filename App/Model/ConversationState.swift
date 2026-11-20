@@ -240,6 +240,11 @@ final class ConversationRegistry {
         trim()
     }
 
+    /// The conversation already parsed for `agent`, open or warmed; never creates or fetches one.
+    func parsed(host: SessionAddress, agent: Agent) -> Conversation? {
+        DraftStore.id(host: host, agent: agent).flatMap { entries[$0] }?.feed.conversation
+    }
+
     private func trim() {
         let targets = warmTargets.values.reduce(into: Set<String>()) { $0.formUnion($1) }
         let inactive = entries.values.filter { $0.viewers.isEmpty }.sorted {
