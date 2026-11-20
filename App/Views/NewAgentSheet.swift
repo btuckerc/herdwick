@@ -136,7 +136,7 @@ struct NewAgentSheet: View {
                     LabeledContent("Resume", value: resume.title)
                 } else {
                     Picker(selection: $kind) {
-                        ForEach(["omp", "claude", "codex"], id: \.self) { Text(agentKindLabel($0)).tag($0) }
+                        ForEach(startableAgentKinds, id: \.self) { Text(agentKindLabel($0)).tag($0) }
                     } label: {
                         Label("Agent", systemImage: "sparkles")
                     }

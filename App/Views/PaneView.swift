@@ -341,7 +341,7 @@ struct PaneView: View {
             }
             .primaryAction()
             Menu {
-                ForEach(["omp", "claude", "codex"], id: \.self) { kind in
+                ForEach(startableAgentKinds, id: \.self) { kind in
                     Button("Start \(agentKindLabel(kind))") { start(kind) }
                 }
             } label: {

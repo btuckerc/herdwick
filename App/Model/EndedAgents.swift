@@ -90,7 +90,9 @@ struct IntegrationOffer: View {
     @State private var error: String?
 
     var body: some View {
-        ForEach(connection.missingIntegrations.filter { harness == nil || $0.target == harness }) { integration in
+        ForEach(connection.missingIntegrations.filter {
+            harness == nil || $0.target == harness || (harness == "agy" && $0.target == "antigravity-cli")
+        }) { integration in
             let button = Button { confirmation = integration } label: {
                 Label("Install \(integration.label) Integration", systemImage: "puzzlepiece.extension")
             }

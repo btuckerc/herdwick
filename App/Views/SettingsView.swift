@@ -869,7 +869,7 @@ private struct PresetsEditor: View {
                         TextField("Name", text: $preset.name).font(.headline)
                         SettingsMenuRow("Agent", value: agentKindLabel(preset.kind)) {
                             Picker("Agent", selection: $preset.kind) {
-                                ForEach(["omp", "claude", "codex"], id: \.self) { Text(agentKindLabel($0)).tag($0) }
+                                ForEach(startableAgentKinds, id: \.self) { Text(agentKindLabel($0)).tag($0) }
                             }
                         }
                         TextField("Arguments, one per line", text: Binding {

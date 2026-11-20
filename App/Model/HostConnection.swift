@@ -63,7 +63,7 @@ final class HostConnection {
         guard let integrations = try? await client.integrations(session: session),
               generation == self.generation, session == activeSession else { return }
         missingIntegrations = integrations.filter {
-            ["omp", "claude", "codex"].contains($0.target) && $0.available && $0.state == "not_installed"
+            ["omp", "claude", "codex", "antigravity-cli"].contains($0.target) && $0.available && $0.state == "not_installed"
         }
     }
 
@@ -964,7 +964,7 @@ final class HostConnection {
     var lastAgentKind: String {
         get {
             let value = UserDefaults.standard.string(forKey: "lastAgentKind.\(profile.id.uuidString)") ?? "omp"
-            return ["omp", "claude", "codex"].contains(value) ? value : "omp"
+            return startableAgentKinds.contains(value) ? value : "omp"
         }
         set { UserDefaults.standard.set(newValue, forKey: "lastAgentKind.\(profile.id.uuidString)") }
     }

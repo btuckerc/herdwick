@@ -1,11 +1,17 @@
 import HerdrAPI
 import SwiftUI
 
+/// Harnesses Herdwick can start in a pane. `agy` is Google's Antigravity CLI (Gemini 4 Neon):
+/// Herdwick only ever sends what the user typed or tapped to it, never prompts of its own,
+/// because Google's terms allow agy in a multiplexer only while the person drives it.
+let startableAgentKinds = ["omp", "claude", "codex", "agy"]
+
 func agentKindLabel(_ kind: String) -> String {
     switch kind {
     case "omp": "OMP"
     case "claude": "Claude"
     case "codex": "Codex"
+    case "agy": "Neon"
     default: kind
     }
 }
