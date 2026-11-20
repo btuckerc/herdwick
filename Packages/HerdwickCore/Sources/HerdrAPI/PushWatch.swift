@@ -29,6 +29,26 @@ public enum PushWatch {
         public var secret: String
         public var mutes: [Mute]
         public var activity: Activity?
+        /// Claude finishes the app held (`TurnSettle`) as it left, each to alert after `seconds`
+        /// unless the agent moves on first: a backstop can't wait for the next turn.
+        public var held: [Held] = []
+        /// Pane → the Claude transcript the app found for it (an agent's own
+        /// `CLAUDE_CONFIG_DIR` included); the watcher looks in the default folders for the rest.
+        public var claudeTranscripts: [String: String] = [:]
+
+        /// `deadline`: when it alerts, in epoch seconds on the host's clock; nil while the app
+        /// was still checking it, so the watcher checks it as it starts. `reference`: the
+        /// conversation it belongs to. `alert` false: read already, so only its Live Activity ends.
+        public struct Held: Sendable, Equatable {
+            public var pane: String
+            public var seq: Int
+            public var deadline: Int?
+            public var reference: String?
+            public var alert: Bool
+            public init(pane: String, seq: Int, deadline: Int?, reference: String? = nil, alert: Bool = true) {
+                self.pane = pane; self.seq = seq; self.deadline = deadline; self.reference = reference; self.alert = alert
+            }
+        }
 
         public struct Activity: Sendable, Equatable {
             public var pane: String
@@ -128,6 +148,15 @@ public enum PushWatch {
         }
         try check(config.secret, allowed: "0123456789abcdef", "secret")
         for mute in config.mutes { try check(mute.pane, allowed: safeName + ":", "pane") }
+        for held in config.held { try check(held.pane, allowed: safeName + ":", "held pane") }
+        // Paths travel base64-encoded, so any character a folder may hold survives the env file.
+        let transcripts = config.claudeTranscripts.filter { pane, path in
+            pane.allSatisfy { (safeName + ":").contains($0) } && path.hasPrefix("/")
+        }.sorted { $0.key < $1.key }.map { "\($0.key)|\(Data($0.value.utf8).base64EncodedString())" }.joined(separator: "\n")
+        let held = config.held.map { held in
+            let reference = held.reference.flatMap { $0.allSatisfy { safeName.contains($0) } ? $0 : nil } ?? ""
+            return "\(held.pane)|\(held.seq)|\(max(0, held.deadline ?? 0))|\(held.alert ? 1 : 0)|\(reference)"
+        }.joined(separator: "\n")
         let encoder = JSONEncoder()
         encoder.outputFormatting = .withoutEscapingSlashes
         let mutes = try config.mutes.map {
@@ -162,6 +191,8 @@ public enum PushWatch {
             HW_MUTES='\(mutes)'
             HW_ACTIVITY_PANE='\(config.activity?.pane ?? "")'
             HW_ACTIVITY_TOKEN='\(config.activity?.token ?? "")'
+            HW_HELD='\(held)'
+            HW_CLAUDE='\(transcripts)'
             HERDWICK_ENV
             cat > "$dir/watch.sh.new.$$" <<'HERDWICK_WATCH'
             \(script)
@@ -250,6 +281,73 @@ public enum PushWatch {
         jsonpp=no
         perl -MJSON::PP -e1 >/dev/null 2>&1 && jsonpp=yes || :
 
+        # `hold <seconds left>` when a Claude finish is a wake turn with background tasks still
+        # running (`TurnSettle`), counted on this host's clock from when the transcript says the
+        # turn ended; anything unknown alerts as before. A turn not yet written as ended gets one
+        # more look 2 s on.
+        settle() {
+            sid=$(printf '%s\n' "$2" | sed -n 's/.*"agent_session":{[^}]*"agent":"claude"[^}]*"kind":"id"[^}]*"value":"\([A-Za-z0-9_-]*\)".*/\1/p')
+            [ -n "$sid" ] || return 0
+            file=
+            while IFS='|' read -r p encoded; do
+                [ "$p" = "$1" ] || continue
+                path=$(printf '%s' "$encoded" | openssl base64 -d -A 2>/dev/null || :)
+                case $path in */"$sid".jsonl) [ -r "$path" ] && file=$path ;; esac
+            done <<CLAUDE
+        $HW_CLAUDE
+        CLAUDE
+            if [ -z "$file" ]; then
+                for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$sid".jsonl "$HOME"/.claude/projects/*/"$sid".jsonl; do
+                    [ -r "$f" ] && { file=$f; break; }
+                done
+            fi
+            [ -n "$file" ] || return 0
+            f=$file
+            set -- $(\#(TurnSettle.pipeline))
+            # The finish seen was the person's own turn: a later look can't make it a wake.
+            [ "$2" = human ] && return 0
+            if [ "$3" != 1 ]; then sleep 2; set -- $(\#(TurnSettle.pipeline)); fi
+            case $1$4$5 in ''|*[!0-9]*) return 0 ;; esac
+            left=$(( ${HW_BACKSTOP:-600} - ($1 - $5) ))
+            [ "$2" = wake ] && [ "$3" = 1 ] && [ "$4" -gt 0 ] && [ "$left" -gt 0 ] && echo "hold $left"
+            return 0
+        }
+
+        # Alerts a held finish at its deadline unless the agent has moved on meanwhile (another
+        # change, or another conversation in the pane: `$4`, when known). `$5` 0: its Live
+        # Activity only. A herdr that can't say fails open: the alert goes.
+        backstop() {
+            # At least a second, so its record (written just after the fork) is there to remove.
+            [ "$3" -ge 1 ] 2>/dev/null || set -- "$1" "$2" 1 "$4" "$5"
+            ( sleep "$3"
+              due=yes
+              # Only what herdr clearly says otherwise stops it: another change, another
+              # conversation, work under way. A field it doesn't give is no reason to drop the alert.
+              if now=$("$herdr" --session "$session" agent get "$1" 2>/dev/null); then
+                  s=$(field "$now" state_change_seq); case $s in ''|*[!0-9]*) ;; *) [ "$s" = "$2" ] || due=no ;; esac
+                  v=$(field "$now" value); [ -z "$4" ] || [ -z "$v" ] || [ "$v" = "$4" ] || due=no
+                  case $(field "$now" agent_status) in ''|idle|done) ;; *) due=no ;; esac
+              else
+                  case $now in *agent_not_found*|*pane_not_found*) due=no ;; esac
+              fi
+              if [ "$due" = yes ]; then
+                  activity "$1" done "$2"
+                  # Mutes match by conversation: the one known here when herdr didn't say.
+                  [ -n "$(field "$now" value)" ] || [ -z "$4" ] || now="{\"agent_session\":{\"value\":\"$4\"}}"
+                  [ "${5:-1}" = 0 ] || post "$1" done "$2" "$now"
+              fi
+              # Its record goes with it, so nothing later signals a pid the host has reused.
+              [ "$(cut -d' ' -f2 "$run/hold.${1:?}" 2>/dev/null)" = "$2" ] && rm -f "$run/hold.${1:?}" ) &
+            printf '%s %s\n' "$!" "$2" > "$run/hold.$1"
+        }
+
+        # Cancels a pane's held finish, if its timer still runs.
+        unhold() {
+            held_pid=$(cut -d' ' -f1 "$run/hold.${1:?}" 2>/dev/null || :)
+            if [ -n "$held_pid" ]; then reap "$held_pid"; kill "$held_pid" 2>/dev/null; fi
+            rm -f "$run/hold.${1:?}"
+        }
+
         # One blocked wait at a time per pane: until it works, then until it stops.
         follow() {
             probe() {
@@ -335,6 +433,8 @@ public enum PushWatch {
             }
 
             while out=$("$herdr" --session "$session" agent wait "$1" --until working); do
+                # Working again: a held finish (see `settle`) was not the end after all.
+                unhold "$1"
                 seq=$(field "$out" state_change_seq)
                 activity "$1" working "$seq"
                 wait_out="$run/wait.$1"
@@ -398,18 +498,75 @@ public enum PushWatch {
                 fi
                 state=$(field "$out" agent_status)
                 [ "$state" = idle ] && state=done
-                if [ "$state" = done ] && [ "$jsonpp" = yes ]; then
+                # Only omp has a Plan Review to look for; a Claude finish goes straight to `settle`.
+                case $out in *'"agent":"omp"'*) omp=yes ;; *) omp=no ;; esac
+                if [ "$state" = done ] && [ "$jsonpp" = yes ] && [ "$omp" = yes ]; then
                     plan=$(probe "$out" 2>/dev/null || :)
                     if [ -z "$plan" ]; then sleep 2; plan=$(probe "$out" 2>/dev/null || :); fi
                     case $plan in plan\ *) state=blocked ;; esac
                 fi
                 final_seq=$(field "$out" state_change_seq)
-                activity "$1" "$state" "$final_seq"
-                post "$1" "$state" "$final_seq" "$out"
+                held=
+                [ "$state" = done ] && held=$(settle "$1" "$out")
+                if [ -n "$held" ]; then
+                    # A background task woke Claude and others still run: their last one alerts,
+                    # or, ten minutes after this turn ended with nothing new, this one does.
+                    backstop "$1" "$final_seq" "${held#hold }" "$(field "$out" value)"
+                else
+                    activity "$1" "$state" "$final_seq"
+                    post "$1" "$state" "$final_seq" "$out"
+                fi
                 rm -f "$wait_out"
             done
-            rm -f "$run/$1"
+            # The agent is gone: so is any finish held for it.
+            unhold "$1"
+            rm -f "$run/${1:?}"
         }
+
+        # Finishes the app was holding (or still checking) as it left keep their deadlines here,
+        # beside the panes' own followers rather than ahead of them. (`due_at`, not `deadline`:
+        # that is this watcher's own lifetime.)
+        (
+        while IFS='|' read -r pane seq due_at alert reference; do
+            case $pane in ''|*[!A-Za-z0-9:._-]*) continue ;; esac
+            case $seq$due_at$alert in ''|*[!0-9]*) continue ;; esac
+            if [ "$due_at" = 0 ]; then
+                # As `backstop`: only what herdr clearly says otherwise drops it.
+                if ! now=$("$herdr" --session "$session" agent get "$pane" 2>/dev/null); then
+                    case $now in *agent_not_found*|*pane_not_found*) continue ;; esac
+                    activity "$pane" done "$seq"
+                    [ -z "$reference" ] || now="{\"agent_session\":{\"value\":\"$reference\"}}"
+                    [ "$alert" = 0 ] || post "$pane" done "$seq" "$now"
+                    continue
+                fi
+                s=$(field "$now" state_change_seq); case $s in ''|*[!0-9]*) ;; *) [ "$s" = "$seq" ] || continue ;; esac
+                v=$(field "$now" value); [ -z "$reference" ] || [ -z "$v" ] || [ "$v" = "$reference" ] || continue
+                case $(field "$now" agent_status) in ''|idle|done) ;; *) continue ;; esac
+                # Mutes match by conversation: the one handed over when herdr didn't say.
+                [ -n "$v" ] || [ -z "$reference" ] || now="{\"agent_session\":{\"value\":\"$reference\"}}"
+                held=$(settle "$pane" "$now")
+                # The scan takes time: if the pane has moved on meanwhile, its follower has it.
+                again=$("$herdr" --session "$session" agent get "$pane" 2>/dev/null) && {
+                    s=$(field "$again" state_change_seq); case $s in ''|*[!0-9]*) ;; *) [ "$s" = "$seq" ] || continue ;; esac
+                    case $(field "$again" agent_status) in ''|idle|done) ;; *) continue ;; esac
+                }
+                if [ -n "$held" ]; then
+                    backstop "$pane" "$seq" "${held#hold }" "$(field "$now" value)" "$alert"
+                else
+                    activity "$pane" done "$seq"
+                    [ "$alert" = 0 ] || post "$pane" done "$seq" "$now"
+                fi
+            else
+                left=$((due_at - $(date +%s)))
+                [ "$left" -gt 0 ] || left=0
+                backstop "$pane" "$seq" "$left" "$reference" "$alert"
+            fi
+        done <<HELD
+        $HW_HELD
+        HELD
+        # Its timers stay its children, so stopping the watcher reaps them too.
+        wait
+        ) &
 
         while [ "$(date +%s)" -lt "$deadline" ]; do
             list=$("$herdr" --session "$session" agent list) || break

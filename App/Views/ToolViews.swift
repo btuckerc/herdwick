@@ -26,11 +26,31 @@ struct ToolStepView: View {
         }
     }
 
-    /// A call with nothing behind its line yet (a wait still waiting) gets no chevron.
+    /// Every step opens to what it was given and what came back; only a call with nothing
+    /// behind its line (a wait still waiting, a call without input) gets no chevron.
     private func opens(_ detail: ToolDetail) -> Bool {
-        if !tool.images.isEmpty { return true }
-        if case .generic(let output) = detail { return output != nil }
+        if !tool.images.isEmpty || outputFile != nil { return true }
+        if case .generic(let output) = detail { return output != nil || input != nil || tool.state != .running }
         return true
+    }
+
+    /// The call's input as readable JSON, for tools the app has no words for (MCP tools,
+    /// Skill, ToolSearch…); nil when empty.
+    private var input: String? {
+        guard let arguments = tool.arguments, let data = arguments.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              !((object as? [String: Any])?.isEmpty ?? false),
+              let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
+            return tool.arguments.flatMap { $0.isEmpty || $0 == "{}" ? nil : $0 }
+        }
+        return String(decoding: pretty, as: UTF8.self)
+    }
+
+    /// A background task's output file on the host (Claude's `<output-file>`).
+    private var outputFile: String? {
+        guard tool.name == "job", let details = tool.details, let data = details.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object["outputFile"] as? String
     }
 
     /// What the call did, in words; commands read as themselves, a test run's totals first.
@@ -51,7 +71,13 @@ struct ToolStepView: View {
         case .plan: Text("Plan")
         case .generic: Text(tool.title)
         }
-        return tool.state == .failed ? Text("Failed: \(text)").foregroundStyle(.red) : text
+        if tool.state == .failed { return Text("Failed: \(text)").foregroundStyle(.red) }
+        // A command left running: it isn't done when its call returns.
+        switch tool.background {
+        case .running: return Text("\(text) · \(Text("in background").foregroundStyle(.secondary))")
+        case .failed: return Text("\(text) · \(Text("failed in background").foregroundStyle(.red))")
+        case .finished, nil: return text
+        }
     }
 
     @ViewBuilder private func detailView(_ detail: ToolDetail) -> some View {
@@ -61,7 +87,10 @@ struct ToolStepView: View {
             if command.contains("\n") || command.count > 40 {
                 Text(command).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            if let output { OutputBlock(text: output) }
+            if let output, !output.isEmpty { OutputBlock(text: output) }
+            else if tool.state != .running, tool.images.isEmpty, !(command.contains("\n") || command.count > 40) {
+                Text("No output").font(.caption).foregroundStyle(.secondary)
+            }
             if let exitCode, exitCode != 0 { Text("Exit \(exitCode)").font(.subheadline).foregroundStyle(.red) }
         case .read(let path, _):
             if tool.images.isEmpty, isImagePath(path), let previewImage {
@@ -72,15 +101,49 @@ struct ToolStepView: View {
             } else {
                 Text(path).font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
             }
-        case .edit(let files): DiffView(files: files)
+            // What the agent read, as it read it (round: the step opened to the path alone).
+            if let output = tool.output, !output.isEmpty { OutputBlock(text: output) }
+        case .edit(let files):
+            // A refused or failed edit says why first; what it proposed follows, labelled so.
+            if tool.state == .failed || files.allSatisfy({ $0.lines.isEmpty }), let output = tool.output, !output.isEmpty { OutputBlock(text: output) }
+            if !files.allSatisfy({ $0.lines.isEmpty }) {
+                if tool.state == .failed { Text("Proposed change").font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
+                DiffView(files: files)
+            } else if (tool.output ?? "").isEmpty, tool.state != .running {
+                Text(files.map(\.path).joined(separator: "\n")).font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
+            }
         case .write(let path, let content):
+            if tool.state == .failed, let output = tool.output, !output.isEmpty { OutputBlock(text: output) }
             Text(path).font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
+            if tool.state == .failed { Text("Proposed content").font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
             OutputBlock(text: content)
-        case .search(_, _, let output), .web(_, let output), .task(_, let output), .generic(let output):
-            if let output { OutputBlock(text: output) }
-        case .todo(let items): TodoList(items: items)
+        case .search(_, _, let output), .web(_, let output), .task(_, let output):
+            if let output, !output.isEmpty { OutputBlock(text: output) }
+            else if tool.state != .running, tool.images.isEmpty { Text("No output").font(.caption).foregroundStyle(.secondary) }
+        case .generic(let output):
+            if let input {
+                Text("Input").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                OutputBlock(text: input)
+            }
+            if let output, !output.isEmpty {
+                if input != nil { Text("Result").font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
+                OutputBlock(text: output)
+            } else if tool.state != .running, tool.images.isEmpty, outputFile == nil {
+                Text("No output").font(.caption).foregroundStyle(.secondary)
+            }
+            if let outputFile { BackgroundOutput(path: outputFile) }
+        case .todo(let items):
+            if items.isEmpty {
+                Text(tool.output.flatMap { $0.isEmpty ? nil : $0 } ?? "No tasks left").font(.caption).foregroundStyle(.secondary)
+            } else {
+                TodoList(items: items)
+            }
         case .plan(let text):
-            MarkdownText(text: text)
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(tool.output.flatMap { $0.isEmpty ? nil : $0 } ?? "No plan text").font(.caption).foregroundStyle(.secondary)
+            } else {
+                MarkdownText(text: text)
+            }
         }
     }
     /// The call's kind, as its run's line shows it (round 14: one wrench for every tool).
@@ -114,6 +177,45 @@ extension TestTally {
         let words = summary.replacingOccurrences(of: " ", with: "\u{00A0}")
         if anyFailed { return Text(words).foregroundStyle(Tokens.Tint.danger) }
         return Text("\(Text(Image(systemName: "checkmark")).foregroundStyle(Tokens.Tint.settled))\u{00A0}\(words)")
+    }
+}
+
+/// A background task's output, read from the host when asked (its last 200 lines).
+private struct BackgroundOutput: View {
+    let path: String
+    @Environment(\.imageLoader) private var loader
+    @State private var text: String?
+    @State private var failure: String?
+    @State private var loading = false
+
+    var body: some View {
+        if let text {
+            OutputBlock(text: text.isEmpty ? "(no output)" : text)
+        } else {
+            Button {
+                Task { await load() }
+            } label: {
+                HStack(spacing: 6) {
+                    if loading { ProgressView().controlSize(.small) }
+                    Text(failure ?? "Show Output")
+                }
+            }
+            .inlineAction()
+            .disabled(loading || loader == nil)
+        }
+    }
+
+    private func load() async {
+        guard let loader else { return }
+        loading = true
+        defer { loading = false }
+        do {
+            let data = try await loader.tail(path: path)
+            let lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
+            text = lines.suffix(200).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            failure = "Output unavailable"
+        }
     }
 }
 

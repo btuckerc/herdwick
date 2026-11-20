@@ -31,6 +31,17 @@ extension HerdrClient {
         return try Self.parseFile(data, path: path, maxBytes: maxBytes)
     }
 
+    /// The last `maxBytes` of a file (a background command's growing log), whatever its size.
+    public func readFileTail(path: String, maxBytes: Int = 64_000) async throws -> Data {
+        var target = path
+        if target.hasPrefix("~/") { target.removeFirst(2) }
+        let script = #"cd -- "$HOME" 2>/dev/null; f="# + shellQuote(target)
+            + #"; [ -f "$f" ] && [ -r "$f" ] || exit 0; printf 'F'; tail -c "# + String(maxBytes) + #" -- "$f""#
+        let data = try await Self.collect(try await runner.exec(Self.posix(script)))
+        guard data.first == UInt8(ascii: "F") else { throw FileUnreadable(path: path) }
+        return Data(data.dropFirst())
+    }
+
     static func parseFile(_ data: [UInt8], path: String, maxBytes: Int) throws -> Data {
         switch data.first {
         case UInt8(ascii: "F"):

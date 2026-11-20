@@ -35,4 +35,12 @@ public enum SubagentTranscript {
         case .codex: return nil
         }
     }
+
+    /// The subagent id a child transcript's file name carries (`agent-<id>.jsonl`, `<id>.jsonl`).
+    public static func id(childPath: String, format: TranscriptFormat) -> String {
+        var name = (childPath as NSString).lastPathComponent
+        if name.hasSuffix(".jsonl") { name.removeLast(6) }
+        if format == .claude, name.hasPrefix("agent-") { name.removeFirst(6) }
+        return name
+    }
 }

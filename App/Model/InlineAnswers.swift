@@ -39,8 +39,10 @@ final class InlineAnswers {
         let connection = thread.connection
         guard connection.isLive else { return nil }
         let prompt = connection.wait(thread.agent)?.prompt
+        // A lasting grant counts too (Claude's "Yes, I trust this folder" has no plain yes); it
+        // is confirmed before it's given, as everywhere.
         if let prompt, prompt.style == .choice, prompt.phase == .question,
-           prompt.options.contains(where: { PromptOptionKind(label: $0.label) == .approve }) {
+           prompt.options.contains(where: { [.approve, .scope].contains(PromptOptionKind(label: $0.label)) }) {
             return (.approval(prompt), prompt, nil)
         }
         guard connection.presentedStatus(thread.agent) == .blocked, prompt?.style != .choice,
@@ -69,7 +71,7 @@ final class InlineAnswers {
             try await PromptDriver.choose(label, on: prompt, io: io)
             let receipt = PromptOptionKind.receipt(for: label)
             decisionLog.record(key: DecisionLog.key(address: address, transcriptPath: connection.activity[address.paneID]?.transcript?.path),
-                               afterItemID: nil, receipt: receipt, detail: prompt.subject,
+                               afterItemID: nil, receipt: receipt, detail: prompt.shownSubject,
                                detailMayBeCut: prompt.contextMayBeTruncated, saved: true)
         } else if let ask {
             let entry = connection.conversations.entry(host: connection.identity, pane: address.paneID, agent: thread.agent)
@@ -120,7 +122,7 @@ final class InlineAnswers {
         guard let client = thread.connection.client else { return }
         let address = thread.address
         run(InlineAnswer(prompt: prompt, ask: nil, label: label, rank: inboxRank(thread)), in: thread,
-            receipt: PromptOptionKind.receipt(for: label), detail: prompt.subject, detailMayBeCut: prompt.contextMayBeTruncated,
+            receipt: PromptOptionKind.receipt(for: label), detail: prompt.shownSubject, detailMayBeCut: prompt.contextMayBeTruncated,
             transcript: thread.connection.activity[address.paneID]?.transcript?.path,
             decisionLog: decisionLog, saved: saved) {
             let io = HerdrPromptIO(client: client, pane: address.paneID, session: address.session) { _, _ in false }

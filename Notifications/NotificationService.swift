@@ -35,6 +35,11 @@ final class NotificationService: UNNotificationServiceExtension {
             alerted[key] = seq
             shared?.set(sequences, forKey: AttentionSnapshot.sequencesKey)
             shared?.set(alerted, forKey: AttentionSnapshot.alertedKey)
+        } else if authenticated, seq > alerted[key] ?? -1 {
+            // A finish the app saw but held (a Claude wake turn) and handed to the watcher: this
+            // push is its alert, so the app mustn't post it again on return.
+            alerted[key] = seq
+            shared?.set(alerted, forKey: AttentionSnapshot.alertedKey)
         }
 
         guard var snapshot = AttentionSnapshot.load() else {

@@ -171,10 +171,11 @@ struct ImageLoader: Equatable {
             }
             return data
         case .blob:
-            guard let transcript, let path = image.blobPath(transcript: transcript) else { throw FileUnreadable(path: "image") }
+            // A subagent's image lives in its own transcript, beside the parent's.
+            guard let transcript = image.file ?? transcript, let path = image.blobPath(transcript: transcript) else { throw FileUnreadable(path: "image") }
             return try await read(path)
         case .transcriptLine(let line, let ordinal):
-            guard let transcript, let client = connection.client else { throw FileUnreadable(path: "image") }
+            guard let transcript = image.file ?? transcript, let client = connection.client else { throw FileUnreadable(path: "image") }
             try await fetchGate.enter()
             defer { fetchGate.leave() }
             try Task.checkCancellation()
@@ -188,6 +189,15 @@ struct ImageLoader: Equatable {
             return try await read((cwd! as NSString).appendingPathComponent(path), maxBytes: maxBytes)
         }
         return try await read(path, maxBytes: maxBytes)
+    }
+
+    /// The end of a file on the host, however large it has grown.
+    @MainActor func tail(path: String, maxBytes: Int = 64_000) async throws -> Data {
+        guard let client = connection.client else { throw FileUnreadable(path: path) }
+        try await fetchGate.enter()
+        defer { fetchGate.leave() }
+        try Task.checkCancellation()
+        return try await client.readFileTail(path: path, maxBytes: maxBytes)
     }
 
     @MainActor private func read(_ path: String, maxBytes: Int = 20_000_000) async throws -> Data {
@@ -531,10 +541,13 @@ struct ImageGrid: View {
     @State private var partial = false
     @State private var saver = PhotoSaver()
 
-    private var images: [TranscriptImage] { all ?? loaded }
+    /// Newest first, each image once (a screenshot read twice shows once, where it was last seen).
+    private var images: [TranscriptImage] { all ?? TranscriptImage.newestOfEach(loaded.reversed()).reversed() }
 
     var body: some View {
-        NavigationStack {
+        // Ordered once per update, shared by every tile and the preview.
+        let images = images
+        return NavigationStack {
             Group {
                 if images.isEmpty {
                     if whole != nil, all == nil, !partial { ProgressView() } else { ContentUnavailableView("No Images", systemImage: "photo") }
@@ -551,7 +564,7 @@ struct ImageGrid: View {
                     }
                 }
             }
-            .navigationTitle(images.count == 1 ? "1 Image" : "\(images.count) Images")
+            .navigationTitle(images.isEmpty ? "Images" : images.count == 1 ? "1 Image" : "\(images.count) Images")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
@@ -567,14 +580,15 @@ struct ImageGrid: View {
         guard let whole else { return }
         do {
             let listed = try await whole()
-            // The whole file holds every loaded image (and abandoned branches' too); fewer
-            // means the listing missed some, so the loaded ones stay.
-            guard listed.count >= loaded.count else { partial = true; return }
+            // The whole file holds every loaded image (and abandoned branches' too), each once;
+            // fewer than the loaded ones, counted once each, means the listing missed some.
+            guard listed.count >= TranscriptImage.newestOfEach(loaded).count else { partial = true; return }
             // Loaded blobs keep their objects, so their cached thumbnails stay.
             var kept: [String: TranscriptImage] = [:]
             for image in loaded { if case .blob(let hash) = image.source { kept[hash] = image } }
             all = listed.reversed().map { image in
-                if case .blob(let hash) = image.source, let known = kept[hash] { known } else { image }
+                // Only the conversation's own: a subagent's keeps its name for the preview.
+                if case .blob(let hash) = image.source, image.origin == nil, let known = kept[hash] { known } else { image }
             }
         } catch {
             partial = true
@@ -648,7 +662,10 @@ struct ImagePreview: View {
 
     private var title: String {
         switch source {
-        case .embedded(let images, _): images.count > 1 ? "Image \(page + 1) of \(images.count)" : "Image"
+        case .embedded(let images, _):
+            // Whose it is, when a subagent returned it.
+            (images.count > 1 ? "Image \(page + 1) of \(images.count)" : "Image")
+                + (images.indices.contains(page) ? images[page].origin.map { " · \($0)" } ?? "" : "")
         case .file(let path): (path as NSString).lastPathComponent
         case .local(_, let name, _): name
         }

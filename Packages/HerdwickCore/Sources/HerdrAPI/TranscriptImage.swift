@@ -16,9 +16,41 @@ public final class TranscriptImage: Sendable, Hashable {
 
     public let source: Source
     public let mimeType: String?
+    /// The transcript a listed image lives in when it isn't the conversation's own: a subagent's.
+    public let file: String?
+    /// Who returned it, when not the conversation's own agent: the subagent's name.
+    public let origin: String?
+    /// Its record's time, as the transcript wrote it, for ordering across files.
+    public let at: String?
+    /// Same bytes, same key: a blob's hash.
+    public let fingerprint: String?
 
-    public init(source: Source, mimeType: String?) {
+    public init(source: Source, mimeType: String?, file: String? = nil, origin: String? = nil, at: String? = nil, fingerprint: String? = nil) {
         self.source = source; self.mimeType = mimeType
+        self.file = file; self.origin = origin; self.at = at; self.fingerprint = fingerprint
+    }
+
+    /// Same bytes, same key: an omp blob's hash. Inline images have none; two screenshots can
+    /// share any sample of their bytes, so only identical blobs are taken as one.
+    public var key: String? {
+        if let fingerprint { return fingerprint }
+        if case .blob(let hash) = source { return hash }
+        return nil
+    }
+
+    /// Oldest first by record time (images without one keep their place), then each image
+    /// once, where it last appeared.
+    public static func newestOfEach(_ images: [TranscriptImage]) -> [TranscriptImage] {
+        let ordered = images.enumerated().sorted { a, b in
+            (a.element.at ?? "", a.offset) < (b.element.at ?? "", b.offset)
+        }.map(\.element)
+        var seen = Set<String>()
+        var kept: [TranscriptImage] = []
+        for image in ordered.reversed() {
+            if let key = image.key, !seen.insert(key).inserted { continue }
+            kept.append(image)
+        }
+        return kept.reversed()
     }
 
     /// The bytes of an inline image; nil for a blob, which lives on the host.

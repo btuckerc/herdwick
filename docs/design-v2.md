@@ -1339,6 +1339,53 @@ From the councils of 2026-09-25 (`Attention`, `Push`):
   T3 Code's "settled" shelf was not adopted:
   Hide already parks work and resurfaces it when it needs you.
 
+## Claude background work and settled turns
+Claude Code 2.1 marks each user record's `turnOrigin`: `human` (the person's prompt) or
+`task_notification` (a background task waking the agent). A `run_in_background` Bash call answers
+with `toolUseResult.backgroundTaskId`; its end is a `<task-notification>` (task id, the call's
+`tool-use-id`, output file, `completed`/`failed`/`stopped`, a summary), delivered as a user record
+when it wakes the agent or a `queued_command` attachment mid-turn. The thread shows the launching
+step as "in background" until then, and the end as a "Finished/Failed <label>" row whose Show
+Output tails the output file on the host (64 KB, last 200 lines); never the raw XML. Labels:
+a recognizable `agent-run ask|sol|audit|local` launch reads "<model> · <run name>", else the
+call's description, else the command. Monitor events (no status) are notices and end nothing.
+- Alerts (Claude only; design council 2026-11-20, all four seats; review rounds 1–2): a finished
+  turn the person started (a prompt, or one typed mid-turn, a `queued_command` with
+  `commandMode: prompt`) always alerts. A wake turn alerts only when no background task launched
+  in the three hours before it ended is still running; a check-in prompt in between doesn't
+  forget the seats it's waiting on, and a task that never reports stops counting after three
+  hours. A held finish alerts anyway ten minutes after the turn ended (`TurnSettle.backstop`),
+  counted on the host's clock in both places, so a dev server or a killed task delays an alert,
+  never silences it. One `grep | awk` scan of the whole transcript (`TurnSettle`) decides for
+  both the app (`HostConnection.finishGate`, beside omp's Plan Review check) and the away watcher
+  (`settle` in `watch.sh`, which also holds the Live Activity). Leaving, the app hands the
+  watcher its held finishes (deadline, and whether still unread) and those still being checked,
+  plus each Claude pane's transcript path; a push for a finish the app saw but held advances the
+  notification extension's alert watermark, so returning doesn't alert it twice. A turn the file
+  doesn't show ending yet gets one more look 2 s later. Unknown (no `turnOrigin`, an interrupt,
+  a bad time, file unreadable, no transcript) alerts as before. A human turn that left tasks
+  running says "Replied · N background tasks running"; pushes stay opaque. No council card this
+  build: the generic rows carry the seat labels.
+- Claude's first-run folder check ("Accessing workspace:" … "No, exit" / "Yes, I trust this
+  folder") parses as a choice titled "Trust this folder?", its folder checked against the
+  pane's working directory (a path wrapped at a space loses that space on screen); one that
+  doesn't match is left to the terminal. Starting Claude from the app, herdr answers
+  `agent_not_ready` and lists the agent as blocked under its name; New Agent then asks
+  "Trust “<folder>”?" with the full path and computer, and answers through
+  `PromptDriver.choose` (verified on screen), never on its own (Trust Folder, Don't Trust which
+  ends that Claude, Cancel which leaves the question). Elsewhere it is a Needs You card with
+  inline choices; "Yes, I trust" counts as a lasting grant (confirmed first, never a
+  notification's Approve).
+- Messages typed while the agent works (`queued_command`, `commandMode: prompt`) show as the
+  person's messages where they landed.
+- Steps: a Read opens to what was read; tools without their own view (MCP, Skill, ToolSearch)
+  show their input as JSON and their result, "No output" once finished with none; a result
+  whose call is in history not loaded yet is a "Result of an earlier step" row.
+- Images span the conversation and its subagents (Claude `<session>/subagents/agent-*.jsonl`,
+  omp `<parent>/*.jsonl`), listed by one host command, merged by record time, a subagent's
+  image captioned with its name in the preview. Only identical omp blobs collapse; inline images
+  are never merged by sampling (a reproduced PNG collision).
+
 ## Subagent transcript state
 Core derives working children from omp `task`, Claude `Agent`/`Task`, and Codex
 `spawn_agent` calls. omp async-result notices may complete multiple children; wait

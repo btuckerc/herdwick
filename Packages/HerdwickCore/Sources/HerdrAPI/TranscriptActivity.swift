@@ -144,7 +144,8 @@ public struct TranscriptActivity: Codable, Sendable, Equatable {
             case .message(let message):
                 if let at = message.timestamp { activityAt = max(activityAt ?? at, at) }
                 switch message.role {
-                case .user: step = nil; stepCall = nil
+                case .user where !ConversationItem.isQueued(message.id): step = nil; stepCall = nil
+                case .user: break
                 case .toolResult:
                     if message.toolCallId == stepCall { step = nil; stepCall = nil }
                 case .assistant:

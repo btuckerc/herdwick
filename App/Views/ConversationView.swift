@@ -709,12 +709,15 @@ struct ConversationView: View {
         showsSessionDetails = true
     }
 
-    /// Lists every tool image in the file when earlier history isn't loaded; nil when the
-    /// loaded ones are all there are (or the host can't be asked).
+    /// Lists every tool image in the file and its subagents' files when earlier history isn't
+    /// loaded or there are subagents; nil when the loaded ones are all there are (or the host
+    /// can't be asked).
     private var wholeImages: (@MainActor () async throws -> [TranscriptImage])? {
-        guard feed.hasEarlier, connection.isLive, let client = connection.client,
+        let subagents = feed.conversation.subagents
+        guard feed.hasEarlier || !subagents.isEmpty, connection.isLive, let client = connection.client,
               let location, location.format != .codex else { return nil }
-        return { try await client.transcriptToolImages(path: location.path, format: location.format) }
+        let names = Dictionary(subagents.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        return { try await client.transcriptToolImages(path: location.path, format: location.format, subagents: true, names: names) }
     }
 
     private func press(_ keys: [String], failure: String) async {
@@ -1358,7 +1361,8 @@ struct ConversationView: View {
     /// first, it just stays there.
     private func takeFirstMessage() async {
         let address = connection.address(paneID: paneID)
-        guard let message = scene.firstMessage, message.address == address else { return }
+        guard let message = scene.firstMessage, message.address == address,
+              message.agentName == nil || agent == nil || agent?.name == message.agentName else { return }
         defer { if scene.firstMessage == message { scene.firstMessage = nil } }
         if draft.isEmpty { draft = message.text }
         guard message.send else { return }
@@ -1370,6 +1374,7 @@ struct ConversationView: View {
                 return
             }
             if let agent, agent.hasTranscript, connection.isLive,
+               message.agentName == nil || agent.name == message.agentName,
                ![.working, .blocked].contains(connection.presentedStatus(agent)) {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled, firstSend == .waiting else { return }
@@ -1677,7 +1682,7 @@ struct ConversationView: View {
             try await PromptDriver.choose(label, on: prompt, io: io)
             screenPrompt = nil
             sentCount += 1
-            confirm(PromptOptionKind.receipt(for: label), detail: prompt.subject, detailMayBeCut: prompt.contextMayBeTruncated)
+            confirm(PromptOptionKind.receipt(for: label), detail: prompt.shownSubject, detailMayBeCut: prompt.contextMayBeTruncated)
         } catch {
             askRetry = nil
             askFailure = PromptDriverError.message(for: error)
@@ -1744,7 +1749,9 @@ struct ConversationView: View {
         while !Task.isCancelled {
             if choosing == nil, let text = try? await client.readPane(paneID, session: session).text {
                 guard !Task.isCancelled else { return }
-                let parsed = ScreenPrompt.parse(text)
+                // A folder check only as the folder the agent runs in, as Needs You has it.
+                let cwd = agent?.workingDirectory ?? connection.snapshot?.panes.first { $0.id == paneID }?.workingDirectory
+                let parsed = ScreenPrompt.parse(text)?.trustResolved(cwd: cwd)
                 screenPrompt = parsed?.style == .choice && parsed?.phase == .question ? parsed : nil
             }
             try? await Task.sleep(for: .seconds(2))
@@ -3700,6 +3707,8 @@ private struct PermissionCard: View {
     private var contextText: some View {
         var lines = prompt.context
         if let first = lines.first, first.hasPrefix("Command: ") { lines[0] = String(first.dropFirst("Command: ".count)) }
+        // A folder check names the folder as verified against the agent's.
+        if let folder = prompt.folder, !lines.isEmpty { lines[0] = folder }
         return Text(lines.joined(separator: "\n")).font(.callout.monospaced())
             .foregroundStyle(.primary)
             .textSelection(.enabled)
@@ -3730,7 +3739,7 @@ private struct PermissionCard: View {
             if !scopes.isEmpty { scopeChoices(scopes) }
             ForEach(other, id: \.label) { option in optionButton(option) }
         }
-        .grantConfirmation($confirmingScope, label: { $0 }, grant: onChoose)
+        .grantConfirmation($confirmingScope, label: { $0 }, prompt: { [prompt] _ in prompt }, grant: onChoose)
     }
 
     /// The options as shown, top to bottom: Approve and Deny side by side when both are there
@@ -3850,7 +3859,9 @@ enum PromptOptionKind: Equatable {
 
     init(label: String) {
         let label = label.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        if label.contains("don't ask again") || label.contains("always") || label.contains("session") { self = .scope }
+        // Claude's "Yes, I trust this folder" lasts for the folder: a grant, confirmed first.
+        if label.contains("don't ask again") || label.contains("always") || label.contains("session")
+            || (label.hasPrefix("yes") && label.contains("trust")) { self = .scope }
         else if label.hasPrefix("yes") || label.hasPrefix("approve") || label.hasPrefix("allow") { self = .approve }
         else if label.hasPrefix("no") || label.hasPrefix("deny") || label.hasPrefix("reject") || label.hasPrefix("esc") { self = .deny }
         else { self = .neutral }
@@ -3890,16 +3901,26 @@ extension View {
     /// A lasting grant ("Yes, and don't ask again") waits on this before it's given, wherever
     /// it's offered: the thread's card, the inbox row's "…" menu and its context menu (round 8:
     /// the inbox's two granted it in one tap). `label` is the option it would choose.
+    /// `prompt`: what the grant is for, when it says more than its label (a folder to trust).
     func grantConfirmation<Pending>(_ pending: Binding<Pending?>, label: @escaping (Pending) -> String,
+                                    prompt: ((Pending) -> ScreenPrompt?)? = nil,
                                     grant: @escaping (Pending) -> Void) -> some View {
         confirmationDialog(pending.wrappedValue.map(label) ?? "", isPresented: Binding {
             pending.wrappedValue != nil
         } set: { if !$0 { pending.wrappedValue = nil } }, titleVisibility: .visible, presenting: pending.wrappedValue) { request in
             Button(label(request)) { grant(request) }
             Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("Matching requests from this agent won't ask you again.")
+        } message: { request in
+            Text(prompt?(request)?.grantMessage ?? "Matching requests from this agent won't ask you again.")
         }
+    }
+}
+
+extension ScreenPrompt {
+    /// A lasting grant's reach, when the prompt names it: Claude's folder check.
+    var grantMessage: String? {
+        guard title == "Trust this folder?", let folder = folder ?? subject else { return nil }
+        return "\(folder)\n\nClaude will be able to read, edit and run files in this folder, now and in later sessions."
     }
 }
 

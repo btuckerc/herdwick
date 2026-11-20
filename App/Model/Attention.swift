@@ -154,6 +154,9 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
                 guard seq > last, !pushOwns(link.identity) else { continue }
                 // An omp finish may be a Plan Review its conversation hasn't been checked for yet.
                 if agent.agent == "omp", agent.agentStatus != .blocked, !link.waitChecked(agent) { continue }
+                // A Claude finish waits for its transcript: a background task's wake turn with
+                // others still running isn't the end of what was asked (`TurnSettle`).
+                if agent.agentStatus != .blocked, link.finishGate(agent) != .open { continue }
                 alerted[key] = seq
                 post(agent, address: address, link: link)
             } else {
@@ -209,7 +212,7 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
         content.subtitle = [link.profile.name, agent.workingDirectory.map { ($0 as NSString).lastPathComponent }]
             .compactMap { $0 }.joined(separator: " · ")
         let wait = link.wait(agent)
-        content.body = blocked ? wait?.summary ?? "Needs you" : "Done"
+        content.body = blocked ? wait?.summary ?? "Needs you" : Self.finishedBody(link.turnSettle(agent))
         content.sound = blocked && !quiet ? .default : nil
         content.threadIdentifier = "\(address.hostID.uuidString)/\(address.session)"
         content.userInfo = [
@@ -237,6 +240,13 @@ final class Attention: NSObject, @preconcurrency UNUserNotificationCenterDelegat
             content.userInfo["draftID"] = id
         }
         center.add(UNNotificationRequest(identifier: Self.key(address), content: content, trigger: nil))
+    }
+
+    /// "Done", or, when the reply left background tasks running (a council's seats), says so:
+    /// their last one alerts again.
+    static func finishedBody(_ settle: TurnSettle?) -> String {
+        guard let settle, settle.origin == .human, settle.pending > 0 else { return "Done" }
+        return settle.pending == 1 ? "Replied · 1 background task running" : "Replied · \(settle.pending) background tasks running"
     }
 
     /// The badge counts agents waiting on you, read or not; finished work is not a debt.

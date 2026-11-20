@@ -241,7 +241,7 @@ struct SessionView: View {
             } message: {
                 Text("\(bulkCloseMessage) This cannot be undone.")
             }
-            .grantConfirmation($granting, label: \.label) { answer($0.label, prompt: $0.prompt, ask: nil, in: $0.thread) }
+            .grantConfirmation($granting, label: \.label, prompt: \.prompt) { answer($0.label, prompt: $0.prompt, ask: nil, in: $0.thread) }
     }
 
     struct Failure {
@@ -2702,7 +2702,9 @@ struct InlineApproval: View {
         .alignmentGuide(.listRowSeparatorLeading) { _ in leading }
         .padding(.bottom, Tokens.Space.xs)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .snappy, value: answer?.receipt)
-        .grantConfirmation($confirmingGrant, label: { $0 }, grant: choose)
+        .grantConfirmation($confirmingGrant, label: { $0 }, prompt: { [choices] _ in
+            if case .approval(let prompt) = choices { prompt } else { nil }
+        }, grant: choose)
     }
 
     /// Under the row's title: the unread gutter, the glyph column and their spacing; at
@@ -2722,7 +2724,9 @@ struct InlineApproval: View {
     private func approvalButtons(_ prompt: ScreenPrompt) -> some View {
         let approve = prompt.options.first { PromptOptionKind(label: $0.label) == .approve }
         let deny = prompt.options.first { PromptOptionKind(label: $0.label) == .deny }
-        let others = prompt.options.filter { $0 != approve && $0 != deny }
+        // Claude's folder check: trusting leads, confirmed first; not trusting says it ends Claude.
+        let trust = prompt.title == "Trust this folder?" ? prompt.options.first { $0.label.hasPrefix("Yes, I trust") } : nil
+        let others = prompt.options.filter { $0 != approve && $0 != deny && $0 != trust }
         let layout = dynamicTypeSize.isAccessibilitySize
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: Tokens.Space.s))
             : AnyLayout(HStackLayout(spacing: Tokens.Space.s))
@@ -2745,7 +2749,10 @@ struct InlineApproval: View {
                 .disabled(answer != nil)
             }
             layout {
-                if let approve {
+                if let trust {
+                    button("Trust Folder…", pending: "Trusting…", label: trust.label, shortcutIndex: 0, confirm: true)
+                        .primaryAction(.roundedRectangle(radius: Tokens.Radius.choice))
+                } else if let approve {
                     // "Approve Once" beside a lasting grant in the "…" menu, as the thread's card
                     // says it (round 57: sb#1, opus#2, sa#4, one approval with two names).
                     let once = others.contains { PromptOptionKind(label: $0.label) == .scope }
@@ -2755,7 +2762,8 @@ struct InlineApproval: View {
                 if let deny {
                     // Neutral: red is for the receipt and the menu's destructive role, not a second
                     // loud button beside the one that matters.
-                    button("Deny", pending: "Denying…", label: deny.label, shortcutIndex: approve == nil ? 0 : 1)
+                    button(trust != nil ? "Don't Trust" : "Deny", pending: trust != nil ? "Exiting…" : "Denying…",
+                           label: deny.label, shortcutIndex: approve == nil && trust == nil ? 0 : 1)
                         .choiceButton()
                         // Its own width beside Approve, which takes the rest, so "Approve Once ⌘1"
                         // fits whole with its hint as Deny keeps its (round 59: opus#9, sb#8, the
@@ -2935,10 +2943,10 @@ struct InlineApproval: View {
 
     /// Approve or Deny: Approve takes the row Deny leaves (`approvalButtons`). `verb`: what the button says; `label`: the
     /// option it picks on the agent's screen.
-    private func button(_ verb: String, pending: String, label: String, shortcutIndex: Int) -> some View {
+    private func button(_ verb: String, pending: String, label: String, shortcutIndex: Int, confirm: Bool = false) -> some View {
         let choosing = answer?.label == label
         let shortcut = numberedShortcuts && answer == nil ? shortcutIndex : nil
-        return Button { choose(label) } label: {
+        return Button { if confirm { confirmingGrant = label } else { choose(label) } } label: {
             HStack(spacing: 6) {
                 if choosing { ProgressView().controlSize(.mini) }
                 let words = Text(choosing ? pending : verb)

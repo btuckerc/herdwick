@@ -47,6 +47,8 @@ final class SceneState {
         let address: PaneAddress
         let text: String
         let send: Bool
+        /// The agent it was written for (its herdr name); another in that pane doesn't get it.
+        var agentName: String? = nil
     }
     /// Answers given from Needs You rows and cards in this window, shared by the inbox and the
     /// iPad Overview so both show the same receipt.

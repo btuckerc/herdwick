@@ -115,14 +115,10 @@ func watcherDetectsOmpWaits(mode: String) async throws {
     let body = switch mode { case "plan": planTranscript; case "pty-record": ptyRecordTranscript; default: ptyTranscript }
     try body.write(to: transcript, atomically: true, encoding: .utf8)
     for (name, body) in [("herdr", scenarioHerdr), ("curl", stubCurl)] {
-        let file = bin.appendingPathComponent(name)
-        try body.write(to: file, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        try writeExecutable(body, to: bin.appendingPathComponent(name))
     }
     if mode == "no-jsonpp" {
-        let perl = bin.appendingPathComponent("perl")
-        try "#!/bin/sh\nexit 2\n".write(to: perl, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: perl.path)
+        try writeExecutable("#!/bin/sh\nexit 2\n", to: bin.appendingPathComponent("perl"))
     }
     // A stub written a moment ago can still be held open by a process another test is forking
     // (ETXTBSY): the watcher would stop at a failed `agent list` or lose a post to `curl`, so
@@ -163,6 +159,14 @@ private let stubCurl = """
 
 private func alive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 }
 
+/// A stub script, written while nothing is being spawned (`LocalProcessRunner.exclusive`).
+private func writeExecutable(_ body: String, to file: URL) throws {
+    try LocalProcessRunner.exclusive {
+        try body.write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+    }
+}
+
 private func eventually(_ condition: () -> Bool) async -> Bool {
     for _ in 0..<100 {
         if condition() { return true }
@@ -187,14 +191,10 @@ func watcherPostsAFinishOnceWithOpaqueIDsAndDisarmLeavesNothing(mute: String) as
     defer { try? FileManager.default.removeItem(at: root) }
     let watchesActivity = mute == "activity" || mute == "activity-muted"
     for (name, body) in [("herdr", watchesActivity ? stubActivityHerdr : stubHerdr), ("curl", stubCurl)] {
-        let file = bin.appendingPathComponent(name)
-        try body.write(to: file, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        try writeExecutable(body, to: bin.appendingPathComponent(name))
     }
     if mute == "unsigned" {
-        let file = bin.appendingPathComponent("openssl")
-        try "#!/bin/sh\nexit 127\n".write(to: file, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        try writeExecutable("#!/bin/sh\nexit 127\n", to: bin.appendingPathComponent("openssl"))
     }
     let runner = EnvRunner(prefix: "HOME=\(root.path)/home STUB_DIR=\(root.path) PATH=\(bin.path):$PATH ")
     let host = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
@@ -294,3 +294,95 @@ func watcherPostsAFinishOnceWithOpaqueIDsAndDisarmLeavesNothing(mute: String) as
     }
     #expect(throws: Never.self) { try PushWatch.installer(good, session: "main", herdrPath: "/opt/my herdr/herdr") }
 }
+
+/// `herdr` whose Claude agent works once, then idles at seq 7 for good.
+private let claudeHerdr = #"""
+    #!/bin/sh
+    shift 2
+    case "$1 $2" in
+    "agent list") echo '{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","agent_status":"working"}]}}' ;;
+    "agent get") echo '{"result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"w1:p1","state_change_seq":7,"agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-1"}}}}' ;;
+    "agent wait")
+        if [ "$5" = working ]; then
+            if [ -e "$STUB_DIR/finished" ]; then echo $$ > "$STUB_DIR/sleeper.pid"; exec sleep 300; fi
+            echo '{"result":{"agent":{"agent":"claude","agent_status":"working","pane_id":"w1:p1","state_change_seq":6,"agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-1"}}}}'
+        else
+            : > "$STUB_DIR/finished"
+            echo '{"result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"w1:p1","state_change_seq":7,"agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-1"}}}}'
+        fi ;;
+    esac
+    """#
+
+/// A Claude wake turn with a council seat still out holds its finish until the backstop;
+/// one that leaves nothing running, a turn the person started, or one whose backstop has
+/// already passed alerts at once. The app's resolved transcript path wins over the default
+/// folders, and a finish the app was holding as it left alerts at its deadline with no new turn.
+@Test(.serialized, arguments: ["held", "settled", "human", "expired", "app-path", "handoff", "checking", "get-fails", "checking-get-fails"])
+func watcherHoldsAClaudeWakeTurnWhileItsTasksRun(mode: String) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let home = root.appendingPathComponent("home"), bin = root.appendingPathComponent("bin")
+    let project = home.appendingPathComponent(mode == "app-path" ? "elsewhere/projects/-src-app" : ".claude/projects/-src-app")
+    for dir in [home, bin, project] { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
+    defer { try? FileManager.default.removeItem(at: root) }
+    for (name, body) in [("herdr", ["handoff", "checking", "get-fails", "checking-get-fails"].contains(mode) ? claudeIdleHerdr : claudeHerdr), ("curl", stubCurl)] {
+        try writeExecutable(body, to: bin.appendingPathComponent(name))
+    }
+    typealias T = TurnSettleTests
+    let iso = ISO8601DateFormatter()
+    func at(_ seconds: TimeInterval) -> String { iso.string(from: Date().addingTimeInterval(seconds)) }
+    let end = mode == "expired" ? -3600.0 : -1
+    var lines = [T.human("council", at: at(end - 60)), T.launch("s1", at: at(end - 59)), T.launch("s2", at: at(end - 58))]
+    if mode != "human" { lines += [T.wake("s1", at: at(end - 2))] }
+    if mode == "settled" { lines += [T.wake("s2", at: at(end - 1.5))] }
+    lines += [T.reply("ok", at: at(end - 1)), T.ended(at: at(end))]
+    let transcript = project.appendingPathComponent("sess-1.jsonl")
+    try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: transcript)
+
+    let runner = EnvRunner(prefix: "HOME=\(root.path)/home STUB_DIR=\(root.path) PATH=\(bin.path):$PATH HW_BACKSTOP=8 CLAUDE_CONFIG_DIR= ")
+    let host = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    var config = PushWatch.Config(relay: URL(string: "https://relay.example")!, deviceToken: "ab12",
+                                  environment: "development", hostID: host, states: ["blocked", "done"],
+                                  installationID: UUID(), secret: "abcd")
+    if mode == "app-path" { config.claudeTranscripts = ["w1:p1": transcript.path] }
+    // herdr can't say at the deadline: the held finish alerts anyway.
+    if mode == "get-fails" {
+        try Data().write(to: root.appendingPathComponent("get-fails"))
+        config.held = [.init(pane: "w1:p1", seq: 7, deadline: Int(Date().timeIntervalSince1970) + 4, reference: "sess-1")]
+    }
+    // Still being checked, and herdr can't say: it alerts at once rather than never.
+    if mode == "checking-get-fails" {
+        try Data().write(to: root.appendingPathComponent("get-fails"))
+        config.held = [.init(pane: "w1:p1", seq: 7, deadline: nil, reference: "sess-1")]
+    }
+    if mode == "handoff" { config.held = [.init(pane: "w1:p1", seq: 7, deadline: Int(Date().timeIntervalSince1970) + 4, reference: "sess-1")] }
+    // Still being checked as the app left: the watcher scans it, finds a wake with a seat out, holds.
+    if mode == "checking" { config.held = [.init(pane: "w1:p1", seq: 7, deadline: nil, reference: "sess-1")] }
+    try await PushWatch.arm(config, session: "s1", herdrPath: bin.appendingPathComponent("herdr").path, runner: runner)
+    let posts = root.appendingPathComponent("posts"), sleeper = root.appendingPathComponent("sleeper.pid")
+    #expect(await eventually { FileManager.default.fileExists(atPath: sleeper.path) })
+    func count() -> Int { ((try? String(contentsOf: posts, encoding: .utf8)) ?? "").split(separator: "\n").count }
+    if ["held", "app-path", "handoff", "checking", "get-fails"].contains(mode) {
+        #expect(count() == 0)
+        // Ten minutes in production; seconds here.
+        #expect(await eventually { count() == 1 })
+    } else {
+        #expect(count() == 1)
+    }
+    let post = try JSONSerialization.jsonObject(with: Data(try String(contentsOf: posts, encoding: .utf8).split(separator: "\n")[0].utf8)) as? [String: Any]
+    #expect(post?["state"] as? String == "done")
+    #expect(post?["seq"] as? Int == 7)
+    try await PushWatch.disarm(installationID: config.installationID, hostID: host, session: "s1", runner: runner)
+}
+
+/// `herdr` whose Claude agent is already idle at seq 7 when the watcher starts, and stays so.
+private let claudeIdleHerdr = #"""
+    #!/bin/sh
+    shift 2
+    case "$1 $2" in
+    "agent list") echo '{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","agent_status":"idle"}]}}' ;;
+    "agent get")
+        if [ -e "$STUB_DIR/get-fails" ]; then echo '{"error":{"code":"server_busy"}}'; exit 1; fi
+        echo '{"result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"w1:p1","state_change_seq":7,"agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-1"}}}}' ;;
+    "agent wait") echo $$ > "$STUB_DIR/sleeper.pid"; exec sleep 300 ;;
+    esac
+    """#

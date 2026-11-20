@@ -510,7 +510,10 @@ final class HostConnection {
                     continue
                 }
                 let latest = self.latest(agent)
-                if let latest, latest.agentStatus != .working, let prompt = ScreenPrompt.parse(text),
+                // A trust prompt only as the folder the agent runs in; one that doesn't match is
+                // left to the terminal.
+                if let latest, latest.agentStatus != .working,
+                   let prompt = ScreenPrompt.parse(text)?.trustResolved(cwd: latest.workingDirectory ?? self.snapshot?.panes.first { $0.id == pane }?.workingDirectory),
                    prompt.phase == .question || prompt.phase == .review {
                     // Cursor/check changes don't create new debts; a new screen context does.
                     let id: String
@@ -549,6 +552,124 @@ final class HostConnection {
         guard changed else { return }
         if let snapshot { reconcileHidden(snapshot) }
         onAttentionChange?(self)
+    }
+
+    // MARK: Settled turns
+
+    /// Pane → the Claude turn-settle check (`TurnSettle`) for the agent and change it ran at; a
+    /// nil settle is a failed read, which alerts as before.
+    private var settles: [String: (seq: Int, ref: AgentSessionRef?, settle: TurnSettle?)] = [:]
+    private var settleProbe: Task<Void, Never>?
+    private var settleRelease: Task<Void, Never>?
+
+    enum FinishGate: Equatable { case open, checking, held }
+
+    /// Whether a finished Claude turn may alert yet: `checking` until its transcript has been
+    /// read at this change, `held` while it is a background task's wake turn with others still
+    /// running (until `TurnSettle.backstop`). Anything else, and any agent but Claude, is open.
+    /// The away watcher runs the same scan, so a turn it held doesn't alert on return either.
+    func finishGate(_ agent: Agent, now: Date = .now) -> FinishGate {
+        guard agent.agent == "claude", agent.agentStatus == .idle || agent.agentStatus == .done else { return .open }
+        guard let entry = settles[agent.paneID], entry.ref == agent.agentSession,
+              entry.seq == agent.stateChangeSeq ?? 0 else {
+            return client != nil && claudeTranscript(agent) != nil ? .checking : .open
+        }
+        return entry.settle?.holds(now: now) == true ? .held : .open
+    }
+
+    /// The latest check of a finished Claude turn, at its current change; nil while unknown.
+    func turnSettle(_ agent: Agent) -> TurnSettle? {
+        guard let entry = settles[agent.paneID], entry.ref == agent.agentSession,
+              entry.seq == agent.stateChangeSeq ?? 0 else { return nil }
+        return entry.settle
+    }
+
+    /// For the away watcher as the app leaves: unread finishes still held, with the seconds
+    /// left before their backstop, and each Claude pane's transcript as found here.
+    func watcherHandoff(now: Date = .now) -> (held: [PushWatch.Config.Held], transcripts: [String: String]) {
+        let agents = snapshot?.agents ?? []
+        let alerted = AttentionSnapshot.shared?.dictionary(forKey: AttentionSnapshot.alertedKey) as? [String: Int] ?? [:]
+        let held = agents.compactMap { agent -> PushWatch.Config.Held? in
+            let seq = agent.stateChangeSeq ?? 0
+            let reference = agent.agentSession?.value
+            let address = address(paneID: agent.paneID)
+            let key = AttentionSnapshot.key(host: address.hostID, session: address.session, pane: address.paneID)
+            // Unread and not already alerted (a relaunch rechecks a finish it alerted before).
+            let alert = isUnread(agent) && (alerted[key] ?? -1) < seq
+            switch finishGate(agent, now: now) {
+            // Open but not yet alerted here (a backstop passing as the app leaves): the watcher
+            // checks it at once and delivers it.
+            case .open:
+                guard agent.agent == "claude", agent.agentStatus == .idle || agent.agentStatus == .done, alert else { return nil }
+                // Only a recent one: an old unread finish isn't news to deliver now.
+                if let age = turnSettle(agent)?.age(now: now), age > 2 * TurnSettle.backstop { return nil }
+                return .init(pane: agent.paneID, seq: seq, deadline: nil, reference: reference, alert: true)
+            // Still being checked: the watcher checks it as it starts.
+            case .checking: return .init(pane: agent.paneID, seq: seq, deadline: nil, reference: reference, alert: alert)
+            case .held:
+                guard let ended = turnSettle(agent)?.endedAt else { return nil }
+                // On the host's clock. Read here, its Live Activity still ends then; only the alert is skipped.
+                return .init(pane: agent.paneID, seq: seq, deadline: Int(ended.timeIntervalSince1970 + TurnSettle.backstop),
+                             reference: reference, alert: alert)
+            }
+        }
+        var transcripts: [String: String] = [:]
+        for agent in agents { if let path = claudeTranscript(agent) { transcripts[agent.paneID] = path } }
+        return (held, transcripts)
+    }
+
+    private func claudeTranscript(_ agent: Agent) -> String? {
+        guard let entry = activity[agent.paneID], entry.ref == agent.agentSession,
+              let transcript = entry.transcript, transcript.format == .claude else { return nil }
+        return transcript.path
+    }
+
+    /// Checks Claude agents that stopped at a change not yet checked. A turn the file doesn't
+    /// show ending yet gets one more look two seconds on, then counts as it stands.
+    private func updateSettles(_ agents: [Agent]) {
+        // Holds known from before a reconnect still need their release timer.
+        if settleRelease == nil { scheduleSettleRelease() }
+        guard settleProbe == nil, let client else { return }
+        let due = agents.compactMap { agent -> (Agent, String)? in
+            guard agent.agent == "claude", agent.agentStatus == .idle || agent.agentStatus == .done,
+                  let path = claudeTranscript(agent) else { return nil }
+            if let entry = settles[agent.paneID], entry.ref == agent.agentSession, entry.seq == agent.stateChangeSeq ?? 0 { return nil }
+            return (agent, path)
+        }
+        guard !due.isEmpty else { return }
+        let generation = generation
+        settleProbe = Task { [weak self] in
+            for (agent, path) in due {
+                var settle: TurnSettle? = (try? await withTimeout(.seconds(5)) { try await client.turnSettle(path: path) }) ?? nil
+                // The finish seen was the person's turn: a later look can't make it a wake.
+                if settle?.ended == false, settle?.origin != .human {
+                    try? await Task.sleep(for: .seconds(2))
+                    settle = (try? await withTimeout(.seconds(5)) { try await client.turnSettle(path: path) }) ?? nil
+                }
+                // Each as it comes, so one slow host read doesn't hold another pane's alert.
+                guard let self, generation == self.generation else { return }
+                self.settles[agent.paneID] = (agent.stateChangeSeq ?? 0, agent.agentSession, settle)
+                self.scheduleSettleRelease()
+                self.onAttentionChange?(self)
+            }
+            guard let self else { return }
+            self.settleProbe = nil
+            // Agents that stopped while this ran are checked now.
+            if generation == self.generation, let agents = self.snapshot?.agents { self.updateSettles(agents) }
+        }
+    }
+
+    /// A held finish alerts at its backstop if nothing has moved by then.
+    private func scheduleSettleRelease() {
+        settleRelease?.cancel()
+        let next = settles.values.compactMap { $0.settle?.holds() == true ? $0.settle?.releaseAt() : nil }.min()
+        guard let next else { return }
+        settleRelease = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(1, next.timeIntervalSinceNow + 1)))
+            guard !Task.isCancelled, let self else { return }
+            self.scheduleSettleRelease()
+            self.onAttentionChange?(self)
+        }
     }
 
     // MARK: Message activity
@@ -703,6 +824,7 @@ final class HostConnection {
                 if heard { self.heardAt = .now }
                 self.conversations.publish(warm, revisions: inputs.mapValues(\.revision), host: host, agents: agents)
                 self.updateWaits(agents)
+                self.updateSettles(agents)
             }
             if self.activityPending {
                 self.activityPending = false
@@ -850,6 +972,8 @@ final class HostConnection {
     enum StartOutcome {
         case busy(String)
         case started(Agent, PaneAddress)
+        /// Claude stopped at its first-run check in a folder it hasn't opened: the person decides.
+        case needsTrust(ScreenPrompt, PaneAddress, name: String)
     }
 
     /// `freshPane`: the caller just created `paneID`, so its shell can't hold user work but may
@@ -858,9 +982,11 @@ final class HostConnection {
         guard let client, let session = activeSession, isLive else { throw HerdrError.noResponse }
         lastAgentKind = kind
         var target = paneID
+        var folder = snapshot?.panes.first(where: { $0.id == paneID })?.workingDirectory
         if inNewTab {
             guard let pane = snapshot?.panes.first(where: { $0.id == paneID }) else { throw HerdrError.noResponse }
             target = try await client.createTab(workspaceID: pane.workspaceID, label: nil, cwd: pane.workingDirectory, session: session).rootPane.id
+            folder = pane.workingDirectory
         }
         let fresh = inNewTab || freshPane
         // A fresh tab can't be busy with user work, but its shell may still be running startup
@@ -882,8 +1008,53 @@ final class HostConnection {
                 // A new tab's shell is still running its startup files.
                 attempts += 1
                 try await Task.sleep(for: .milliseconds(250))
+            } catch HerdrError.api(code: "agent_not_ready", let message) {
+                // herdr: "blocked during startup". Claude's folder check is the usual reason.
+                if let prompt = try? await ScreenPrompt.parse(client.readPane(target, session: session).text),
+                   prompt.title == "Trust this folder?" {
+                    // Granted only for the folder the pane is in, checked against what the screen says.
+                    await awaitPane(target)
+                    let cwd = snapshot?.panes.first { $0.id == target }?.workingDirectory ?? folder
+                    guard let resolved = prompt.trustResolved(cwd: cwd) else { throw TrustUnverified() }
+                    return .needsTrust(resolved, PaneAddress(hostID: profile.id, session: session, paneID: target), name: name)
+                }
+                throw HerdrError.api(code: "agent_not_ready", message: message)
             }
         }
+        return .started(try await awaitStarted(agent, kind: kind, paneID: target), PaneAddress(hostID: profile.id, session: session, paneID: target))
+    }
+
+    /// Answers Claude's folder check with `label` (the person's choice, verified on screen),
+    /// then waits for the agent as a start does.
+    func answerTrust(_ label: String, on prompt: ScreenPrompt, at address: PaneAddress, name: String, kind: String) async throws -> Agent? {
+        guard let client, activeSession == address.session else { throw HerdrError.noResponse }
+        let io = HerdrPromptIO(client: client, pane: address.paneID, session: address.session) { _, _ in false }
+        try await PromptDriver.choose(label, on: prompt, io: io)
+        guard label != "No, exit" else { return nil }
+        var found: Agent?
+        for _ in 0..<60 {
+            // herdr keeps the start's name through the check (live trace); only that agent will do.
+            if let live = snapshot?.agents.first(where: { $0.paneID == address.paneID && $0.name == name }) { found = live; break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        // Not in the mirror yet: ask herdr itself; failing that, say so rather than look declined.
+        if found == nil, let direct = try? await client.agent(paneID: address.paneID, session: address.session).agent, direct.name == name {
+            found = direct
+        }
+        guard let found else { throw TrustPending() }
+        return try await awaitStarted(found, kind: kind, paneID: address.paneID)
+    }
+
+    struct TrustUnverified: LocalizedError {
+        var errorDescription: String? { "Claude is asking to trust a folder this app couldn't match to the pane's. Answer it in the terminal, where the whole path shows." }
+    }
+
+    struct TrustPending: LocalizedError {
+        var errorDescription: String? { "The folder is trusted and Claude is still starting. Open it from the inbox when it appears; your first message is still in this sheet." }
+    }
+
+    private func awaitStarted(_ started: Agent, kind: String, paneID target: String) async throws -> Agent {
+        var agent = started
         // agent.start answers before the agent runs; its integration reports the transcript a
         // moment later. Wait for that (bounded), so the start opens the conversation rather than
         // the terminal, and the mirror has the agent, so it doesn't open on "Agent exited".
@@ -897,7 +1068,7 @@ final class HostConnection {
             }
             try await Task.sleep(for: .milliseconds(500))
         }
-        return .started(agent, PaneAddress(hostID: profile.id, session: session, paneID: target))
+        return agent
     }
 
     /// Waits (bounded) until the mirror shows `paneID`, so a view opened on it has its pane.
@@ -1121,6 +1292,11 @@ final class HostConnection {
         activityRead?.cancel()
         waitProbe?.cancel()
         waitProbe = nil
+        // A settle read cut off by the drop must not keep later finishes waiting on its slot.
+        settleProbe?.cancel()
+        settleProbe = nil
+        settleRelease?.cancel()
+        settleRelease = nil
         // The next live link's first check is a baseline again; see `silentWaits`.
         waitBaselinePending = true
         consoleBaselinePending = true

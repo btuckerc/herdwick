@@ -131,10 +131,12 @@ final class Push {
                     }
                     continue
                 }
-                let config = PushWatch.Config(relay: relay, deviceToken: token ?? "", environment: Self.environment,
+                var config = PushWatch.Config(relay: relay, deviceToken: token ?? "", environment: Self.environment,
                                               hostID: link.profile.id, states: token == nil ? [] : states,
                                               installationID: Self.installationID, secret: Self.secret,
                                               mutes: Mutes.shared.watcherMutes(link), activity: activity)
+                // Finishes held here keep their deadlines there; transcripts found here are used there.
+                (config.held, config.claudeTranscripts) = link.watcherHandoff()
                 // Reserve before dispatch: mirror events can arrive during the SSH request.
                 let task = watch(config, on: link)
                 group.addTask { await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() } }

@@ -52,8 +52,14 @@ public enum TranscriptEntry: Sendable, Equatable {
 /// A background command's output, delivered after the turn that started it.
 public struct FinishedJob: Sendable, Equatable {
     public let id: String
-    public let label: String
+    public var label: String
     public let output: String
+    /// Claude's `<status>` other than `completed` (`failed`, `stopped`), or a non-zero exit.
+    public var failed: Bool = false
+    /// Claude's file holding the command's output, on the host.
+    public var outputFile: String? = nil
+    /// The call that started it, when the delivery names it (Claude's `<tool-use-id>`).
+    public var callID: String? = nil
 }
 
 public struct TranscriptMessage: Sendable, Equatable {
@@ -134,6 +140,8 @@ public struct TranscriptRecord: Sendable, Equatable {
             }
         } else if format == .claude {
             model = message["model"] as? String
+            // The effort the reply ran at ("high"), as Codex's turn context names it.
+            if type == "assistant" { thinking = r["effort"] as? String }
             if type == "assistant", let u = message["usage"] as? [String: Any] {
                 usage = .init(inputTokens: (u["input_tokens"] as? Int ?? 0) + (u["cache_read_input_tokens"] as? Int ?? 0) + (u["cache_creation_input_tokens"] as? Int ?? 0),
                               outputTokens: u["output_tokens"] as? Int ?? 0, cost: nil)
@@ -312,7 +320,7 @@ public struct TranscriptReader: Sendable {
         return (text.joined(separator: "\n\n"), thinking.joined(separator: "\n\n"), images)
     }
 
-    private static func json(_ value: Any?) -> String? {
+    static func json(_ value: Any?) -> String? {
         guard let value, JSONSerialization.isValidJSONObject(value),
               let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else { return nil }
         return String(decoding: data, as: UTF8.self)
@@ -466,6 +474,9 @@ public struct ToolActivity: Sendable, Equatable {
     public var board: [TodoItem]?
     /// Images the tool returned (a screenshot, a viewed file), shown by reference.
     public var images: [TranscriptImage]
+    /// A command the agent left running in the background (Claude's `run_in_background`).
+    public enum Background: Sendable, Equatable { case running(String), finished, failed }
+    public var background: Background?
     public init(id: String, name: String, summary: String, arguments: String? = nil, state: State = .running,
                 output: String? = nil, details: String? = nil, board: [TodoItem]? = nil, images: [TranscriptImage] = []) {
         self.id = id; self.name = name; self.summary = summary; self.arguments = arguments
@@ -473,6 +484,13 @@ public struct ToolActivity: Sendable, Equatable {
     }
 }
 public enum NoticeKind: Sendable, Equatable { case other, compaction, error }
+extension ConversationItem {
+    /// Ids of messages the person typed while the agent worked (Claude's queued prompts): shown
+    /// where they landed, but no new turn; what was running keeps running.
+    public static let queuedPrefix = "queued:"
+    public static func isQueued(_ id: String) -> Bool { id.hasPrefix(queuedPrefix) }
+}
+
 public enum ConversationItem: Identifiable, Sendable, Equatable {
     case user(id: String, text: String, images: [TranscriptImage])
     case assistant(id: String, text: String)
@@ -522,6 +540,8 @@ public struct Conversation: Sendable {
     private var shownJobs: Set<String> = []
     /// Commands the agent sent to the background whose output hasn't come back, oldest first.
     private var backgroundJobs: [(id: String, command: String)] = []
+    /// Claude task id → the words its launch was shown with, for the row its end adds.
+    private var jobLabels: [String: String] = [:]
     /// Those commands, for what's running now.
     public var backgroundCommands: [String] { backgroundJobs.map(\.command) }
     /// What a `wait` is for: subagents still working, then background commands, oldest first.
@@ -625,6 +645,7 @@ public struct Conversation: Sendable {
         usageByID.removeAll(keepingCapacity: true)
         shownJobs.removeAll(keepingCapacity: true)
         backgroundJobs.removeAll(keepingCapacity: true)
+        jobLabels.removeAll(keepingCapacity: true)
         imageCount = 0; editCount = 0
         serial = 0; modelID = nil; thinkingLevel = nil; usage = nil
         proposal = nil; pendingPlanReview = nil; pendingTerminalInputValue = nil
@@ -733,7 +754,7 @@ public struct Conversation: Sendable {
         case .peerMessage(let id, let peer, let text, let outbound):
             append(.peerMessage(id: id.isEmpty ? nextID("peer") : id, peer: peer, text: text, outbound: outbound))
         case .jobsFinished(let jobs):
-            for job in jobs { showJob(id: job.id, label: job.label, output: job.output) }
+            for job in jobs { showJob(job) }
         case .subagentEvent(let activity):
             guard !activity.id.isEmpty else { break }
             if let i = subagentActivities.firstIndex(where: { $0.id == activity.id }) {
@@ -755,7 +776,7 @@ public struct Conversation: Sendable {
     public var runningTools: [ToolActivity] {
         var running: [ToolActivity] = []
         for item in items.reversed() {
-            if case .user = item { break }
+            if case .user(let id, _, _) = item, !ConversationItem.isQueued(id) { break }
             if case .tool(let tool) = item, tool.state == .running { running.append(tool) }
         }
         return running.reversed()
@@ -764,7 +785,7 @@ public struct Conversation: Sendable {
     /// errors, what's running, command output that came back and images, plus this turn's failures.
     public func items(at level: DetailLevel) -> [ConversationItem] {
         guard level == .digest else { return items }
-        let turnStart = items.lastIndex { if case .user = $0 { true } else { false } } ?? 0
+        let turnStart = items.lastIndex { if case .user(let id, _, _) = $0, !ConversationItem.isQueued(id) { true } else { false } } ?? 0
         var keep = Set<Int>()
         for (index, item) in items.enumerated() {
             switch item {
@@ -788,6 +809,7 @@ public struct Conversation: Sendable {
         var nextAssistant: Int?
         for index in items.indices.reversed() {
             switch items[index] {
+            case .user(let id, _, _) where ConversationItem.isQueued(id): break
             case .user, .ask, .peerMessage: nextTurn = index
             default: break
             }
@@ -814,7 +836,8 @@ public struct Conversation: Sendable {
         let id = message.id.isEmpty ? nextID("message") : message.id
         switch message.role {
         case .user:
-            turnStarted = message.timestamp
+            // A message typed mid-turn is no new turn: the turn still started where it did.
+            if !ConversationItem.isQueued(message.id) { turnStarted = message.timestamp }
             append(.user(id: id, text: message.text, images: message.images))
         case .assistant:
             if !message.thinking.isEmpty { append(.thinking(id: id + "-thinking", text: message.thinking)) }
@@ -844,7 +867,17 @@ public struct Conversation: Sendable {
                 }
             }
         case .toolResult:
-            guard let callID = message.toolCallId, let index = toolIndex[callID] else { return }
+            guard let callID = message.toolCallId else { return }
+            guard let index = toolIndex[callID] else {
+                // Its call is in history not loaded yet: the result still opens, as an earlier step.
+                // Loading earlier messages rebuilds the conversation, call and result together.
+                let output = Self.capped(message.text)
+                imageCount += message.images.count
+                place(.tool(ToolActivity(id: callID, name: "earlier", summary: "Result of an earlier step",
+                                         state: message.isError ? .failed : .succeeded, output: output.isEmpty ? nil : output,
+                                         details: message.details, images: message.images)), tool: callID)
+                return
+            }
             switch items[index] {
             case .tool(var tool):
                 if !message.isError, tool.state != .succeeded, tool.kind == .edit { editCount += 1 }
@@ -857,6 +890,13 @@ public struct Conversation: Sendable {
                 // Only bash jobs: their completions are the ones read back (a `task` job is a
                 // subagent, already counted as one, and would never leave the list).
                 if tool.name == "bash", let job = Self.backgroundJob(message.details) { backgroundJobs.append((job, tool.summary)) }
+                // Claude's `run_in_background`: done when its task notification arrives.
+                if tool.name == "Bash", let job = Self.object(message.details)["backgroundTaskId"] as? String, !job.isEmpty,
+                   !shownJobs.contains(job) {
+                    backgroundJobs.append((job, Self.backgroundLabel(tool)))
+                    jobLabels[job] = Self.backgroundLabel(tool)
+                    tool.background = .running(job)
+                }
                 if ["Agent", "Task"].contains(tool.name) { applyClaudeResult(tool, message) }
                 if tool.name == "spawn_agent", let childID = Self.object(message.text)["agent_id"] as? String,
                    let i = subagentActivities.firstIndex(where: { $0.spawnCallId == tool.id }) {
@@ -928,11 +968,54 @@ public struct Conversation: Sendable {
 
     /// A row where a background command's output arrived, labelled with the command, once per job.
     private mutating func showJob(id: String, label: String, output: String) {
-        backgroundJobs.removeAll { $0.id == id }
-        guard shownJobs.insert(id).inserted else { return }
+        showJob(FinishedJob(id: id, label: label, output: output))
+    }
+
+    /// A background command in a person's words: a recognizable `agent-run` worker as its
+    /// model and run name ("sol · 2026-11-20-app-sol-r1"), else the description the agent gave
+    /// it, else the command.
+    static func backgroundLabel(_ tool: ToolActivity) -> String {
+        let args = object(tool.arguments)
+        let command = args["command"] as? String ?? tool.summary
+        if let match = command.firstMatch(of: /agent-run\s+(?:ask|sol|audit|local)\b[^\n;|&]*/) {
+            let words = match.0.split(whereSeparator: \.isWhitespace).map(String.init)
+            func value(_ flag: String) -> String? { words.firstIndex(of: flag).flatMap { words.indices.contains($0 + 1) ? words[$0 + 1] : nil } }
+            let kind = String(words[1])
+            let model = value("--model") ?? (kind == "sol" || kind == "audit" ? "sol" : kind == "local" ? "local" : nil)
+            let parts = [model, value("--name")].compactMap { $0 }
+            if !parts.isEmpty { return parts.joined(separator: " · ") }
+        }
+        if let description = args["description"] as? String, !description.isEmpty { return description }
+        return tool.summary
+    }
+
+    private mutating func showJob(_ job: FinishedJob) {
+        backgroundJobs.removeAll { $0.id == job.id }
+        var job = job
+        if let label = jobLabels[job.id] { job.label = label }
+        // An async subagent's end arrives the same way: the roster settles, and the row below,
+        // with Show Output, is its one completion.
+        if let i = subagentActivities.firstIndex(where: { $0.id == job.id }), case .working = subagentActivities[i].state {
+            subagentActivities[i].state = job.failed ? .failed(nil) : .completed
+            if !job.output.isEmpty { subagentActivities[i].summary = job.output }
+        }
+        // The step that started it settles too: it read "running in background" until now. A
+        // delivery without the call's id finds it by the task's.
+        let launch = job.callID.flatMap { toolIndex[$0] } ?? items.lastIndex {
+            if case .tool(let tool) = $0, tool.background == .running(job.id) { true } else { false }
+        }
+        if let index = launch, case .tool(var tool) = items[index], tool.background != nil {
+            tool.background = job.failed ? .failed : .finished
+            items[index] = .tool(tool)
+        }
+        guard shownJobs.insert(job.id).inserted else { return }
         let row = nextID("job")
-        append(.tool(ToolActivity(id: row, name: "job", summary: "Finished \(label)", state: .succeeded,
-                                  output: Self.capped(output.trimmingCharacters(in: .whitespacesAndNewlines)))), tool: row)
+        var details: [String: Any] = ["taskId": job.id]
+        if let file = job.outputFile { details["outputFile"] = file }
+        append(.tool(ToolActivity(id: row, name: "job", summary: (job.failed ? "Failed " : "Finished ") + job.label,
+                                  state: job.failed ? .failed : .succeeded,
+                                  output: job.output.isEmpty ? nil : Self.capped(job.output.trimmingCharacters(in: .whitespacesAndNewlines)),
+                                  details: TranscriptReader.json(details))), tool: row)
     }
 
     /// omp's `{"async": {"state": "running", "jobId": …}}` on a command it moved to the background.

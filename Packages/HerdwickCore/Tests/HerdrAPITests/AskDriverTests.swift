@@ -177,6 +177,39 @@ private func screen(_ name: String) throws -> String {
         #expect(edit.options.count == 3)
     }
 
+    @Test func claudeTrustFolder() throws {
+        let trust = try #require(ScreenPrompt.parse(try screen("claude-trust-folder")))
+        #expect(trust.style == .choice)
+        #expect(trust.title == "Trust this folder?")
+        #expect(trust.subject == "/home/alex/src/new-app")
+        #expect(trust.options.map(\.label) == ["No, exit", "Yes, I trust this folder"])
+        #expect(trust.cursor == 0)
+        // A path too long for the pane wraps; the grant is for all of it. No path, no prompt.
+        let wrapped = try screen("claude-trust-folder").replacingOccurrences(of: " /home/alex/src/new-app\n", with: " /home/alex/src/clients/acme/servi\n ces/new-app\n")
+        #expect(ScreenPrompt.parse(wrapped)?.subject == "/home/alex/src/clients/acme/services/new-app")
+        // Wrapped at a space, the screen reads "MyApp"; the pane's folder says what it is.
+        let spaced = try screen("claude-trust-folder").replacingOccurrences(of: " /home/alex/src/new-app\n", with: " /home/alex/src/My\n App\n")
+        let parsed = try #require(ScreenPrompt.parse(spaced))
+        let resolved = try #require(parsed.trustResolved(cwd: "/home/alex/src/My App"))
+        #expect(resolved.folder == "/home/alex/src/My App")
+        // Still the screen's own prompt, so the driver recognizes it when answering.
+        #expect(resolved.representsSameWait(as: parsed))
+        let home = try screen("claude-trust-folder").replacingOccurrences(of: " /home/alex/src/new-app\n", with: " ~/src/new-app\n")
+        #expect(ScreenPrompt.parse(home)?.trustResolved(cwd: "/home/alex/src/new-app")?.folder == "/home/alex/src/new-app")
+        #expect(ScreenPrompt.parse(home)?.trustResolved(cwd: "/srv/other/src/new-app") == nil)
+        #expect(parsed.trustResolved(cwd: "/home/alex/src/Other") == nil)
+        // Unwrapped, the screen's spacing is the folder's: "Team A" isn't "TeamA".
+        let single = try screen("claude-trust-folder").replacingOccurrences(of: " /home/alex/src/new-app\n", with: " /home/alex/TeamA\n")
+        #expect(ScreenPrompt.parse(single)?.trustResolved(cwd: "/home/alex/Team A") == nil)
+        #expect(ScreenPrompt.parse(single)?.trustResolved(cwd: "/home/alex/TeamA")?.folder == "/home/alex/TeamA")
+        #expect(parsed.trustResolved(cwd: nil) == nil)
+        // An old check scrolled above a newer prompt is not the live question.
+        let stale = try screen("claude-trust-folder") + "\nalex@studio:~/src/new-app$ make\n Continue?\n ❯ 1. Yes\n   2. No\n"
+        #expect(ScreenPrompt.parse(stale)?.title != "Trust this folder?")
+        let unnamed = try screen("claude-trust-folder").replacingOccurrences(of: " /home/alex/src/new-app\n", with: "")
+        #expect(ScreenPrompt.parse(unnamed)?.title != "Trust this folder?")
+    }
+
     @Test func codexApproval() throws {
         let prompt = try #require(ScreenPrompt.parse(try screen("codex-approval-exec")))
         #expect(prompt.style == .choice)

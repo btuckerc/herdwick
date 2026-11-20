@@ -75,7 +75,8 @@ final class WatchedRun {
         switch presented {
         case .working: status = "working"
         case .blocked: status = "blocked"
-        case .done, .idle: status = "done"
+        // A Claude wake turn with background tasks still out isn't the run's end (`TurnSettle`).
+        case .done, .idle: status = agent.map { link.finishGate($0) == .open } ?? true ? "done" : "working"
         // Gone from herdr (closed, or another agent in its pane) is not a finished run: no green
         // Done, no result from an earlier turn (round 49: sb#2).
         case nil: status = "closed"

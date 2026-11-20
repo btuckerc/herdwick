@@ -14,6 +14,15 @@ import Darwin
 public struct LocalProcessRunner: CommandRunner {
     public init() {}
 
+    /// Runs `body` while no child is being spawned. Writing an executable (a test's stub) opens
+    /// it without close-on-exec; a child spawned meanwhile would inherit that handle, and every
+    /// later exec of the file would fail with "text file busy" for as long as the child lives.
+    public static func exclusive<T>(_ body: () throws -> T) rethrows -> T {
+        LocalProcessChannel.spawnLock.lock()
+        defer { LocalProcessChannel.spawnLock.unlock() }
+        return try body()
+    }
+
     public func exec(_ command: String) async throws -> any ExecChannel {
         try LocalProcessChannel(command: command)
     }
@@ -26,13 +35,21 @@ final class LocalProcessChannel: ExecChannel, @unchecked Sendable {
     private var stdinFD: Int32
     private let exited = Flag()
 
+    /// Pipes are made and children spawned one at a time, every end close-on-exec: a child
+    /// spawned on another thread between `pipe` and `fcntl` would otherwise inherit this
+    /// channel's ends, and a long-lived one (a watcher under `nohup`) would hold them open, so
+    /// this channel never saw end of file.
+    static let spawnLock = NSLock()
+
     init(command: String) throws {
+        Self.spawnLock.lock()
+        defer { Self.spawnLock.unlock() }
         var stdinPipe: [Int32] = [0, 0], stdoutPipe: [Int32] = [0, 0], stderrPipe: [Int32] = [0, 0]
         guard pipe(&stdinPipe) == 0, pipe(&stdoutPipe) == 0, pipe(&stderrPipe) == 0 else {
             throw CommandError.channelClosed
         }
-        // Parent ends must not leak into this or any other child.
-        for fd in [stdinPipe[1], stdoutPipe[0], stderrPipe[0]] { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+        // No end may leak into another child; dup2 onto 0, 1 and 2 clears the flag for this one.
+        for fd in stdinPipe + stdoutPipe + stderrPipe { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
 
         #if canImport(Darwin)
         var actions: posix_spawn_file_actions_t? = nil

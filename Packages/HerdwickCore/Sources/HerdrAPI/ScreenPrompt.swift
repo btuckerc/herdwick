@@ -46,6 +46,13 @@ public struct ScreenPrompt: Sendable, Equatable {
     public var contextMayBeTruncated: Bool
     public var options: [Option]
     public var cursor: Int?
+    /// A trust prompt's folder as verified against the agent's (`trustResolved`); the screen's
+    /// own words stay in `context`, which is what the prompt is matched by when answered.
+    public var folder: String?
+    /// The trust prompt's path ran over more than one row (a space at a wrap is lost on screen).
+    public var folderWrapped = false
+    /// What the prompt is about as shown to the person: the verified folder, else `subject`.
+    public var shownSubject: String? { folder ?? subject }
     /// Question tabs (omp ids or headers; Claude headers) when the prompt pages through several.
     public var tabs: [String]
 
@@ -54,11 +61,78 @@ public struct ScreenPrompt: Sendable, Equatable {
         self.style = style; self.phase = phase; self.title = title; self.context = context
         self.options = options; self.cursor = cursor; self.tabs = tabs
         self.contextMayBeTruncated = contextMayBeTruncated
+        self.folder = nil
     }
 
     public static func parse(_ visibleText: String) -> ScreenPrompt? {
         let lines = visibleText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        return ompChoice(lines) ?? omp(lines) ?? claudeAsk(lines) ?? choice(lines)
+        return ompChoice(lines) ?? omp(lines) ?? claudeAsk(lines) ?? claudeTrust(lines) ?? choice(lines)
+    }
+
+    /// A trust prompt checked against the folder the agent runs in: the screen can't be taken at
+    /// its word, as a path wrapped at a space loses that space. The same folder (but for
+    /// whitespace, or written from `~`) is shown and granted as `cwd`; a different or unknown one
+    /// is nil, to be answered in the terminal. Any other prompt is returned as it is.
+    public func trustResolved(cwd: String?) -> ScreenPrompt? {
+        guard title == "Trust this folder?" else { return self }
+        guard let cwd, !cwd.isEmpty, let shown = subject else { return nil }
+        // macOS shows /tmp, /var and /etc through their /private real paths.
+        func unaliased(_ s: String) -> String {
+            for alias in ["/private/tmp/", "/private/var/", "/private/etc/"] where s.hasPrefix(alias) { return String(s.dropFirst("/private".count)) }
+            return s
+        }
+        // Whitespace may differ only where the screen wrapped the path.
+        func squeezed(_ s: String) -> String { folderWrapped ? unaliased(s).filter { !$0.isWhitespace } : unaliased(s) }
+        // `~/…` only as a home folder's own: /home/<user>/… or /Users/<user>/….
+        var home: String?
+        if shown.hasPrefix("~/"), let match = cwd.firstMatch(of: #/^/(?:home|Users)/[^/]+/#) { home = String(match.0) }
+        let same = squeezed(shown) == squeezed(cwd)
+            || (home.map { squeezed($0 + shown.dropFirst(1)) == squeezed(cwd) } ?? false)
+        guard same else { return nil }
+        var resolved = self
+        resolved.folder = cwd
+        return resolved
+    }
+
+    /// Claude Code's first-run check in a folder it hasn't opened before: "Accessing workspace:",
+    /// the folder, a warning, then unnumbered rows with `❯` on the cursor, "No, exit" first.
+    /// Read as a choice titled "Trust this folder?" with the folder as its subject, so it is
+    /// answered like any approval: by the person, never on its own.
+    static func claudeTrust(_ lines: [String]) -> ScreenPrompt? {
+        guard let head = lines.lastIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "Accessing workspace:" }) else { return nil }
+        var options: [Option] = [], cursor: Int?, folder: String?, notes: [String] = []
+        var inFolder = false, footer: Int?, wrapped = false
+        for (index, line) in lines.enumerated().dropFirst(head + 1) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // A long path wraps onto the rows under it, up to the blank row that ends it.
+            if inFolder, !trimmed.isEmpty, !trimmed.hasPrefix("Quick safety check"), !trimmed.hasPrefix("Claude Code") {
+                folder! += trimmed; wrapped = true; continue
+            }
+            inFolder = false
+            if trimmed.isEmpty { continue }
+            if trimmed.hasPrefix("Enter to confirm") { footer = index; break }
+            var row = trimmed
+            let marked = row.hasPrefix("❯")
+            if marked { row = String(row.dropFirst()).trimmingCharacters(in: .whitespaces) }
+            if marked || row == "No, exit" || row.hasPrefix("Yes, I trust") {
+                if marked { cursor = options.count }
+                options.append(Option(label: row))
+            } else if folder == nil, trimmed.hasPrefix("/") || trimmed.hasPrefix("~") {
+                folder = trimmed
+                inFolder = true
+            } else if trimmed.hasPrefix("Claude Code") {
+                notes.append(trimmed)
+            }
+        }
+        // The live question only: its footer is the last thing on screen (an old one scrolled
+        // above a newer prompt is history). Never a grant without knowing which folder.
+        guard let footer, lines[(footer + 1)...].allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }),
+              let folder, options.count == 2, cursor != nil, options.contains(where: { $0.label == "No, exit" }),
+              options.contains(where: { $0.label.hasPrefix("Yes, I trust") }) else { return nil }
+        var prompt = ScreenPrompt(style: .choice, title: "Trust this folder?", context: [folder] + notes,
+                                  options: options, cursor: cursor)
+        prompt.folderWrapped = wrapped
+        return prompt
     }
 }
 

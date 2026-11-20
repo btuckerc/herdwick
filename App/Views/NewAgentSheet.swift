@@ -184,6 +184,8 @@ struct NewAgentSheet: View {
                 Section { Text(error).foregroundStyle(.red) }
             }
         }
+        // A drag down the form puts the keyboard away, so every row stays reachable.
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle(resume == nil ? "New Agent" : "Resume Agent")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
@@ -375,7 +377,7 @@ struct NewAgentSheet: View {
             if let draftID = DraftStore.id(host: SessionAddress(hostID: address.hostID, session: address.session), agent: agent) {
                 DraftStore.save(firstMessage, for: draftID)
             }
-            scene.firstMessage = .init(address: address, text: firstMessage, send: sendsFirstMessage && agent.hasTranscript)
+            scene.firstMessage = .init(address: address, text: firstMessage, send: sendsFirstMessage && agent.hasTranscript, agentName: agent.name)
         }
         onOpen(agent.hasTranscript ? .conversation(address) : .terminal(address))
         opened = true
