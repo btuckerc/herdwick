@@ -1794,7 +1794,7 @@ struct SessionView: View {
             preview: thread.connection.rowLine(thread.agent, status: status, previews: settings.inboxPreviews),
             caution: thread.connection.caution(thread.agent, status: status, previews: settings.inboxPreviews),
             pendingQuestion: screen?.title ?? wait?.summary,
-            pendingCommand: screen?.subject?.split(whereSeparator: \.isNewline).joined(separator: " "),
+            pendingCommand: screen?.shownSubject?.split(whereSeparator: \.isNewline).joined(separator: " "),
             commandMayBeCut: screen?.contextMayBeTruncated == true,
             lastTurnAt: thread.connection.ageDate(thread.agent, status: status),
             // Not while its answer's receipt shows: it was answered just now.

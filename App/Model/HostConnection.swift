@@ -379,7 +379,7 @@ final class HostConnection {
         var summary: String? {
             if let prompt = console?.prompt { return prompt }
             guard let prompt else { return nil }
-            return ([prompt.title] + (prompt.subject.map { [$0] } ?? [])).joined(separator: " ")
+            return ([prompt.title] + (prompt.shownSubject.map { [$0] } ?? [])).joined(separator: " ")
                 .split(whereSeparator: \.isNewline).joined(separator: " ")
         }
     }
@@ -602,7 +602,7 @@ final class HostConnection {
             case .open:
                 guard agent.agent == "claude", agent.agentStatus == .idle || agent.agentStatus == .done, alert else { return nil }
                 // Only a recent one: an old unread finish isn't news to deliver now.
-                if let age = turnSettle(agent)?.age(now: now), age > 2 * TurnSettle.backstop { return nil }
+                if let settle = turnSettle(agent), settle.ended, let age = settle.age(now: now), age > 2 * TurnSettle.backstop { return nil }
                 return .init(pane: agent.paneID, seq: seq, deadline: nil, reference: reference, alert: true)
             // Still being checked: the watcher checks it as it starts.
             case .checking: return .init(pane: agent.paneID, seq: seq, deadline: nil, reference: reference, alert: alert)

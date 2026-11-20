@@ -545,11 +545,15 @@ public enum PushWatch {
                 # Mutes match by conversation: the one handed over when herdr didn't say.
                 [ -n "$v" ] || [ -z "$reference" ] || now="{\"agent_session\":{\"value\":\"$reference\"}}"
                 held=$(settle "$pane" "$now")
-                # The scan takes time: if the pane has moved on meanwhile, its follower has it.
-                again=$("$herdr" --session "$session" agent get "$pane" 2>/dev/null) && {
+                # The scan takes time: if the pane has moved on (or gone) meanwhile, its follower
+                # has it.
+                if again=$("$herdr" --session "$session" agent get "$pane" 2>/dev/null); then
                     s=$(field "$again" state_change_seq); case $s in ''|*[!0-9]*) ;; *) [ "$s" = "$seq" ] || continue ;; esac
+                    v=$(field "$again" value); [ -z "$reference" ] || [ -z "$v" ] || [ "$v" = "$reference" ] || continue
                     case $(field "$again" agent_status) in ''|idle|done) ;; *) continue ;; esac
-                }
+                else
+                    case $again in *agent_not_found*|*pane_not_found*) continue ;; esac
+                fi
                 if [ -n "$held" ]; then
                     backstop "$pane" "$seq" "${held#hold }" "$(field "$now" value)" "$alert"
                 else

@@ -1378,6 +1378,11 @@ struct ConversationView: View {
                ![.working, .blocked].contains(connection.presentedStatus(agent)) {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled, firstSend == .waiting else { return }
+                // Still the agent it was written for; another in the pane keeps it as a draft.
+                guard message.agentName == nil || self.agent?.name == message.agentName else {
+                    withAnimation { firstSend = nil }
+                    return
+                }
                 withAnimation { firstSend = nil }
                 await sendDraft()
                 return

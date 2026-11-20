@@ -199,7 +199,7 @@ struct OverviewView: View {
         let wait = thread.connection.wait(thread.agent)
         let screen = wait?.console == nil ? wait?.prompt : nil
         let question = screen?.title ?? wait?.summary
-        let command = screen?.subject?.split(whereSeparator: \.isNewline).joined(separator: " ")
+        let command = screen?.shownSubject?.split(whereSeparator: \.isNewline).joined(separator: " ")
         let inline = scene.inlineAnswers.choices(for: thread)
         let route: Route = thread.agent.hasTranscript ? .conversation(thread.address) : .terminal(thread.address)
         return VStack(alignment: .leading, spacing: Tokens.Space.s) {

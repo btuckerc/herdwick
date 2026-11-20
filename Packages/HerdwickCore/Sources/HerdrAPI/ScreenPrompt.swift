@@ -49,8 +49,8 @@ public struct ScreenPrompt: Sendable, Equatable {
     /// A trust prompt's folder as verified against the agent's (`trustResolved`); the screen's
     /// own words stay in `context`, which is what the prompt is matched by when answered.
     public var folder: String?
-    /// The trust prompt's path ran over more than one row (a space at a wrap is lost on screen).
-    public var folderWrapped = false
+    /// The trust prompt's path as the screen's rows showed it (a space at a wrap is lost there).
+    public var folderRows: [String] = []
     /// What the prompt is about as shown to the person: the verified folder, else `subject`.
     public var shownSubject: String? { folder ?? subject }
     /// Question tabs (omp ids or headers; Claude headers) when the prompt pages through several.
@@ -81,13 +81,20 @@ public struct ScreenPrompt: Sendable, Equatable {
             for alias in ["/private/tmp/", "/private/var/", "/private/etc/"] where s.hasPrefix(alias) { return String(s.dropFirst("/private".count)) }
             return s
         }
-        // Whitespace may differ only where the screen wrapped the path.
-        func squeezed(_ s: String) -> String { folderWrapped ? unaliased(s).filter { !$0.isWhitespace } : unaliased(s) }
+        // The screen's rows exactly, a space allowed only where one row ended and the next began.
+        func readings(_ rows: [String]) -> [String] {
+            guard let first = rows.first else { return [] }
+            return rows.dropFirst().reduce([first]) { all, row in all.flatMap { [$0 + row, $0 + " " + row] } }
+        }
+        let rows = folderRows.isEmpty ? [shown] : folderRows
+        let candidates = rows.count <= 6 ? readings(rows) : [rows.joined()]
         // `~/…` only as a home folder's own: /home/<user>/… or /Users/<user>/….
         var home: String?
         if shown.hasPrefix("~/"), let match = cwd.firstMatch(of: #/^/(?:home|Users)/[^/]+/#) { home = String(match.0) }
-        let same = squeezed(shown) == squeezed(cwd)
-            || (home.map { squeezed($0 + shown.dropFirst(1)) == squeezed(cwd) } ?? false)
+        let target = unaliased(cwd)
+        let same = candidates.contains { reading in
+            unaliased(reading) == target || (home.map { unaliased($0 + reading.dropFirst(1)) == target } ?? false)
+        }
         guard same else { return nil }
         var resolved = self
         resolved.folder = cwd
@@ -101,12 +108,12 @@ public struct ScreenPrompt: Sendable, Equatable {
     static func claudeTrust(_ lines: [String]) -> ScreenPrompt? {
         guard let head = lines.lastIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "Accessing workspace:" }) else { return nil }
         var options: [Option] = [], cursor: Int?, folder: String?, notes: [String] = []
-        var inFolder = false, footer: Int?, wrapped = false
+        var inFolder = false, footer: Int?, rows: [String] = []
         for (index, line) in lines.enumerated().dropFirst(head + 1) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             // A long path wraps onto the rows under it, up to the blank row that ends it.
             if inFolder, !trimmed.isEmpty, !trimmed.hasPrefix("Quick safety check"), !trimmed.hasPrefix("Claude Code") {
-                folder! += trimmed; wrapped = true; continue
+                folder! += trimmed; rows.append(trimmed); continue
             }
             inFolder = false
             if trimmed.isEmpty { continue }
@@ -119,6 +126,7 @@ public struct ScreenPrompt: Sendable, Equatable {
                 options.append(Option(label: row))
             } else if folder == nil, trimmed.hasPrefix("/") || trimmed.hasPrefix("~") {
                 folder = trimmed
+                rows = [trimmed]
                 inFolder = true
             } else if trimmed.hasPrefix("Claude Code") {
                 notes.append(trimmed)
@@ -131,7 +139,7 @@ public struct ScreenPrompt: Sendable, Equatable {
               options.contains(where: { $0.label.hasPrefix("Yes, I trust") }) else { return nil }
         var prompt = ScreenPrompt(style: .choice, title: "Trust this folder?", context: [folder] + notes,
                                   options: options, cursor: cursor)
-        prompt.folderWrapped = wrapped
+        prompt.folderRows = rows
         return prompt
     }
 }

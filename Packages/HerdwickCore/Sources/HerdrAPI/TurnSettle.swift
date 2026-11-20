@@ -120,14 +120,14 @@ public struct TurnSettle: Sendable, Equatable {
         # A prompt with no origin at all (an interrupt; not a tool result, a reminder or a
         # compaction's summary): not a turn this scan understands, so it alerts as before.
         /"type":"user"/ {
-            ended = 0
+            ended = 0; endat = ""
             if ($0 !~ /"tool_result"/ && $0 !~ /"isMeta":true/ && $0 !~ /"isCompactSummary":true/ && $0 !~ /"turnOrigin":"/) origin = "none"
         }
         END {
             # Running when the turn ended, and launched within the three hours before: a task
             # that never reported (a restart, a kill) stops counting rather than hold forever.
             n = 0
-            for (id in pend) { at = substr(pend[id], 2); if (at == "" || endat == "" || endat - at < 10800) n++ }
+            for (id in pend) { at = substr(pend[id], 2); if (at != "" && endat != "" && endat - at < 10800) n++ }
             print (origin == "" ? "none" : origin), ended + 0, n, (endat == "" ? "-" : endat)
         }
         """#

@@ -133,14 +133,16 @@ struct ToolStepView: View {
             }
             if let outputFile { BackgroundOutput(path: outputFile) }
         case .todo(let items):
+            if tool.state == .failed, let output = tool.output, !output.isEmpty { OutputBlock(text: output) }
             if items.isEmpty {
-                Text(tool.output.flatMap { $0.isEmpty ? nil : $0 } ?? "No tasks left").font(.caption).foregroundStyle(.secondary)
+                if tool.state != .failed { Text(tool.output.flatMap { $0.isEmpty ? nil : $0 } ?? "No tasks left").font(.caption).foregroundStyle(.secondary) }
             } else {
                 TodoList(items: items)
             }
         case .plan(let text):
+            if tool.state == .failed, let output = tool.output, !output.isEmpty { OutputBlock(text: output) }
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(tool.output.flatMap { $0.isEmpty ? nil : $0 } ?? "No plan text").font(.caption).foregroundStyle(.secondary)
+                if tool.state != .failed { Text(tool.output.flatMap { $0.isEmpty ? nil : $0 } ?? "No plan text").font(.caption).foregroundStyle(.secondary) }
             } else {
                 MarkdownText(text: text)
             }

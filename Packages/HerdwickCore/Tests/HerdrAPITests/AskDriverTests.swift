@@ -202,6 +202,10 @@ private func screen(_ name: String) throws -> String {
         let single = try screen("claude-trust-folder").replacingOccurrences(of: " /home/alex/src/new-app\n", with: " /home/alex/TeamA\n")
         #expect(ScreenPrompt.parse(single)?.trustResolved(cwd: "/home/alex/Team A") == nil)
         #expect(ScreenPrompt.parse(single)?.trustResolved(cwd: "/home/alex/TeamA")?.folder == "/home/alex/TeamA")
+        // Wrapped elsewhere, a row's own spacing still counts.
+        let mixed = try screen("claude-trust-folder").replacingOccurrences(of: " /home/alex/src/new-app\n", with: " /home/alex/Team A/My\n App\n")
+        #expect(ScreenPrompt.parse(mixed)?.trustResolved(cwd: "/home/alex/Team A/My App")?.folder == "/home/alex/Team A/My App")
+        #expect(ScreenPrompt.parse(mixed)?.trustResolved(cwd: "/home/alex/TeamA/My App") == nil)
         #expect(parsed.trustResolved(cwd: nil) == nil)
         // An old check scrolled above a newer prompt is not the live question.
         let stale = try screen("claude-trust-folder") + "\nalex@studio:~/src/new-app$ make\n Continue?\n ❯ 1. Yes\n   2. No\n"
