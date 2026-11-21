@@ -62,6 +62,19 @@ import HerdrAPI
         #expect(String(decoding: transcript.bytes, as: UTF8.self).contains(#""role":"assistant""#))
     }
 
+    /// A Neon (agy) reports its conversation with its first prompt, as herdr's hook does.
+    @Test(.timeLimit(.minutes(1))) func neonReportsItsConversationWithTheFirstPrompt() async throws {
+        let client = HerdrClient(runner: DemoHost(scenario: try DemoScenario.bundled("studio"), scriptedReplyDelay: .milliseconds(40)))
+        let tab = try await client.createTab(workspaceID: "w1", label: nil, cwd: "/workspace", session: "main")
+        let started = try await client.startAgent(name: "agy-demo", kind: "agy", paneID: tab.rootPane.id, session: "main")
+        #expect(started.agent.agentSession == nil)
+        try await client.sendText("Tidy the docs", pane: tab.rootPane.id, submit: true, session: "main")
+        let ref = try #require(try await client.snapshot(session: "main").agents.first { $0.paneID == tab.rootPane.id }?.agentSession)
+        let location = try #require(try await client.locateTranscript(ref, pane: tab.rootPane.id, session: "main"))
+        let transcript = try await client.readFileTail(path: location.path, from: 0, limit: 10_000)
+        #expect(String(decoding: transcript.bytes, as: UTF8.self).contains("Tidy the docs"))
+    }
+
     @Test func sendingToAPaneRunsItsTriggerAndRepaintsTheTerminal() async throws {
         let scenario = try Fixture.scenario(timeline: #"""
             [{"on": "send_input", "pane": "p1", "then": [{"after": 0.05, "do": "screen", "pane": "p1", "screen": "after.screen"}]}]

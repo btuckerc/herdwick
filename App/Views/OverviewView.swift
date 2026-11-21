@@ -201,7 +201,7 @@ struct OverviewView: View {
         let question = screen?.title ?? wait?.summary
         let command = screen?.shownSubject?.split(whereSeparator: \.isNewline).joined(separator: " ")
         let inline = scene.inlineAnswers.choices(for: thread)
-        let route: Route = thread.agent.hasTranscript ? .conversation(thread.address) : .terminal(thread.address)
+        let route: Route = thread.agent.opensAsConversation ? .conversation(thread.address) : .terminal(thread.address)
         return VStack(alignment: .leading, spacing: Tokens.Space.s) {
             Button { scene.open(route) } label: {
                 HStack(alignment: .firstTextBaseline, spacing: Tokens.Space.m) {
@@ -292,7 +292,7 @@ struct OverviewView: View {
     private func workingTile(_ thread: Thread, now: Date) -> some View {
         let work = work(thread, now: now)
         return Button {
-            scene.open(thread.agent.hasTranscript ? .conversation(thread.address) : .terminal(thread.address))
+            scene.open(thread.agent.opensAsConversation ? .conversation(thread.address) : .terminal(thread.address))
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: Tokens.Space.m) {
                 workGlyph(work)

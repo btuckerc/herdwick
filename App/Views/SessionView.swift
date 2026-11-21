@@ -1529,7 +1529,7 @@ struct SessionView: View {
         let location = hosts.count > 1 ? "\(link.profile.name) · \(place)" : place
         return Button {
             let address = link.address(paneID: agent.paneID)
-            scene.open(agent.hasTranscript ? .conversation(address) : .terminal(address))
+            scene.open(agent.opensAsConversation ? .conversation(address) : .terminal(address))
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: Tokens.Space.s) {
                 Image(systemName: still != nil ? AgentStatus.stillSymbol : AgentStatus.working.symbol)
@@ -1601,7 +1601,7 @@ struct SessionView: View {
     }
 
     private func route(_ thread: Thread) -> Route {
-        thread.agent.hasTranscript ? .conversation(thread.address) : .terminal(thread.address)
+        thread.agent.opensAsConversation ? .conversation(thread.address) : .terminal(thread.address)
     }
 
     private func answer(_ label: String, prompt: ScreenPrompt?, ask: AskActivity?, in thread: Thread) {
@@ -1936,7 +1936,7 @@ struct SessionView: View {
     }
 
     private func didStart(_ agent: Agent, _ address: PaneAddress) {
-        scene.navigationPath.append(agent.hasTranscript ? .conversation(address) : .terminal(address))
+        scene.navigationPath.append(agent.opensAsConversation ? .conversation(address) : .terminal(address))
     }
 
     // MARK: Chrome

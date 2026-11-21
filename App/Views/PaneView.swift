@@ -379,7 +379,7 @@ struct PaneView: View {
     private func didStart(_ agent: Agent, _ address: PaneAddress) {
         let source = Route.terminal(connection.address(paneID: paneID))
         guard scene.navigationPath.last == source else { return }
-        if agent.hasTranscript {
+        if agent.opensAsConversation {
             scene.navigationPath[scene.navigationPath.count - 1] = .conversation(address)
         } else if address.paneID != paneID {
             scene.navigationPath[scene.navigationPath.count - 1] = .terminal(address)

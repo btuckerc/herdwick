@@ -344,6 +344,7 @@ private actor DemoEngine {
             // An agent started from New Agent answers with a canned reply; the scenario's own
             // panes keep their scripted triggers.
             if let pane, pane.hasPrefix("demo-pane-"), method == "pane.send_input", let text = params["text"] as? String {
+                reportSession(pane)
                 scriptReply(to: text, pane: pane)
                 answered(open, on: id)
                 return
@@ -424,10 +425,11 @@ private actor DemoEngine {
             panes[index]["display_agent"] = kind
             snapshot["panes"] = panes
             let pane = panes[index]
-            let agent: [String: Any] = ["pane_id": paneID, "workspace_id": pane["workspace_id"] ?? "", "tab_id": pane["tab_id"] ?? "",
+            var agent: [String: Any] = ["pane_id": paneID, "workspace_id": pane["workspace_id"] ?? "", "tab_id": pane["tab_id"] ?? "",
                                         "agent_status": "idle", "agent": kind, "display_agent": kind, "name": name, "focused": false,
-                                        "state_change_seq": 0, "agent_session": ["source": "herdr:omp", "agent": "omp", "kind": "path",
-                                                                                 "value": DemoScenario.transcriptPath(paneID)]]
+                                        "state_change_seq": 0]
+            // agy's conversation is reported with its first prompt, as herdr's hook does.
+            if kind != "agy" { agent["agent_session"] = Self.session(paneID) }
             snapshot["agents"] = (snapshot["agents"] as? [[String: Any]] ?? []) + [agent]
             transcripts[DemoScenario.transcriptPath(paneID)] = Data()
             reply(["agent": agent, "argv": params["args"] as? [String] ?? []])
@@ -503,6 +505,21 @@ private actor DemoEngine {
             ask = first.lowercased() + ask.dropFirst()
         }
         return ask.isEmpty ? "made the change" : ask
+    }
+
+    private static func session(_ pane: String) -> [String: Any] {
+        ["source": "herdr:omp", "agent": "omp", "kind": "path", "value": DemoScenario.transcriptPath(pane)]
+    }
+
+    /// A Neon reports its conversation once its first prompt arrives.
+    private func reportSession(_ pane: String) {
+        var agents = snapshot["agents"] as? [[String: Any]] ?? []
+        guard let index = agents.firstIndex(where: { $0["pane_id"] as? String == pane }), agents[index]["agent_session"] == nil else { return }
+        agents[index]["agent_session"] = Self.session(pane)
+        snapshot["agents"] = agents
+        if let paneInfo = (snapshot["panes"] as? [[String: Any]])?.first(where: { $0["pane_id"] as? String == pane }) {
+            broadcast("pane_updated", ["pane": paneInfo])
+        }
     }
 
     private func isAgent(_ pane: String) -> Bool {

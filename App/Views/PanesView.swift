@@ -87,7 +87,7 @@ struct PanesView: View {
                     ForEach(snapshot.panes.filter { $0.tabID == tab.id }.sorted { $0.id < $1.id }) { pane in
                         if let agent = snapshot.agents.first(where: { $0.paneID == pane.id }) {
                             let address = connection.address(paneID: pane.id)
-                            NavigationLink(value: agent.hasTranscript ? Route.conversation(address) : Route.terminal(address)) {
+                            NavigationLink(value: agent.opensAsConversation ? Route.conversation(address) : Route.terminal(address)) {
                                 // The workspace heads the group; the row needn't repeat it (round 6).
                                 // Its age as the inbox's row has it (round 18 capture: "waiting 6m"
                                 // here from the turn's start beside the inbox's 4m; working rows' ages).

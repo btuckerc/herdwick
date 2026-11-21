@@ -515,11 +515,19 @@ extension Agent {
     }
 
     /// Whether the agent's own transcript can be shown as a conversation: omp reports a path,
-    /// Claude and Codex an id the host resolves to a file.
+    /// Claude, Codex and agy an id the host resolves to a file.
     var hasTranscript: Bool {
         guard let ref = agentSession, TranscriptFormat(agent: ref.agent) != nil else { return false }
         return ref.transcriptPath?.hasSuffix(".jsonl") == true || (ref.kind == "id" && !ref.value.isEmpty)
     }
+
+    /// agy (Neon) has a conversation only once its first prompt reaches the model: herdr's hook
+    /// reports it then (PreInvocation), not at start. Until that, a Neon is a chat waiting for
+    /// its first message, not a terminal.
+    var awaitsFirstPrompt: Bool { agent == "agy" && agentSession == nil }
+
+    /// Opens as a conversation rather than in the terminal.
+    var opensAsConversation: Bool { hasTranscript || awaitsFirstPrompt }
 }
 
 /// `/Users/alex/src/app` or `/home/alex/src/app` as `~/src/app`: the host's home, not this device's.

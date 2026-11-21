@@ -167,7 +167,7 @@ final class InlineAnswers {
         guard entries[address] == nil else { return }
         entries[address] = answer
         let title = thread.agent.conversationTitle
-        let route: Route = thread.agent.hasTranscript ? .conversation(address) : .terminal(address)
+        let route: Route = thread.agent.opensAsConversation ? .conversation(address) : .terminal(address)
         Task {
             do {
                 try await drive()

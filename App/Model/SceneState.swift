@@ -171,7 +171,7 @@ struct SceneCommands: Commands {
     }
 
     private func open(_ thread: Thread) {
-        scene?.open(thread.agent.hasTranscript ? .conversation(thread.address) : .terminal(thread.address))
+        scene?.open(thread.agent.opensAsConversation ? .conversation(thread.address) : .terminal(thread.address))
     }
 
     /// The agent `offset` rows from the open one in the walk, with the walk as it then stands;

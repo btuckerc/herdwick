@@ -1058,8 +1058,9 @@ final class HostConnection {
         // agent.start answers before the agent runs; its integration reports the transcript a
         // moment later. Wait for that (bounded), so the start opens the conversation rather than
         // the terminal, and the mirror has the agent, so it doesn't open on "Agent exited".
-        // Agents whose integration is known missing never report one: take them as soon as seen.
-        let reportsTranscript = TranscriptFormat(agent: kind) != nil
+        // Agents whose integration is known missing never report one, and agy reports its only
+        // with the first prompt: take them as soon as seen.
+        let reportsTranscript = TranscriptFormat(agent: kind) != nil && kind != "agy"
             && !missingIntegrations.contains { $0.target == kind }
         for _ in 0..<20 {
             if let live = snapshot?.agents.first(where: { $0.paneID == target && $0.name == agent.name }) {

@@ -16,7 +16,13 @@ struct EndedAgent: Codable, Identifiable, Hashable {
     var observedAt: Date
     var ended = false
     var id: String { [hostID.uuidString, session, harness, reference.kind, reference.value].joined(separator: "\u{1f}") }
-    var arguments: [String] { [harness == "codex" ? "resume" : "--resume", reference.value] }
+    var arguments: [String] {
+        switch harness {
+        case "codex": ["resume", reference.value]
+        case "agy": ["--conversation", reference.value]
+        default: ["--resume", reference.value]
+        }
+    }
 }
 
 /// A descriptor shelf, not a transcript archive. Only authoritative snapshots reconcile exits.
@@ -35,7 +41,7 @@ final class EndedAgents {
         var next = entries
         var live = Set<String>()
         for agent in snapshot.agents {
-            guard let ref = agent.agentSession, ["omp", "claude", "codex"].contains(ref.agent),
+            guard let ref = agent.agentSession, ["omp", "claude", "codex", "agy"].contains(ref.agent),
                   !ref.value.isEmpty, ref.agent != "omp" || ref.transcriptPath != nil else { continue }
             let workspace = snapshot.workspaces.first { $0.id == agent.workspaceID }
             var item = EndedAgent(hostID: hostID, session: session, harness: ref.agent, reference: ref,

@@ -997,7 +997,19 @@ struct ConversationView: View {
                 NavigationLink("Open Terminal", value: Route.terminal(connection.address(paneID: paneID)))
                 if let harness = agent?.agent { IntegrationOffer(connection: connection, harness: harness) }
             }
-        } else if feed.state == .loading, !feed.isRenderable, !feed.isOfflineCopy, connection.snapshot != nil, !connection.isConnecting, pending.isEmpty {
+        } else if agent?.awaitsFirstPrompt == true, feed.conversation.items.isEmpty, pending.isEmpty,
+                  connection.missingIntegrations.contains(where: { $0.target == "antigravity-cli" }) {
+            // Without herdr's integration agy never says which conversation is its own.
+            ContentUnavailableView {
+                Label("No conversation", systemImage: "text.bubble")
+            } description: {
+                Text("Neon shows here as chat once herdr's Antigravity integration is installed on \(connection.profile.name).")
+            } actions: {
+                NavigationLink("Open Terminal", value: Route.terminal(connection.address(paneID: paneID)))
+                IntegrationOffer(connection: connection, harness: "agy")
+            }
+        } else if feed.state == .loading, agent?.awaitsFirstPrompt != true, !feed.isRenderable, !feed.isOfflineCopy,
+                  connection.snapshot != nil, !connection.isConnecting, pending.isEmpty {
             ProgressView()
         } else if firstSend == .waiting, feed.conversation.items.isEmpty {
             // Starting, not idle: the message is queued over the field (round 48: opus#1, "Send
@@ -1008,7 +1020,7 @@ struct ConversationView: View {
             }
             .font(.subheadline)
             .foregroundStyle(.secondary)
-        } else if feed.state == .live, feed.conversation.items.isEmpty, pending.isEmpty, !sending, sentCount == 0 {
+        } else if feed.state == .live || agent?.awaitsFirstPrompt == true, feed.conversation.items.isEmpty, pending.isEmpty, !sending, sentCount == 0 {
             // A quiet hint, gone the moment a message is on its way; the transcript file
             // only appears once the agent has the first message.
             Text("Send a message to get started.")
@@ -1354,7 +1366,7 @@ struct ConversationView: View {
 
     /// New Agent's first message: it lands in the composer if that's empty (the demo keeps no
     /// drafts; elsewhere it's the saved draft already). With Start & Send it goes once the agent
-    /// has reported its session (its harness is up) and isn't busy, a second after that so its
+    /// has reported its session (its harness is up; a Neon reports its with this message) and isn't busy, a second after that so its
     /// prompt reads input. Meanwhile a line over the field says it will, with Don't Send (round
     /// 20: the queued message sat in the composer like any draft, and a timeout was silent).
     /// Not up within 30 s, it says it wasn't sent and the text stays in the composer; left
@@ -1373,7 +1385,7 @@ struct ConversationView: View {
                 if firstSend == .waiting { withAnimation { firstSend = nil } }
                 return
             }
-            if let agent, agent.hasTranscript, connection.isLive,
+            if let agent, agent.opensAsConversation, connection.isLive,
                message.agentName == nil || agent.name == message.agentName,
                ![.working, .blocked].contains(connection.presentedStatus(agent)) {
                 try? await Task.sleep(for: .seconds(1))

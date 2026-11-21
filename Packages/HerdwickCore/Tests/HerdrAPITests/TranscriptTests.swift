@@ -109,6 +109,26 @@ struct AgentTranscriptTests {
         #expect(TranscriptFormat(agent: "agy") == .agy)
     }
 
+    /// agy's edit_file (one Target→Replacement) and write_file read as Claude's Edit and Write.
+    @Test func agyEditsAndWritesShowTheirFiles() {
+        let lines = [
+            ##"{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-20T17:45:59Z","tool_calls":[{"name":"edit_file","args":{"Path":"\"/src/a.md\"","Target":"\"old line\"","Replacement":"\"new line\""}},{"name":"write_file","args":{"Path":"\"/src/b.md\"","Content":"\"# B\\n\"","Overwrite":"true"}}]}"##,
+            #"{"step_index":2,"type":"GENERIC","created_at":"2026-11-20T17:46:00Z","content":"Created At: 2026-11-20T17:46:00Z\nMade 1 replacement in /src/a.md starting at line 3 (+1/-1 lines)."}"#,
+            #"{"step_index":3,"type":"GENERIC","created_at":"2026-11-20T17:46:00Z","content":"Created At: 2026-11-20T17:46:00Z\nCreated file /src/b.md"}"#,
+        ].joined(separator: "\n") + "\n"
+        var reader = TranscriptReader(format: .agy)
+        var conversation = Conversation()
+        conversation.apply(reader.append(Array(lines.utf8)))
+        let tools = conversation.tools
+        #expect(tools.map(\.summary) == ["/src/a.md", "/src/b.md"])
+        guard case .edit(let diffs) = tools.first?.detail else { Issue.record("not an edit"); return }
+        #expect(diffs.first?.path == "/src/a.md")
+        #expect(diffs.first?.lines.contains { $0.kind == .added && $0.text == "new line" } == true)
+        guard case .write(let path, let content) = tools.last?.detail else { Issue.record("not a write"); return }
+        #expect(path == "/src/b.md" && content == "# B\n")
+        #expect(tools.allSatisfy { $0.state == .succeeded })
+    }
+
     /// Claude Code replaced TodoWrite with TaskCreate/TaskUpdate: ids come back in results.
     @Test func claudeTaskCallsFoldIntoOnePlan() throws {
         let claude = try recorded("claude-tasks", .claude)

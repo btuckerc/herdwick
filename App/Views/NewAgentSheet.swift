@@ -370,16 +370,17 @@ struct NewAgentSheet: View {
             self.error = error.localizedDescription
         }
     }
-    /// Integrations that report a transcript open as a conversation; the rest, or a host
-    /// without herdr's integration for the agent, open in the terminal, the message unsent.
+    /// Integrations that report a transcript open as a conversation, as does a Neon, whose comes
+    /// with its first message; the rest, or a host without herdr's integration for the agent,
+    /// open in the terminal, the message unsent.
     private func finish(_ agent: Agent, _ address: PaneAddress) {
         if hasMessage {
             if let draftID = DraftStore.id(host: SessionAddress(hostID: address.hostID, session: address.session), agent: agent) {
                 DraftStore.save(firstMessage, for: draftID)
             }
-            scene.firstMessage = .init(address: address, text: firstMessage, send: sendsFirstMessage && agent.hasTranscript, agentName: agent.name)
+            scene.firstMessage = .init(address: address, text: firstMessage, send: sendsFirstMessage && agent.opensAsConversation, agentName: agent.name)
         }
-        onOpen(agent.hasTranscript ? .conversation(address) : .terminal(address))
+        onOpen(agent.opensAsConversation ? .conversation(address) : .terminal(address))
         opened = true
         dismiss()
     }

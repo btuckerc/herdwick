@@ -46,17 +46,19 @@ enum AgyTranscript {
         return content[start.upperBound..<end.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// agy's shell and read tools under the names `ToolDetail` already renders.
+    /// agy's shell, read, edit and write tools under the names `ToolDetail` already renders.
     private static func toolName(_ name: String) -> String {
         switch name {
         case "run_command": "shell"
         case "read_file": "read"
+        case "edit_file": "Edit"
+        case "write_file": "Write"
         default: name
         }
     }
 
     /// agy records every argument value as JSON text (`"\"/path\""`); decode them, renaming the
-    /// shell and read arguments to what `ToolDetail` reads.
+    /// arguments to what `ToolDetail` reads (an edit is one replacement, as Claude's Edit).
     private static func arguments(_ name: String, _ args: [String: Any]) -> String? {
         var decoded = args.mapValues { value -> Any in
             guard let text = value as? String, let data = text.data(using: .utf8),
@@ -64,7 +66,10 @@ enum AgyTranscript {
             return object
         }
         switch name {
-        case "run_command": decoded = ["command": decoded["CommandLine"] ?? ""]
+        case "run_command": decoded = ["command": decoded["CommandLine"] ?? "", "description": decoded["toolSummary"] ?? ""]
+        case "edit_file":
+            decoded = ["file_path": decoded["Path"] ?? "", "old_string": decoded["Target"] ?? "", "new_string": decoded["Replacement"] ?? ""]
+        case "write_file": decoded = ["file_path": decoded["Path"] ?? "", "content": decoded["Content"] ?? ""]
         case "read_file":
             var path = decoded["Path"] as? String ?? ""
             if let start = decoded["StartLine"] as? Int, let end = decoded["EndLine"] as? Int { path += ":\(start)-\(end)" }

@@ -576,7 +576,7 @@ struct AgentDock: View {
     static func open(_ thread: Thread, current: PaneAddress, busy: Bool,
                      width: UserInterfaceSizeClass?, scene: SceneState) {
         guard !busy, thread.address != current else { return }
-        let route: Route = thread.agent.hasTranscript ? .conversation(thread.address) : .terminal(thread.address)
+        let route: Route = thread.agent.opensAsConversation ? .conversation(thread.address) : .terminal(thread.address)
         guard width != .regular else { return scene.open(route) }
         var transaction = Transaction()
         transaction.disablesAnimations = true
